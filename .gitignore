@@ -1,0 +1,11 @@
+# Caches and build files
+__pycache__
+.pyc
+.idea
+*.egg-info
+.eggs
+
+# Local environment
+.env
+/tmp
+/logs

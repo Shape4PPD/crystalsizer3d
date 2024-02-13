@@ -1,0 +1,37 @@
+from abc import ABC, abstractmethod
+from argparse import ArgumentParser, Namespace, _ArgumentGroup
+from typing import Union
+
+from crystalsizer3d.util.utils import hash_data, to_dict
+
+
+class BaseArgs(ABC):
+    @classmethod
+    @abstractmethod
+    def add_args(cls, parser: ArgumentParser) -> _ArgumentGroup:
+        """
+        Add arguments to a command parser.
+        """
+        pass
+
+    @classmethod
+    def from_args(cls, args: Union[Namespace, dict]) -> 'BaseArgs':
+        """
+        Create a BaseArgs instance from command-line arguments.
+        """
+        if type(args) == dict:
+            return cls(**args)
+        elif type(args) == Namespace:
+            return cls(**vars(args))
+
+    def to_dict(self) -> dict:
+        """
+        Convert the class to a dictionary.
+        """
+        return to_dict(self)
+
+    def hash(self) -> str:
+        """
+        Get a hash of the class arguments.
+        """
+        return hash_data(self.to_dict())

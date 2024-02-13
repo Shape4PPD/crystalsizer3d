@@ -1,0 +1,24 @@
+name: crystalsizer3d
+
+channels:
+  - conda-forge
+  - pytorch
+  - https://conda.ccdc.cam.ac.uk
+
+dependencies:
+  - python = 3.9
+  - matplotlib = 3.8
+  - numpy = 1.26
+  - pillow = 9.5
+  - python-dotenv = 1.0
+  - pytorch = 2.2
+  - pyyaml = 6.0
+  - tensorboard = 2.15
+  - timm = 0.9
+  - torchvision = 0.17
+  - trimesh = 4.1
+  - pip
+  - pip:
+    - csd-python-api = 3.0
+    - gigagan-pytorch = 0.2
+    - parti-pytorch = 0.2
