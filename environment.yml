@@ -21,4 +21,5 @@ dependencies:
   - pip:
     - csd-python-api = 3.0
     - gigagan-pytorch = 0.2
+    - mitsuba = 3.5
     - parti-pytorch = 0.2

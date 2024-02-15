@@ -13,6 +13,7 @@ setup(
         'csd-python-api >= 3.0, < 3.1',
         'gigagan-pytorch >= 0.2, < 0.3',
         'matplotlib >= 3.8, < 3.9',
+        'mitsuba >= 3.5, < 3.6',
         'numpy >= 1.26, < 1.27',
         'parti-pytorch >= 0.2, < 0.3',
         'pillow >= 9.5, < 9.6',
@@ -29,5 +30,8 @@ setup(
             'pytest'
         ],
     },
-    python_requires='>=3.9, <3.10'
+    python_requires='>=3.9, <3.10',
+    dependency_links=[
+        'https://pip.ccdc.cam.ac.uk/'
+    ]
 )
