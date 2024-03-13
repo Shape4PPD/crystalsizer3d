@@ -10,9 +10,10 @@ if USE_CUDA:
     mi.set_variant('cuda_ad_rgb')
 
 else:
-    mi.set_variant('scalar_rgb')
+    mi.set_variant('llvm_ad_rgb')
 
 from mitsuba import ScalarTransform4f as T
+
 
 SCENE_PATH = ROOT_PATH / 'tmp' / 'mitsuba' / 'test'
 
@@ -206,8 +207,145 @@ def scripting_a_renderer():
     plt.show()
 
 
+
+def pose_estimation():
+    # direct_projective: projective sampling direct illumination integrator
+    # prb_projective: projective sampling wth Path Replay Backpropagation (PRB) integrator
+
+    integrator = {
+        'type': 'direct_projective',
+    }
+
+    scene = mi.load_dict({
+        'type': 'scene',
+        'integrator': integrator,
+        'sensor': {
+            'type': 'perspective',
+            'to_world': T.look_at(
+                origin=(0, 0, 2),
+                target=(0, 0, 0),
+                up=(0, 1, 0)
+            ),
+            'fov': 60,
+            'film': {
+                'type': 'hdrfilm',
+                'width': 64,
+                'height': 64,
+                'rfilter': {'type': 'gaussian'},
+                'sample_border': True
+            },
+        },
+        'wall': {
+            'type': 'obj',
+            'filename': str(SCENE_PATH / 'meshes'/ 'rectangle.obj'),
+            'to_world': T.translate([0, 0, -2]).scale(2.0),
+            'face_normals': True,
+            'bsdf': {
+                'type': 'diffuse',
+                'reflectance': {'type': 'rgb', 'value': (0.5, 0.5, 0.5)},
+            }
+        },
+        'bunny': {
+            'type': 'ply',
+            'filename': str(SCENE_PATH / 'meshes'/ 'bunny.ply'),
+            'to_world': T.scale(6.5),
+            'bsdf': {
+                'type': 'diffuse',
+                'reflectance': {'type': 'rgb', 'value': (0.3, 0.3, 0.75)},
+            },
+        },
+        'light': {
+            'type': 'obj',
+            'filename': str(SCENE_PATH / 'meshes'/ 'sphere.obj'),
+            'emitter': {
+                'type': 'area',
+                'radiance': {'type': 'rgb', 'value': [1e3, 1e3, 1e3]}
+            },
+            'to_world': T.translate([2.5, 2.5, 7.0]).scale(0.25)
+        }
+    })
+
+    img_ref = mi.render(scene, seed=0, spp=1024)
+    mi.util.convert_to_bitmap(img_ref)
+    params = mi.traverse(scene)
+    initial_vertex_positions = dr.unravel(mi.Point3f, params['bunny.vertex_positions'])
+
+    opt = mi.ad.Adam(lr=0.025)
+    opt['angle'] = mi.Float(0.25)
+    opt['trans'] = mi.Point2f(0.1, -0.25)
+    # opt['angle'] = mi.Float(0.)
+    # opt['trans'] = mi.Point2f(0., 0.)
+
+    def apply_transformation(params, opt):
+        opt['trans'] = dr.clamp(opt['trans'], -0.5, 0.5)
+        opt['angle'] = dr.clamp(opt['angle'], -0.5, 0.5)
+
+        trafo = mi.Transform4f.translate([opt['trans'].x, opt['trans'].y, 0.0]).rotate([0, 1, 0], opt['angle'] * 100.0)
+
+        params['bunny.vertex_positions'] = dr.ravel(trafo @ initial_vertex_positions)
+        params.update()
+
+    apply_transformation(params, opt)
+    img_init = mi.render(scene, seed=0, spp=1024)
+
+
+
+    def plot(img_opt):
+        fig, axes = plt.subplots(1, 2, figsize=(20, 10))
+        for ax, img in zip(axes, [img_ref, img_opt]):
+            ax.imshow(img**(1.0 / 2.2))
+            ax.axis('off')
+        fig.tight_layout()
+        fig.suptitle(f'Iteration {i} Loss: {loss[0]:.4E}')
+        plt.show()
+        plt.close(fig)
+
+    iteration_count = 50
+    spp = 32
+
+    loss_hist = []
+    for i in range(iteration_count):
+        # Apply the mesh transformation
+        apply_transformation(params, opt)
+
+        # Perform a differentiable rendering
+        img = mi.render(scene, params, seed=i, spp=spp)
+
+        # Evaluate the objective function
+        loss = dr.sum(dr.sqr(img - img_ref)) / len(img)
+
+        if i%20 == 0:
+            plot(img)
+
+        # Backpropagate through the rendering process
+        dr.backward(loss)
+
+        # Optimizer: take a gradient descent step
+        opt.step()
+
+        loss_hist.append(loss)
+        print(f"Iteration {i:02d}: error={loss[0]:6f}, angle={opt['angle'][0]:.4f}, "
+              f"trans=[{opt['trans'].x[0]:.4f}, {opt['trans'].y[0]:.4f}]")
+
+    fig, axs = plt.subplots(2, 2, figsize=(10, 10))
+    axs[0][0].plot(loss_hist)
+    axs[0][0].set_xlabel('iteration')
+    axs[0][0].set_ylabel('Loss')
+    axs[0][0].set_title('Parameter error plot')
+    axs[0][1].imshow(mi.util.convert_to_bitmap(img_init))
+    axs[0][1].axis('off')
+    axs[0][1].set_title('Initial Image')
+    axs[1][0].imshow(mi.util.convert_to_bitmap(mi.render(scene, spp=1024)))
+    axs[1][0].axis('off')
+    axs[1][0].set_title('Optimized image')
+    axs[1][1].imshow(mi.util.convert_to_bitmap(img_ref))
+    axs[1][1].axis('off')
+    axs[1][1].set_title('Reference Image')
+    plt.show()
+
 if __name__ == '__main__':
-    quickstart()
-    editing_a_scene()
-    multi_view_rendering()
-    scripting_a_renderer()
+    # quickstart()
+    # editing_a_scene()
+    # multi_view_rendering()
+    # scripting_a_renderer()
+    pose_estimation()

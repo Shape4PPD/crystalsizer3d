@@ -332,8 +332,8 @@ def _render_batch(
     json_files = list(tmp_dir.glob('*.png.json'))
     json_files = sorted(json_files)
     n_files = len(image_files)
-    assert len(
-        json_files) == n_files, f'Batch {batch_idx}: Number of images and json files do not match! ({len(image_files)} vs {len(json_files)})'
+    assert len(json_files) == n_files, \
+        f'Batch {batch_idx}: Number of images and json files do not match! ({len(image_files)} vs {len(json_files)})'
     for i, (img, j) in enumerate(zip(image_files, json_files)):
         img.rename(images_dir / f'{img_start_idx + i:010d}.png')  # Move images into the images directory
         j.rename(tmp_dir / f'{img_start_idx + i:010d}.png.json2')
@@ -369,6 +369,16 @@ def _render_batch(
     # Write the combined segmentations and parameters to json files
     append_json(tmp_dir.parent / f'segmentations_{batch_idx:010d}.json', segmentations)
     append_json(tmp_dir.parent / f'params_{batch_idx:010d}.json', params)
+
+    # Move the blender files
+    blend_files = list(tmp_dir.glob('*.blend'))
+    if len(blend_files):
+        blend_dir = images_dir.parent / 'blender'
+        assert blend_dir.exists(), f'Blender files dir does not exist! ({blend_dir})'
+        blend_files = sorted(blend_files)
+        assert len(blend_files) == n_files
+        for i, ble in enumerate(blend_files):
+            ble.rename(blend_dir / f'{img_start_idx + i:010d}.blend')
 
     # Clean up
     shutil.rmtree(tmp_dir)

@@ -7,7 +7,9 @@ channels:
 
 dependencies:
   - python = 3.9
+  - ffmpeg-python = 0.2
   - matplotlib = 3.8
+  - mayavi = 4.8
   - numpy = 1.26
   - pillow = 9.5
   - python-dotenv = 1.0
@@ -20,6 +22,8 @@ dependencies:
   - pip
   - pip:
     - csd-python-api = 3.0
+    - cholespy = 1.0
     - gigagan-pytorch = 0.2
     - mitsuba = 3.5
     - parti-pytorch = 0.2
+    - pytorch-minimize = 0.0.2
