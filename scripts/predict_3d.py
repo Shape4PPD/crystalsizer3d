@@ -25,7 +25,8 @@ from trimesh import Trimesh
 
 from crystalsizer3d import LOGS_PATH, START_TIMESTAMP, USE_CUDA, logger
 from crystalsizer3d.args.base_args import BaseArgs
-from crystalsizer3d.args.dataset_training_args import PREANGLES_MODE_SINCOS
+from crystalsizer3d.args.dataset_training_args import PREANGLES_MODE_AXISANGLE, PREANGLES_MODE_QUATERNION, \
+    PREANGLES_MODE_SINCOS
 from crystalsizer3d.crystal_renderer import render_from_parameters
 from crystalsizer3d.nn.manager import CCDC_AVAILABLE, Manager
 from crystalsizer3d.util.convergence_detector import ConvergenceDetector
@@ -323,8 +324,11 @@ def _plot_transformation(
     xlabels = manager.ds.labels_transformation.copy()
     if manager.dataset_args.preangles_mode == PREANGLES_MODE_SINCOS:
         xlabels += manager.ds.labels_transformation_sincos
-    else:
+    elif manager.dataset_args.preangles_mode == PREANGLES_MODE_QUATERNION:
         xlabels += manager.ds.labels_transformation_quaternion
+    else:
+        assert manager.dataset_args.preangles_mode == PREANGLES_MODE_AXISANGLE
+        xlabels += manager.ds.labels_transformation_axisangle
     ax.set_xticklabels(xlabels)
     if 'transformation' not in share_ax:
         # ax_.legend()
@@ -380,8 +384,11 @@ def _plot_light(
     xlabels = manager.ds.labels_light.copy()
     if manager.dataset_args.preangles_mode == PREANGLES_MODE_SINCOS:
         xlabels += manager.ds.labels_light_sincos
-    else:
+    elif manager.dataset_args.preangles_mode == PREANGLES_MODE_QUATERNION:
         xlabels += manager.ds.labels_light_quaternion
+    else:
+        assert manager.dataset_args.preangles_mode == PREANGLES_MODE_AXISANGLE
+        xlabels += manager.ds.labels_light_axisangle
     ax.set_xticklabels(xlabels)
     if 'light' not in share_ax:
         # ax_.legend()

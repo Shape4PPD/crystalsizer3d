@@ -15,7 +15,7 @@ from trimesh import Trimesh
 
 from crystalsizer3d import LOGS_PATH, START_TIMESTAMP, USE_CUDA, logger
 from crystalsizer3d.args.base_args import BaseArgs
-from crystalsizer3d.args.dataset_training_args import PREANGLES_MODE_QUATERNION, PREANGLES_MODE_SINCOS
+from crystalsizer3d.args.dataset_training_args import PREANGLES_MODE_AXISANGLE, PREANGLES_MODE_QUATERNION, PREANGLES_MODE_SINCOS
 from crystalsizer3d.nn.manager import CCDC_AVAILABLE, Manager
 from crystalsizer3d.util.utils import equal_aspect_ratio, normalise, print_args, str2bool, to_dict, to_numpy
 
@@ -221,8 +221,11 @@ def _plot_transformation(
     xlabels = manager.ds.labels_transformation.copy()
     if manager.dataset_args.preangles_mode == PREANGLES_MODE_SINCOS:
         xlabels += manager.ds.labels_transformation_sincos
-    else:
+    elif manager.dataset_args.preangles_mode == PREANGLES_MODE_QUATERNION:
         xlabels += manager.ds.labels_transformation_quaternion
+    else:
+        assert manager.dataset_args.preangles_mode == PREANGLES_MODE_AXISANGLE
+        xlabels += manager.ds.labels_transformation_axisangle
     ax.set_xticklabels(xlabels)
     if 'transformation' not in share_ax:
         # ax_.legend()
@@ -278,8 +281,11 @@ def _plot_light(
     xlabels = manager.ds.labels_light.copy()
     if manager.dataset_args.preangles_mode == PREANGLES_MODE_SINCOS:
         xlabels += manager.ds.labels_light_sincos
-    else:
+    elif manager.dataset_args.preangles_mode == PREANGLES_MODE_QUATERNION:
         xlabels += manager.ds.labels_light_quaternion
+    else:
+        assert manager.dataset_args.preangles_mode == PREANGLES_MODE_AXISANGLE
+        xlabels += manager.ds.labels_light_axisangle
     ax.set_xticklabels(xlabels)
     if 'light' not in share_ax:
         # ax_.legend()
@@ -436,15 +442,23 @@ def _make_parameter_vector(
         idx += 1
 
         # Rotation
-        assert ds_args.preangles_mode == PREANGLES_MODE_QUATERNION, 'Only quaternion pre-angles are supported.'
-        q = Y[idx:idx + 4]
-        for i, k in enumerate(ds.labels_transformation_quaternion):
-            if k in item:
-                if k != 'rw':
-                    assert -1 <= item[k] <= 1, f'Rotation parameter {k} must be in [-1, 1]. {item[k]} received.'
-                q[i] = item[k]
-        Y[idx:idx + 4] = normalise(q)
-        idx += 4
+        assert ds_args.preangles_mode in [PREANGLES_MODE_QUATERNION, PREANGLES_MODE_AXISANGLE], \
+            'Only quaternion or axis-angle pre-angles are supported.'
+        if ds_args.preangles_mode == PREANGLES_MODE_QUATERNION:
+            q = Y[idx:idx + 4]
+            for i, k in enumerate(ds.labels_transformation_quaternion):
+                if k in item:
+                    if k != 'rw':
+                        assert -1 <= item[k] <= 1, f'Rotation parameter {k} must be in [-1, 1]. {item[k]} received.'
+                    q[i] = item[k]
+            Y[idx:idx + 4] = normalise(q)
+            idx += 4
+        else:
+            v = Y[idx:idx + 3]
+            for i, k in enumerate(ds.labels_transformation_axisangle):
+                v[i] = item[k]
+            Y[idx:idx + 3] = v
+            idx += 3
 
     # Material parameters are z-score standardised
     if ds_args.train_material:
@@ -472,15 +486,24 @@ def _make_parameter_vector(
         idx += 1
 
         # Rotation
-        assert ds_args.preangles_mode == PREANGLES_MODE_QUATERNION, 'Only quaternion pre-angles are supported.'
-        q = Y[idx:idx + 4]
-        for i, k in enumerate(ds.labels_light_quaternion):
-            if k in item:
-                if k != 'lrw':
-                    assert -1 <= item[k] <= 1, f'Light rotation parameter {k} must be in [-1, 1]. {item[k]} received.'
-                q[i] = item[k]
-        Y[idx:idx + 4] = normalise(q)
-        idx += 4
+        assert ds_args.preangles_mode in [PREANGLES_MODE_QUATERNION, PREANGLES_MODE_AXISANGLE], \
+            'Only quaternion or axis-angle pre-angles are supported.'
+        if ds_args.preangles_mode == PREANGLES_MODE_QUATERNION:
+            q = Y[idx:idx + 4]
+            for i, k in enumerate(ds.labels_light_quaternion):
+                if k in item:
+                    if k != 'lrw':
+                        assert -1 <= item[k] <= 1, \
+                            f'Light rotation parameter {k} must be in [-1, 1]. {item[k]} received.'
+                    q[i] = item[k]
+            Y[idx:idx + 4] = normalise(q)
+            idx += 4
+        else:
+            v = Y[idx:idx + 3]
+            for i, k in enumerate(ds.labels_transformation_axisangle):
+                v[i] = item[k]
+            Y[idx:idx + 3] = v
+            idx += 3
 
     return Y
 

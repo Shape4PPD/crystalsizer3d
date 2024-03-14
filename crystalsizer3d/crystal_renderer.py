@@ -2,7 +2,7 @@ import json
 import math
 import os
 import shutil
-from multiprocessing import Pool
+from multiprocessing import Lock, Manager, Pool
 from pathlib import Path
 from typing import Optional, Tuple
 
@@ -18,6 +18,12 @@ from crystalsizer3d.args.renderer_args import RendererArgs
 from crystalsizer3d.util.utils import SEED
 
 
+class RenderError(RuntimeError):
+    def __init__(self, message: str, idx: int = None):
+        super().__init__(message)
+        self.idx = idx
+
+
 def append_json(file_path: Path, new_data: dict):
     if not file_path.exists():
         data = {}
@@ -30,6 +36,11 @@ def append_json(file_path: Path, new_data: dict):
     data.update(new_data)
     with open(file_path, 'w') as f:
         json.dump(data, f, indent=4)
+
+
+def append_json_mp(file_path: Path, new_data: dict, lock: Lock):
+    with lock:
+        append_json(file_path, new_data)
 
 
 def blender_render(
@@ -85,7 +96,7 @@ def blender_render(
                     if json_file.exists():
                         json_file.unlink()
                 return blender_render(settings, attempts=attempts - 1, seed=seed, quiet=quiet)
-            raise RuntimeError('Blender failed to render all images.')
+            raise RenderError('Blender failed to render all images.', idx=i)
 
 
 def render_from_parameters(
@@ -295,10 +306,11 @@ def _render_batch(
         batch_idx: int,
         img_start_idx: int,
         obj_path: Path,
-        n_objs: int,
+        n_imgs: int,
         settings_path: Path,
         tmp_dir: Path,
         images_dir: Path,
+        lock: Lock,
         quiet_render: bool = False
 ):
     """
@@ -316,14 +328,28 @@ def _render_batch(
     settings = CrystalWellSettings()
     settings.from_json(settings_path)
     settings.path = settings_path
-    settings.settings_dict['number_images'] = n_objs
+    settings.settings_dict['number_images'] = n_imgs
     settings.settings_dict['crystal_import_path'] = str(obj_path.absolute())
     settings.settings_dict['output_path'] = str(tmp_dir.absolute())
     settings.write_json()
 
     # Render
-    logger.info(f'Batch {batch_idx}: Rendering {n_objs} crystals from {obj_path} to {tmp_dir}.')
-    blender_render(settings, attempts=3, quiet=quiet_render, seed=SEED + batch_idx)
+    logger.info(f'Batch {batch_idx}: Rendering {n_imgs} crystals from {obj_path} to {tmp_dir}.')
+    try:
+        blender_render(settings, attempts=1, quiet=quiet_render, seed=SEED + batch_idx)
+    except RenderError as e:
+        logger.warning(f'Rendering failed! {e}')
+        logger.info(f'Adding idx={str(img_start_idx + e.idx)} details to {str(tmp_dir.parent / "errored.json")}')
+        append_json_mp(
+            tmp_dir.parent.parent / 'errored.json',
+            {img_start_idx + e.idx: {
+                'batch_idx': batch_idx,
+                'obj_idx': e.idx,
+                'obj_file': str(obj_path.name),
+                'img_file': f'{img_start_idx + e.idx:010d}.png'
+            }}, lock)
+        logger.info(f'Added idx={str(img_start_idx + e.idx)} details to {str(tmp_dir.parent / "errored.json")}')
+        raise e
 
     # Rename the images and json files to start at the correct index
     logger.info(f'Batch {batch_idx}: Collating results.')
@@ -484,7 +510,7 @@ class CrystalRenderer:
             # Update the settings file with the paths
             self.settings.settings_dict['crystal_import_path'] = str(obj_path.absolute())
             self.settings.write_json()
-            self._render_batch(output_dir, start_idx=start_idx, seed=SEED + i)
+            self._render_batch(output_dir, start_idx=start_idx, batch_idx=batch_idx, seed=SEED + i)
 
         # Remove the batch output directory
         output_dir.rmdir()
@@ -507,7 +533,9 @@ class CrystalRenderer:
 
         # Render the batches in parallel, each process collates its own results and parameters
         logger.info(f'Rendering crystals in parallel, worker pool size: {self.n_workers}')
-        shared_args = (self.settings.path, tmp_dir, self.images_dir, True)
+        manager = Manager()
+        lock = manager.Lock()
+        shared_args = (self.settings.path, tmp_dir, self.images_dir, lock, True)
         args = []
         for i, obj_path in enumerate(obj_paths):
             batch_idx = int(obj_path.stem[-5:])
@@ -534,12 +562,24 @@ class CrystalRenderer:
         # Remove the tmp output directory
         shutil.rmtree(tmp_dir)
 
-    def _render_batch(self, output_dir: Path, start_idx: int = 0, seed: Optional[int] = None):
+    def _render_batch(self, output_dir: Path, start_idx: int = 0, batch_idx: int = 0, seed: Optional[int] = None):
         """
         Render a batch of crystals to images.
         """
         assert not any(output_dir.iterdir()), f'Output dir not empty before batch render! ({output_dir})'
-        blender_render(self.settings, attempts=3, quiet=self.quiet_render, seed=seed)
+
+        try:
+            blender_render(self.settings, attempts=1, quiet=self.quiet_render, seed=seed)
+        except RenderError as e:
+            append_json(
+                output_dir.parent / 'errored.json',
+                {start_idx + e.idx: {
+                    'batch_idx': batch_idx,
+                    'obj_idx': e.idx,
+                    'obj_file': str(Path(self.settings.settings_dict['crystal_import_path']).name),
+                    'img_file': f'{start_idx + e.idx:010d}.png'
+                }})
+            raise e
 
         # Rename the images and json files to start at the correct index
         logger.info('Renaming images and json files.')

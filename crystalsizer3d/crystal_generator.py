@@ -102,7 +102,7 @@ class CrystalGenerator:
         # Get the distances of the symmetric faces
         self.distances = self.get_distances(self.og_morph)
 
-    def generate_crystals(self, num: int = 1, max_attempts: int = 100) -> List[Tuple[np.ndarray, np.ndarray, Trimesh]]:
+    def generate_crystals(self, num: int = 1, max_attempts: int = 10000) -> List[Tuple[np.ndarray, np.ndarray, Trimesh]]:
         """
         Generate a list of randomised crystals.
         """

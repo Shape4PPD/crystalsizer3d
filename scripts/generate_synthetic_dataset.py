@@ -10,8 +10,8 @@ from typing import Tuple
 import numpy as np
 import yaml
 from PIL import Image
-from trimesh import Scene
-from trimesh.exchange.obj import export_obj
+from trimesh import Scene, Trimesh
+from trimesh.exchange.obj import export_obj, load_obj
 
 from crystalsizer3d import LOGS_PATH, START_TIMESTAMP, logger
 from crystalsizer3d.args.dataset_synthetic_args import DatasetSyntheticArgs
@@ -383,7 +383,7 @@ def main():
         obj_dir=obj_dir,
         dataset_args=dataset_args,
         renderer_args=renderer_args,
-        quiet_render=False
+        quiet_render=True
     )
     renderer.render()
 
@@ -426,7 +426,7 @@ def resume(
         obj_dir=obj_dir,
         dataset_args=dataset_args,
         renderer_args=renderer_args,
-        quiet_render=False
+        quiet_render=True
     )
 
     # If it was originally made in parallel, make sure the fix is in parallel too
@@ -439,6 +439,107 @@ def resume(
             'Segmentations file already exists! Try fixing in serial mode.'
         assert not (save_dir / 'rendering_parameters.json').exists(), \
             'Rendering parameters file already exists! Try fixing in serial mode.'
+
+    # Check for any errored renders as we need to create new crystals shapes for these
+    errored_objs = []
+    if (save_dir / 'errored.json').exists():
+        with open(save_dir / 'errored.json', 'r') as f:
+            errored = json.load(f)
+        logger.info(f'Found {len(errored)} failed renders, rebuilding crystals '
+                    f'and updating parameters for these entries.')
+
+        # Generate some replacement crystals
+        from scr.crystal_generator import CrystalGenerator
+        generator = CrystalGenerator(
+            crystal_id=dataset_args.crystal_id,
+            ratio_means=dataset_args.ratio_means,
+            ratio_stds=dataset_args.ratio_stds,
+            zingg_bbox=dataset_args.zingg_bbox,
+            constraints=dataset_args.distance_constraints,
+        )
+        crystals = generator.generate_crystals(num=len(errored))
+        hkls = [''.join(str(i) for i in k) for k in generator.distances.keys()]
+
+        # Load the parameters
+        param_path = save_dir / 'parameters.csv'
+        param_bkup_path = save_dir / f'parameters.bkup_{START_TIMESTAMP}.csv'
+        shutil.copy(param_path, param_bkup_path)
+        logger.info(f'Backed up parameters to {param_bkup_path}.')
+        with open(param_path, mode='r') as file:
+            reader = csv.DictReader(file)
+            rows = list(reader)
+
+        # Update the errored entries
+        updated_idxs = []
+        for i, (idx, dets) in enumerate(errored.items()):
+            errored_objs.append(obj_dir / dets['obj_file'])
+            rel_rates, zingg_vals, mesh = crystals[i]
+
+            # Update the parameters
+            row_idx = next((ri for ri, row in enumerate(rows) if row['idx'] == str(idx)), None)
+            if row_idx is None:
+                logger.warning(f'Failed to find index {idx} in parameters file. This will need fixing...')
+                continue
+            rows[row_idx]['si'] = zingg_vals[0]
+            rows[row_idx]['il'] = zingg_vals[1]
+            for j, hkl in enumerate(hkls):
+                rows[row_idx][f'd{j}_{hkl}'] = rel_rates[j]
+
+            # Load the batch of meshes
+            obj_path = obj_dir / dets['obj_file']
+            with open(obj_path, 'r') as f:
+                scene = load_obj(
+                    f,
+                    group_material=False,
+                    skip_materials=True,
+                    maintain_order=True,
+                )
+
+            # Rebuild the scene with the new mesh
+            meshes = []
+            keys = sorted(list(scene['geometry'].keys()))
+            for k in keys:
+                if k == f'{dataset_args.crystal_id}_{int(idx):06d}':
+                    m = mesh
+                else:
+                    mesh_params = scene['geometry'][k]
+                    m = Trimesh(vertices=mesh_params['vertices'], faces=mesh_params['faces'], process=True,
+                                validate=True)
+                m.metadata['name'] = k
+                meshes.append(m)
+            scene = Scene()
+            scene.add_geometry(meshes)
+
+            # Update the obj file
+            obj_bkup_path = obj_dir / (dets['obj_file'] + f'.bkup_{START_TIMESTAMP}.obj')
+            shutil.copy(obj_path, obj_bkup_path)
+            logger.info(f'Backed up obj file to {obj_bkup_path}.')
+            with open(obj_path, 'w') as f:
+                f.write(export_obj(
+                    scene,
+                    header=None,
+                    include_normals=True,
+                    include_color=False
+                ))
+            updated_idxs.append(idx)
+
+        # Save updated parameters back to file
+        logger.info(f'Saving updated crystal parameters to {param_path}.')
+        with open(param_path, 'w') as f:
+            writer = csv.DictWriter(f, fieldnames=reader.fieldnames)
+            writer.writeheader()
+            writer.writerows(rows)
+
+        # Delete errored idxs
+        for idx in updated_idxs:
+            del errored[idx]
+        if len(errored) == 0:
+            logger.info('All errored entries have been re-generated.')
+            (save_dir / 'errored.json').unlink()
+        else:
+            with open(save_dir / 'errored.json', 'w') as f:
+                json.dump(errored, f)
+            raise RuntimeError('Some errored entries could not be fixed.')
 
     # Check each obj file to see if we have all images and parameters present for it
     logger.info('Checking for missing images and parameters.')
@@ -467,6 +568,9 @@ def resume(
         batch_segmentations = tmp_dir / f'segmentations_{i:010d}.json'
         if not batch_params.exists() or not batch_segmentations.exists():
             bad_obj_files.append(obj_path)
+    for errored_obj_file in errored_objs:
+        assert errored_obj_file in bad_obj_files, \
+            f'Errored obj file {errored_obj_file} not found in bad obj files!'
 
     # If all images are present, nothing to do
     if len(bad_obj_files) == 0:
@@ -504,5 +608,5 @@ if __name__ == '__main__':
 
     # -- Use to fix a broken run --
     # resume(
-    #     save_dir=LOGS_PATH / '20231109_1109',
+    #     save_dir=LOGS_PATH / '20240220_1011',
     # )

@@ -14,6 +14,7 @@ import torch.nn.functional as F
 from matplotlib import pyplot as plt
 from matplotlib.figure import Figure
 from matplotlib.gridspec import GridSpec
+from scipy.spatial.transform import Rotation
 from timm.optim import create_optimizer_v2
 from timm.scheduler import create_scheduler_v2
 from timm.scheduler.scheduler import Scheduler
@@ -24,14 +25,14 @@ from torch.utils.data import DataLoader
 from torch.utils.tensorboard import SummaryWriter
 
 from crystalsizer3d import LOGS_PATH, START_TIMESTAMP, logger
-from crystalsizer3d.args.dataset_training_args import DatasetTrainingArgs, PREANGLES_MODE_QUATERNION, \
+from crystalsizer3d.crystal_renderer import render_from_parameters
+from crystalsizer3d.args.dataset_training_args import DatasetTrainingArgs, PREANGLES_MODE_AXISANGLE, PREANGLES_MODE_QUATERNION, \
     PREANGLES_MODE_SINCOS
 from crystalsizer3d.args.generator_args import GeneratorArgs
 from crystalsizer3d.args.network_args import NetworkArgs
 from crystalsizer3d.args.optimiser_args import OptimiserArgs
 from crystalsizer3d.args.runtime_args import RuntimeArgs
 from crystalsizer3d.args.transcoder_args import TranscoderArgs
-from crystalsizer3d.crystal_renderer import render_from_parameters
 from crystalsizer3d.nn.checkpoint import Checkpoint
 from crystalsizer3d.nn.data_loader import get_data_loader
 from crystalsizer3d.nn.dataset import Dataset
@@ -51,7 +52,7 @@ from crystalsizer3d.nn.models.transcoder_vae import TranscoderVAE
 from crystalsizer3d.nn.models.vit_pretrained import ViTPretrainedNet
 from crystalsizer3d.nn.models.vitvae import ViTVAE
 from crystalsizer3d.util.ema import EMA
-from crystalsizer3d.util.utils import equal_aspect_ratio, is_bad, to_numpy
+from crystalsizer3d.util.utils import axisangle_to_matrix, equal_aspect_ratio, geodesic_distance, is_bad, to_numpy
 
 try:
     from ccdc.morphology import VisualHabitMorphology
@@ -1072,8 +1073,11 @@ class Manager:
 
         # Predict the parameters and calculate losses
         Y_pred = self.predict(X_target)
-        outputs = {'Y_pred': Y_pred}
-        loss, metrics = self.calculate_predictor_losses(Y_pred, Y_target, X_target_og)
+        loss, metrics, X_pred2 = self.calculate_predictor_losses(Y_pred, Y_target, X_target_og)
+        outputs = {
+            'Y_pred': Y_pred,
+            'X_pred2': X_pred2
+        }
 
         # Update the EMA of the predictor loss
         self.p_loss_ema(loss.item())
@@ -1085,12 +1089,13 @@ class Manager:
             outputs['Z_pred'] = Z.clone().detach()
             X_pred = self.generator(Z)
             outputs['X_pred'] = X_pred
-            loss_g, metrics_g = self.calculate_generator_losses(X_pred, X_target, Y_target,
-                                                                include_teacher_loss=False,
-                                                                include_transcoder_loss=False)
+            loss_g, metrics_g, Y_pred2 = self.calculate_generator_losses(X_pred, X_target, Y_target,
+                                                                         include_teacher_loss=False,
+                                                                         include_transcoder_loss=False)
             metrics.update(metrics_g)
             metrics['loss_gen'] = loss_g.item()
             self.g_loss_ema(metrics['losses/generator'])
+            outputs['Y_pred2'] = Y_pred2
 
             # Replace loss with the generator loss plus the latents consistency loss
             l_z = self._calculate_com_loss(Z, Y_target)
@@ -1117,13 +1122,14 @@ class Manager:
 
         # Generate an image from the parameters and calculate losses
         X_pred = self.generate(Y_target)
-        loss, metrics = self.calculate_generator_losses(X_pred, X_target, Y_target)
+        loss, metrics, Y_pred2 = self.calculate_generator_losses(X_pred, X_target, Y_target)
 
         # Update the EMA of the generator loss
         self.g_loss_ema(metrics['losses/generator'])
 
         outputs = {
             'X_pred': X_pred,
+            'Y_pred2': Y_pred2
         }
 
         return outputs, loss, metrics
@@ -1322,6 +1328,10 @@ class Manager:
                 # Apply the switches
                 ignore_distances = Y_switches < .5
                 Y_dists = torch.where(ignore_distances, torch.zeros_like(Y_dists), Y_dists)
+            elif (self.ds.dataset_args.distance_constraints is not None
+                  and len(self.ds.dataset_args.distance_constraints) > 0):
+                # No need to normalise if there are constraints, but no negative predictions will be present
+                Y_dists = torch.clamp(Y_dists, min=0)
             else:
                 # Normalise the predictions by the maximum value per item
                 Ypd_max = Y_dists.amax(dim=1, keepdim=True).abs()
@@ -1336,8 +1346,11 @@ class Manager:
             n_params = len(self.ds.labels_transformation)
             if self.dataset_args.preangles_mode == PREANGLES_MODE_SINCOS:
                 n_params += len(self.ds.labels_transformation_sincos)
-            else:
+            elif self.dataset_args.preangles_mode == PREANGLES_MODE_QUATERNION:
                 n_params += len(self.ds.labels_transformation_quaternion)
+            else:
+                assert self.dataset_args.preangles_mode == PREANGLES_MODE_AXISANGLE
+                n_params += len(self.ds.labels_transformation_axisangle)
             output['transformation'] = Y[:, idx:idx + n_params]
             idx += n_params
 
@@ -1376,12 +1389,13 @@ class Manager:
             Y_pred: Dict[str, torch.Tensor],
             Y_target: Dict[str, torch.Tensor],
             X_target: Optional[torch.Tensor]
-    ) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
+    ) -> Tuple[torch.Tensor, Dict[str, torch.Tensor], Optional[torch.Tensor]]:
         """
         Calculate losses.
         """
         stats = {}
         losses = []
+        X_pred2 = None
 
         if self.dataset_args.train_zingg:
             loss_z, stats_z = self._calculate_zingg_losses(Y_pred['zingg'], Y_target['zingg'])
@@ -1418,7 +1432,7 @@ class Manager:
 
         # Only include teacher loss if the generator loss is below a threshold
         if self.dataset_args.train_generator:
-            loss_t, stats_t = self._calculate_net_teacher_losses(Y_pred, X_target)
+            loss_t, stats_t, X_pred2 = self._calculate_net_teacher_losses(Y_pred, X_target)
             if self._can_teach('generator'):
                 losses.append(self.optimiser_args.w_net_teacher * loss_t)
             stats.update(stats_t)
@@ -1432,7 +1446,7 @@ class Manager:
         loss = torch.stack(losses).sum()
         assert not is_bad(loss), 'Bad loss!'
 
-        return loss, stats
+        return loss, stats, X_pred2
 
     def _calculate_zingg_losses(
             self,
@@ -1526,8 +1540,7 @@ class Manager:
             v_norms = preangles_pred.norm(dim=-1, keepdim=True)
             preangles_pred = preangles_pred / v_norms
             rotation_loss = ((preangles_pred - preangles_target)**2).mean()
-        else:
-            assert self.dataset_args.preangles_mode == PREANGLES_MODE_QUATERNION
+        elif self.dataset_args.preangles_mode == PREANGLES_MODE_QUATERNION:
             q_pred = t_pred[:, 4:]
             v_norms = q_pred.norm(dim=-1, keepdim=True)
             q_pred = q_pred / v_norms
@@ -1552,17 +1565,43 @@ class Manager:
             else:
                 rotation_loss = ((q_pred - t_target[:, 4:])**2).mean()
 
-        preangles_loss = ((v_norms - 1)**2).mean()
+        else:
+            assert self.dataset_args.preangles_mode == PREANGLES_MODE_AXISANGLE
+            R_pred = axisangle_to_matrix(t_pred[:, 4:])
 
-        loss = location_loss + scale_loss + rotation_loss + preangles_loss
+            # Use the sym_rotations, could be different number for each batch item so have to loop over
+            if sym_rotations is not None:
+                bs = len(t_pred)
+                rotation_losses = torch.zeros(bs, device=self.device)
+                self.sym_group_idxs = []
+                for i in range(bs):
+                    sym_rotations_i = sym_rotations[i]
+                    R_pred_i = R_pred[i][None, ...].expand(len(sym_rotations[i]), -1, -1)
+                    angular_differences = geodesic_distance(R_pred_i, sym_rotations_i)
+
+                    # Take the smallest angular difference to any of the symmetric rotations
+                    min_idx = int(torch.argmin(angular_differences))
+                    self.sym_group_idxs.append(min_idx)
+                    rotation_losses[i] = angular_differences[min_idx]
+                rotation_loss = rotation_losses.mean()
+            else:
+                R_target = axisangle_to_matrix(t_target[:, 4:])
+                rotation_loss = geodesic_distance(R_pred, R_target).mean()
+
+        loss = location_loss + scale_loss + rotation_loss
+        if self.dataset_args.preangles_mode != PREANGLES_MODE_AXISANGLE:
+            preangles_loss = ((v_norms - 1)**2).mean()
+            loss = loss + preangles_loss
 
         stats = {
             'transformation/l_location': location_loss.item(),
             'transformation/l_scale': scale_loss.item(),
             'transformation/l_rotation': rotation_loss.item(),
-            'transformation/l_preangles': preangles_loss.item(),
             'losses/transformation': loss.item()
         }
+
+        if self.dataset_args.preangles_mode != PREANGLES_MODE_AXISANGLE:
+            stats['transformation/l_preangles'] = preangles_loss.item()
 
         return loss, stats
 
@@ -1625,24 +1664,32 @@ class Manager:
                 v_norms = preangles_pred.norm(dim=-1, keepdim=True)
                 preangles_pred = preangles_pred / v_norms
                 rotation_loss = ((preangles_pred - preangles_target)**2).mean()
-            else:
-                assert self.dataset_args.preangles_mode == PREANGLES_MODE_QUATERNION
+            elif self.ds_args.preangles_mode == PREANGLES_MODE_QUATERNION:
                 q_pred = l_pred[:, 4:]
                 q_target = l_target[:, 4:]
                 v_norms = q_pred.norm(dim=-1, keepdim=True)
                 q_pred = q_pred / v_norms
                 rotation_loss = ((q_pred - q_target)**2).mean()
-            preangles_loss = ((v_norms - 1)**2).mean()
+            else:
+                assert self.dataset_args.preangles_mode == PREANGLES_MODE_AXISANGLE
+                R_pred = axisangle_to_matrix(l_pred[:, 4:])
+                R_target = axisangle_to_matrix(l_target[:, 4:])
+                rotation_loss = geodesic_distance(R_pred, R_target).mean()
 
-            loss = location_loss + energy_loss + rotation_loss + preangles_loss
+            loss = location_loss + energy_loss + rotation_loss
+            if self.dataset_args.preangles_mode != PREANGLES_MODE_AXISANGLE:
+                preangles_loss = ((v_norms - 1)**2).mean()
+                loss = loss + preangles_loss
 
             stats = {
                 'light/l_location': location_loss.item(),
                 'light/l_energy': energy_loss.item(),
                 'light/l_rotation': rotation_loss.item(),
-                'light/l_preangles': preangles_loss.item(),
                 'losses/light': loss.item()
             }
+
+            if self.dataset_args.preangles_mode != PREANGLES_MODE_AXISANGLE:
+                stats['light/l_preangles'] = preangles_loss.item()
 
         return loss, stats
 
@@ -1650,7 +1697,7 @@ class Manager:
             self,
             Y_pred: Dict[str, torch.Tensor],
             X_target: torch.Tensor,
-    ):
+    ) -> Tuple[torch.Tensor, Dict[str, float], torch.Tensor]:
         """
         Calculate the teacher losses using the generator network as the teacher.
         """
@@ -1662,17 +1709,12 @@ class Manager:
         X_pred2 = self.generator(Z)
 
         # Calculate how closely the same images come back out
-        if self.generator_args.gen_image_loss == 'l1':
-            loss = (X_target - X_pred2).abs().mean()
-        elif self.generator_args.gen_image_loss == 'l2':
-            loss = ((X_target - X_pred2)**2).mean()
-        else:
-            raise NotImplementedError()
+        loss, _ = self._calculate_generator_losses(X_pred2, X_target)
         stats = {
             'losses/teacher_net': loss.item()
         }
 
-        return loss, stats
+        return loss, stats, X_pred2.detach().cpu()
 
     def calculate_generator_losses(
             self,
@@ -1682,15 +1724,16 @@ class Manager:
             include_teacher_loss: bool = True,
             include_discriminator_loss: bool = True,
             include_transcoder_loss: bool = True,
-    ) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
+    ) -> Tuple[torch.Tensor, Dict[str, torch.Tensor], Optional[Dict[str, torch.Tensor]]]:
         """
         Calculate losses.
         """
         stats = {}
         losses = []
+        Y_pred2 = None
 
         if not self.dataset_args.train_generator:
-            return torch.tensor(0., device=self.device), stats
+            return torch.tensor(0., device=self.device), stats, Y_pred2
 
         # Main generator loss
         loss_g, stats_g = self._calculate_generator_losses(X_pred, X_target)
@@ -1699,7 +1742,7 @@ class Manager:
 
         # Teacher loss - only include if the prediction loss is below a threshold
         if include_teacher_loss and self.dataset_args.train_predictor:
-            loss_t, stats_t = self._calculate_gen_teacher_losses(X_pred, Y_target)
+            loss_t, stats_t, Y_pred2 = self._calculate_gen_teacher_losses(X_pred, Y_target)
             if self._can_teach('predictor'):
                 losses.append(self.optimiser_args.w_gen_teacher * loss_t)
             stats.update(stats_t)
@@ -1721,7 +1764,7 @@ class Manager:
         loss = torch.stack(losses).sum()
         assert not is_bad(loss), 'Bad loss!'
 
-        return loss, stats
+        return loss, stats, Y_pred2
 
     def _calculate_generator_losses(
             self,
@@ -1747,12 +1790,13 @@ class Manager:
             self,
             X_pred: torch.Tensor,
             Y_target: Dict[str, torch.Tensor],
-    ):
+    ) -> Tuple[torch.Tensor, Dict[str, float], Dict[str, torch.Tensor]]:
         """
         Calculate the teacher losses using the parameter network as the teacher.
         """
         # Run the predicted image through the parameter network to estimate the parameters (or latent vector logits)
         Y_pred2 = self.predictor(X_pred)
+        stats = {}
 
         # Calculate loss in the latent space if using a transcoder
         if self.transcoder_args.use_transcoder:
@@ -1761,17 +1805,18 @@ class Manager:
             loss = ((Z1 - Z2)**2).mean()
         else:
             # Calculate how closely the same parameters come back out
-            loss, _ = self._calculate_parameter_reconstruction_losses(Y_target, Y_pred2, check_sym_rotations=True)
-        stats = {
-            'losses/teacher_gen': loss.item()
-        }
+            loss, r_stats = self._calculate_parameter_reconstruction_losses(Y_target, Y_pred2, check_sym_rotations=True)
+            for k, v in r_stats.items():
+                stats[f'losses/teacher_gen/{k}'] = v
 
-        return loss, stats
+        stats['losses/teacher_gen'] = loss.item()
+
+        return loss, stats, self.prepare_parameter_dict(Y_pred2.detach().cpu())
 
     def _calculate_gen_gan_losses(
             self,
             X_pred: torch.Tensor,
-    ):
+    ) -> Tuple[torch.Tensor, Dict[str, float]]:
         """
         Calculate the GAN losses on the generator.
         """
@@ -1867,8 +1912,9 @@ class Manager:
             return torch.tensor(0., device=self.device), {}
 
         # Reconstruction losses - noisy version
-        l_reconst, stats_reconst = self._calculate_parameter_reconstruction_losses(Y_target, Yr_mu_vec,
-                                                                                   check_sym_rotations=True)
+        l_reconst, stats_reconst = self._calculate_parameter_reconstruction_losses(
+            Y_target, Yr_mu_vec, check_sym_rotations=True
+        )
         self.tc_rec_loss_ema(l_reconst.item())
 
         # Reconstruction losses - clean version (just for debug)
@@ -2010,9 +2056,13 @@ class Manager:
             if self.dataset_args.preangles_mode == PREANGLES_MODE_SINCOS:
                 groups['t/rotation'] = (idx, idx + 6)
                 idx += 6
-            else:
+            elif self.dataset_args.preangles_mode == PREANGLES_MODE_QUATERNION:
                 groups['t/rotation'] = (idx, idx + 4)
                 idx += 4
+            else:
+                assert self.dataset_args.preangles_mode == PREANGLES_MODE_AXISANGLE
+                groups['t/rotation'] = (idx, idx + 3)
+                idx += 3
 
         # All material properties are independent
         if self.dataset_args.train_material:
@@ -2033,9 +2083,13 @@ class Manager:
                 if self.dataset_args.preangles_mode == PREANGLES_MODE_SINCOS:
                     groups['l/rotation'] = (idx, idx + 6)
                     idx += 6
-                else:
+                elif self.dataset_args.preangles_mode == PREANGLES_MODE_QUATERNION:
                     groups['l/rotation'] = (idx, idx + 4)
                     idx += 4
+                else:
+                    assert self.dataset_args.preangles_mode == PREANGLES_MODE_AXISANGLE
+                    groups['l/rotation'] = (idx, idx + 3)
+                    idx += 3
 
         # Process the batches of variations together
         for group_idxs in groups.values():
@@ -2157,13 +2211,15 @@ class Manager:
         Y_pred = outputs['Y_pred']
         if self.dataset_args.train_generator:
             X_pred = outputs['X_pred']
+            X_pred2 = outputs['X_pred2']
+            Y_pred2 = outputs['Y_pred2']
         n_rows = 4 \
                  + int(self.dataset_args.train_zingg) \
                  + int(self.dataset_args.train_distances) \
                  + int(self.dataset_args.train_transformation) \
                  + int(self.dataset_args.train_material and len(self.ds.labels_material_active) > 0) \
                  + int(self.dataset_args.train_light) \
-                 + int(self.dataset_args.train_generator)
+                 + int(self.dataset_args.train_generator) * 2
 
         height_ratios = [1.2, 1.2, 1, 1]  # images and 3d plots
         if self.dataset_args.train_zingg:
@@ -2177,6 +2233,7 @@ class Manager:
         if self.dataset_args.train_light:
             height_ratios.append(0.7)
         if self.dataset_args.train_generator:
+            height_ratios.insert(0, 1.2)
             height_ratios.insert(0, 1.2)
 
         fig = plt.figure(figsize=(n_examples * 2.6, n_rows * 2.4))
@@ -2272,15 +2329,24 @@ class Manager:
             ax_.set_position([ax_pos.x0, ax_pos.y0 + 0.02, ax_pos.width, ax_pos.height - 0.02])
             d_pred = to_numpy(Y_pred['distances'][idx_])
             d_target = to_numpy(Y_target['distances'][idx_])
+            if self.dataset_args.train_generator:
+                d_pred2 = to_numpy(Y_pred2['distances'][idx_])
 
             # Clip predictions to -1 to avoid large negatives skewing the plots
             d_pred = np.clip(d_pred, a_min=-1, a_max=np.inf)
 
             locs = np.arange(len(d_target))
-            bar_width = 0.35
-            offset = bar_width / 2
-            ax_.bar(locs - offset, d_target, bar_width, label='Target')
-            ax_.bar(locs + offset, d_pred, bar_width, label='Predicted')
+            if self.dataset_args.train_generator:
+                bar_width = 0.25
+                offset = bar_width
+                ax_.bar(locs - offset, d_target, bar_width, label='Target')
+                ax_.bar(locs, d_pred, bar_width, label='Predicted')
+                ax_.bar(locs + offset, d_pred2, bar_width, label='Predicted2')
+            else:
+                bar_width = 0.35
+                offset = bar_width / 2
+                ax_.bar(locs - offset, d_target, bar_width, label='Target')
+                ax_.bar(locs + offset, d_pred, bar_width, label='Predicted')
 
             if self.dataset_args.use_distance_switches:
                 s_pred = to_numpy(Y_pred['distance_switches'][idx_])
@@ -2310,28 +2376,45 @@ class Manager:
         def plot_transformation(ax_, idx_):
             t_pred = to_numpy(Y_pred['transformation'][idx_])
             t_target = to_numpy(Y_target['transformation'][idx_])
+            if self.dataset_args.train_generator:
+                t_pred2 = to_numpy(Y_pred2['transformation'][idx_])
 
-            # Adjust the predicted rotation to the best matching symmetry group
-            if self.dataset_args.preangles_mode == PREANGLES_MODE_QUATERNION:
+            # Adjust the target rotation to the best matching symmetry group
+            if self.dataset_args.preangles_mode in [PREANGLES_MODE_QUATERNION, PREANGLES_MODE_AXISANGLE]:
                 sgi = self.sym_group_idxs[idx_]
-                t_target[4:] = to_numpy(Y_target['sym_rotations'][idx_][sgi])
+                if self.dataset_args.preangles_mode == PREANGLES_MODE_QUATERNION:
+                    t_target[4:] = to_numpy(Y_target['sym_rotations'][idx_][sgi])
+                else:
+                    R = to_numpy(Y_target['sym_rotations'][idx_][sgi])
+                    t_target[4:] = Rotation.from_matrix(R).as_rotvec()
 
             locs = np.arange(len(t_target))
-            bar_width = 0.35
-            offset = bar_width / 2
-            ax_.bar(locs - offset, t_target, bar_width, label='Target')
-            ax_.bar(locs + offset, t_pred, bar_width, label='Predicted')
-            k = 3
-            ax_.axvspan(locs[0] - k * offset, locs[2] + k * offset, alpha=0.1, color='green')
-            ax_.axvspan(locs[3] - k * offset, locs[3] + k * offset, alpha=0.1, color='red')
-            ax_.axvspan(locs[4] - k * offset, locs[-1] + k * offset, alpha=0.1, color='blue')
+
+            if self.dataset_args.train_generator:
+                bar_width = 0.25
+                offset = bar_width
+                ax_.bar(locs - offset, t_target, bar_width, label='Target')
+                ax_.bar(locs, t_pred, bar_width, label='Predicted')
+                ax_.bar(locs + offset, t_pred2, bar_width, label='Predicted2')
+                k = 2 * offset
+            else:
+                bar_width = 0.35
+                offset = bar_width / 2
+                ax_.bar(locs - offset, t_target, bar_width, label='Target')
+                ax_.bar(locs + offset, t_pred, bar_width, label='Predicted')
+                k = 3 * offset
+            ax_.axvspan(locs[0] - k, locs[2] + k, alpha=0.1, color='green')
+            ax_.axvspan(locs[3] - k, locs[3] + k, alpha=0.1, color='red')
+            ax_.axvspan(locs[4] - k, locs[-1] + k, alpha=0.1, color='blue')
             ax_.set_title('Transformation')
             ax_.set_xticks(locs)
             xlabels = self.ds.labels_transformation.copy()
             if self.dataset_args.preangles_mode == PREANGLES_MODE_SINCOS:
                 xlabels += self.ds.labels_transformation_sincos
-            else:
+            elif self.dataset_args.preangles_mode == PREANGLES_MODE_QUATERNION:
                 xlabels += self.ds.labels_transformation_quaternion
+            else:
+                xlabels += self.ds.labels_transformation_axisangle
             ax_.set_xticklabels(xlabels)
             if 'transformation' not in share_ax:
                 ax_.legend()
@@ -2344,11 +2427,21 @@ class Manager:
         def plot_material(ax_, idx_):
             m_pred = to_numpy(Y_pred['material'][idx_])
             m_target = to_numpy(Y_target['material'][idx_])
+            if self.dataset_args.train_generator:
+                m_pred2 = to_numpy(Y_pred2['material'][idx_])
+
             locs = np.arange(len(m_target))
-            bar_width = 0.35
-            offset = bar_width / 2
-            ax_.bar(locs - offset, m_target, bar_width, label='Target')
-            ax_.bar(locs + offset, m_pred, bar_width, label='Predicted')
+            if self.dataset_args.train_generator:
+                bar_width = 0.25
+                offset = bar_width
+                ax_.bar(locs - offset, m_target, bar_width, label='Target')
+                ax_.bar(locs, m_pred, bar_width, label='Predicted')
+                ax_.bar(locs + offset, m_pred2, bar_width, label='Predicted2')
+            else:
+                bar_width = 0.35
+                offset = bar_width / 2
+                ax_.bar(locs - offset, m_target, bar_width, label='Target')
+                ax_.bar(locs + offset, m_pred, bar_width, label='Predicted')
             ax_.set_title('Material')
             ax_.set_xticks(locs)
             for i in range(len(locs) - 1):
@@ -2387,8 +2480,10 @@ class Manager:
                 xlabels += self.ds.labels_light.copy()
                 if self.dataset_args.preangles_mode == PREANGLES_MODE_SINCOS:
                     xlabels += self.ds.labels_light_sincos
-                else:
+                elif self.dataset_args.preangles_mode == PREANGLES_MODE_QUATERNION:
                     xlabels += self.ds.labels_light_quaternion
+                else:
+                    xlabels += self.ds.labels_light_axisangle
 
                 k = 3
                 ax_.axvspan(locs[0] - k * offset, locs[2] + k * offset, alpha=0.1, color='green')
@@ -2432,6 +2527,10 @@ class Manager:
                 ax = fig.add_subplot(gs[row_idx, i])
                 plot_image(ax, 'Generated', img)
                 add_discriminator_value(ax, 'D_fake', idx)
+                row_idx += 1
+                img = to_numpy(X_pred2[idx]).squeeze()
+                ax = fig.add_subplot(gs[row_idx, i])
+                plot_image(ax, 'Generated2', img)
                 row_idx += 1
 
             # Rebuild the target crystal
@@ -2644,8 +2743,10 @@ class Manager:
             xlabels = self.ds.labels_transformation.copy()
             if self.dataset_args.preangles_mode == PREANGLES_MODE_SINCOS:
                 xlabels += self.ds.labels_transformation_sincos
-            else:
+            elif self.dataset_args.preangles_mode == PREANGLES_MODE_QUATERNION:
                 xlabels += self.ds.labels_transformation_quaternion
+            else:
+                xlabels += self.ds.labels_transformation_axisangle
             _plot_bar_chart('transformation', idx_, ax_, xlabels, 'Transformation')
             locs = np.arange(len(xlabels))
             offset = 1.6 * bar_width
@@ -2673,8 +2774,10 @@ class Manager:
                 xlabels += self.ds.labels_light
                 if self.dataset_args.preangles_mode == PREANGLES_MODE_SINCOS:
                     xlabels += self.ds.labels_light_sincos
-                else:
+                elif self.dataset_args.preangles_mode == PREANGLES_MODE_QUATERNION:
                     xlabels += self.ds.labels_light_quaternion
+                else:
+                    xlabels += self.ds.labels_light_axisangle
             locs = _plot_bar_chart('light', idx_, ax_, xlabels, 'Light')
             if not self.ds.renderer_args.transmission_mode:
                 offset = 1.6 * bar_width

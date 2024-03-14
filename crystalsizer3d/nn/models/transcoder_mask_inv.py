@@ -4,7 +4,7 @@ import torch
 import torch.nn as nn
 from torch.nn import Parameter
 
-from crystalsizer3d.args.dataset_training_args import PREANGLES_MODE_SINCOS
+from crystalsizer3d.args.dataset_training_args import PREANGLES_MODE_AXISANGLE, PREANGLES_MODE_QUATERNION, PREANGLES_MODE_SINCOS
 from crystalsizer3d.nn.dataset import Dataset
 from crystalsizer3d.nn.models.transcoder import Transcoder
 
@@ -70,8 +70,11 @@ class TranscoderMaskInv(Transcoder):
             n_trans_params = len(self.ds.labels_transformation)
             if self.ds.ds_args.preangles_mode == PREANGLES_MODE_SINCOS:
                 n_trans_params += len(self.ds.labels_transformation_sincos)
-            else:
+            elif self.ds.ds_args.preangles_mode == PREANGLES_MODE_QUATERNION:
                 n_trans_params += len(self.ds.labels_transformation_quaternion)
+            else:
+                assert self.ds.ds_args.preangles_mode == PREANGLES_MODE_AXISANGLE
+                n_trans_params += len(self.ds.labels_transformation_axisangle)
             update_mask(n_trans_params)
 
         if self.ds.ds_args.train_material:
@@ -81,8 +84,11 @@ class TranscoderMaskInv(Transcoder):
             n_light_params = len(self.ds.labels_transformation)
             if self.ds.ds_args.preangles_mode == PREANGLES_MODE_SINCOS:
                 n_light_params += len(self.ds.labels_light_sincos)
-            else:
+            elif self.ds.ds_args.preangles_mode == PREANGLES_MODE_QUATERNION:
                 n_light_params += len(self.ds.labels_light_quaternion)
+            else:
+                assert self.ds.ds_args.preangles_mode == PREANGLES_MODE_AXISANGLE
+                n_light_params += len(self.ds.labels_light_axisangle)
             update_mask(n_light_params)
 
         self.mask = mask

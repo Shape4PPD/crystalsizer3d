@@ -7,9 +7,11 @@ from crystalsizer3d.util.utils import str2bool
 
 PREANGLES_MODE_SINCOS = 'sincos'
 PREANGLES_MODE_QUATERNION = 'quaternion'
+PREANGLES_MODE_AXISANGLE = 'axisangle'
 PREANGLES_MODES = [
     PREANGLES_MODE_SINCOS,
     PREANGLES_MODE_QUATERNION,
+    PREANGLES_MODE_AXISANGLE
 ]
 
 
