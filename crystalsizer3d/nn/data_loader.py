@@ -10,6 +10,7 @@ from crystalsizer3d.nn.dataset import Dataset
 
 
 def get_affine_transforms() -> transforms.Compose:
+    raise NotImplementedError('Affine transforms not implemented.')
     return transforms.Compose([
         transforms.RandomOrder([
             transforms.RandomHorizontalFlip(),
