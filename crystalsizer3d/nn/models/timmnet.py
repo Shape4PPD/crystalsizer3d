@@ -75,11 +75,11 @@ class TimmNet(BaseNet):
             size = n
         self.classifier.add_module(
             'OutputLayer',
-            FCLayer(size, out_size, activation=False)
+            nn.Linear(size, out_size)
         )
 
         # Add hook to store the last hidden state
-        self.last_op = self.classifier.get_submodule('OutputLayer').get_submodule('linear')
+        self.last_op = self.classifier.get_submodule('OutputLayer')
         self.last_op.register_forward_hook(self.latent_hook)
 
     def _init_params(self):
