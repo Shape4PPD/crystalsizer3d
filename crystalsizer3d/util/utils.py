@@ -123,33 +123,33 @@ def from_preangles(t: torch.Tensor) -> torch.Tensor:
     return torch.atan2(t[..., 0], t[..., 1])
 
 
-def euler_to_quaternion(angles: np.ndarray) -> np.ndarray:
-    """Convert euler angles (XYZ order) to quaternion in scalar-first format."""
-    r = Rotation.from_euler('XYZ', angles)
-    return r.as_quat(canonical=True)[[3, 0, 1, 2]]
+def euler_to_quaternion(angles: np.ndarray, seq: str = 'xyz') -> np.ndarray:
+    """Convert euler angles to quaternion in scalar-first format."""
+    R = Rotation.from_euler(seq, angles)
+    return R.as_quat(canonical=True)[[3, 0, 1, 2]]
 
 
-def quaternion_to_euler(q: Union[np.ndarray, torch.Tensor]) -> np.ndarray:
-    """Convert a quaternion (scalar-first) to euler angles (XYZ order)."""
+def quaternion_to_euler(q: Union[np.ndarray, torch.Tensor], seq: str = 'xyz') -> np.ndarray:
+    """Convert a quaternion (scalar-first) to euler angles."""
     if type(q) == torch.Tensor:
         q = to_numpy(q)
     q = normalise(q)
-    r = Rotation.from_quat(q[[1, 2, 3, 0]])
-    return r.as_euler('XYZ')
+    R = Rotation.from_quat(q[[1, 2, 3, 0]])
+    return R.as_euler(seq)
 
 
-def euler_to_axisangle(angles: np.ndarray) -> np.ndarray:
+def euler_to_axisangle(angles: np.ndarray, seq: str = 'xyz') -> np.ndarray:
     """Convert euler angles to an axis-angle representation."""
-    r = Rotation.from_euler('XYZ', angles)
+    r = Rotation.from_euler(seq, angles)
     return r.as_rotvec()
 
 
-def axisangle_to_euler(v: Union[np.ndarray, torch.Tensor]) -> np.ndarray:
+def axisangle_to_euler(v: Union[np.ndarray, torch.Tensor], seq: str = 'xyz') -> np.ndarray:
     """Convert an axis-angle representation to euler angles."""
     if type(v) == torch.Tensor:
         v = to_numpy(v)
     r = Rotation.from_rotvec(v)
-    return r.as_euler('XYZ')
+    return r.as_euler(seq)
 
 
 def skew_symmetric(v: torch.Tensor) -> torch.Tensor:
@@ -207,15 +207,6 @@ def geodesic_distance(R1: torch.Tensor, R2: torch.Tensor, EPS: float = 1e-4) -> 
     trace_temp = torch.clamp(trace_temp, -1 + EPS, 1 - EPS)
     theta = torch.acos(trace_temp)
     return theta
-
-
-def compose_quaternions(q1: np.ndarray, q2: np.ndarray) -> np.ndarray:
-    """Compose two quaternions (scalar-first format)."""
-    a1, v1 = q1[0], q1[1:]
-    a2, v2 = q2[0], q2[1:]
-    a = a1 * a2 - np.dot(v1, v2)
-    v = a1 * v2 + a2 * v1 + np.cross(v1, v2)
-    return np.array([a, *v])
 
 
 def equal_aspect_ratio(ax: Axes, zoom: float = 1.0):

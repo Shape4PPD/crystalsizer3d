@@ -1,7 +1,7 @@
 import csv
 import json
 from itertools import product
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 import torch
@@ -14,11 +14,11 @@ from trimesh.exchange.obj import load_obj
 
 from crystalsizer3d import logger
 from crystalsizer3d.args.dataset_synthetic_args import DatasetSyntheticArgs
+from crystalsizer3d.args.dataset_training_args import DatasetTrainingArgs, PREANGLES_MODE_AXISANGLE, \
+    PREANGLES_MODE_QUATERNION, PREANGLES_MODE_SINCOS
 from crystalsizer3d.args.renderer_args import RendererArgs
 from crystalsizer3d.crystal_renderer import CrystalWellSettings
-from crystalsizer3d.args.dataset_training_args import DatasetTrainingArgs, PREANGLES_MODE_AXISANGLE, PREANGLES_MODE_QUATERNION, \
-    PREANGLES_MODE_SINCOS
-from crystalsizer3d.util.utils import axisangle_to_euler, compose_quaternions, euler_to_axisangle, euler_to_quaternion, from_preangles, \
+from crystalsizer3d.util.utils import axisangle_to_euler, euler_to_axisangle, euler_to_quaternion, from_preangles, \
     quaternion_to_euler, to_numpy
 
 DATASET_TYPE_SYNTHETIC = 'synthetic'
@@ -71,7 +71,7 @@ class Dataset:
 
     def __init__(
             self,
-            ds_args: DatasetArgs,
+            ds_args: DatasetTrainingArgs,
     ):
         self.ds_args = ds_args
         path = ds_args.dataset_path
@@ -145,7 +145,13 @@ class Dataset:
         self.fixed_parameters = fixed_parameters
         self.labels_distances_active = [k for k in self.labels_distances if k in self.labels]
         self.labels_distance_switches_active = [k for k in self.labels_distance_switches if k in self.labels]
+        self.labels_transformation_active = [k for k in self.labels_transformation + self.labels_transformation_sincos +
+                                             self.labels_transformation_quaternion + self.labels_transformation_axisangle
+                                             if k in self.labels]
         self.labels_material_active = [k for k in self.labels_material if k in self.labels]
+        self.labels_light_active = [k for k in
+                                    self.labels_light + self.labels_light_location + self.labels_light_sincos +
+                                    self.labels_light_quaternion + self.labels_light_axisangle if k in self.labels]
 
         # Cache the rotation matrices and symmetry groups
         self.rotation_matrices = self._calculate_rotation_matrices()
@@ -406,14 +412,25 @@ class Dataset:
             # Standardise the scale
             scale = z_transform(r_params['scale'], 's')
 
-            # Rotation pre-angles - [-1, 1]
-            q = euler_to_quaternion(r_params['rotation'])
+            # Rotation representation
+            R0 = Rotation.from_euler('xyz', r_params['rotation'])
 
             # Apply the rotation to the symmetry group
             sym_group = self._get_symmetry_group(idx)
-            sym_R = np.zeros((len(sym_group), 4))
-            for i, sym_q in enumerate(sym_group):
-                sym_R[i] = compose_quaternions(sym_q, q)
+            sym_R = np.zeros((len(sym_group), 3, 3))
+            for i, R in enumerate(sym_group):
+                sym_R[i] = (R0 * R).as_matrix()
+
+            # # Check the symmetry group
+            # mesh = self.load_mesh(idx)
+            # v = mesh.vertices
+            # v0 = R0.apply(v)
+            # for r_mat in sym_R:
+            #     R = Rotation.from_matrix(r_mat)
+            #     v_rotated = R.apply(v)
+            #     cd = cdist(v0, v_rotated)
+            #     min_vertex_dists = cd.min(axis=1)
+            #     assert np.all(min_vertex_dists < 0.1), 'Symmetry group is not correct!'
 
             # Get rotation representation
             if self.ds_args.preangles_mode == PREANGLES_MODE_SINCOS:
@@ -423,22 +440,17 @@ class Dataset:
                 ]).ravel()
 
             elif self.ds_args.preangles_mode == PREANGLES_MODE_QUATERNION:
-                # Canonical rotations just takes the quaternion with the smallest w value
+                # Canonical rotations takes the quaternion with the smallest w value
                 if self.ds_args.use_canonical_rotations:
-                    q_canon = sym_R[np.argmin(sym_R[:, 0])]
+                    sym_q = np.array([Rotation.from_matrix(R).as_quat(canonical=True)[[3, 0, 1, 2]] for R in sym_R])
+                    q_canon = sym_q[np.argmin(sym_q[:, 0])]
                     rotation_preangles = q_canon
                 else:
-                    rotation_preangles = q
+                    rotation_preangles = R0.as_quat(canonical=True)[[3, 0, 1, 2]]
 
             else:
                 assert self.ds_args.preangles_mode == PREANGLES_MODE_AXISANGLE
-                rotation_preangles = euler_to_axisangle(r_params['rotation'])
-
-                # Convert the sym rotations to full matrix form
-                sym_R_mats = np.zeros((len(sym_group), 3, 3))
-                for i, sym_q in enumerate(sym_R):
-                    sym_R_mats[i] = Rotation.from_quat(sym_q[[1, 2, 3, 0]]).as_matrix()
-                sym_R = sym_R_mats
+                rotation_preangles = R0.as_rotvec()
 
             params['transformation'] = np.array([
                 *location,
@@ -512,7 +524,7 @@ class Dataset:
             assert mesh.is_watertight, 'Mesh is not watertight!'
         return mesh
 
-    def _get_symmetry_group(self, idx: int) -> np.ndarray:
+    def _get_symmetry_group(self, idx: int) -> List[Rotation]:
         """
         Get the rotational symmetry group of the crystal from cache or calculation.
         """
@@ -524,7 +536,7 @@ class Dataset:
         self.symmetry_groups[d_str] = sym_group
         return sym_group
 
-    def _calculate_symmetry_group(self, idx: int) -> np.ndarray:
+    def _calculate_symmetry_group(self, idx: int) -> List[Rotation]:
         """
         Calculate the rotational symmetry group of the crystal.
         """
@@ -536,8 +548,8 @@ class Dataset:
             cd = cdist(vertices, vertices_rotated)
             min_vertex_dists = cd.min(axis=1)
             if np.all(min_vertex_dists < 0.1):
-                sym_group.append(R.as_quat()[[3, 0, 1, 2]])
-        return np.array(sym_group)
+                sym_group.append(R)
+        return sym_group
 
     def _calculate_rotation_matrices(self):
         """
@@ -570,7 +582,7 @@ class Dataset:
     def denormalise_rendering_params(
             self,
             outputs: Dict[str, torch.Tensor],
-            idx: int,
+            idx: int = 0,
             default_rendering_params: Optional[Dict[str, Any]] = None
     ) -> dict:
         """
@@ -584,7 +596,9 @@ class Dataset:
 
         # Transformation parameters
         if 'transformation' in outputs:
-            trans = outputs['transformation'][idx]
+            trans = outputs['transformation']
+            if trans.ndim == 2:
+                trans = trans[idx]
             location = to_numpy(trans[:3])
             l_max = np.array([self.ds_stats[xyz]['max'] for xyz in 'xyz'])
             l_min = np.array([self.ds_stats[xyz]['min'] for xyz in 'xyz'])
@@ -614,7 +628,9 @@ class Dataset:
         # Material parameters
         m_params = {}
         if 'material' in outputs:
-            m = outputs['material'][idx]
+            m = outputs['material']
+            if m.ndim == 2:
+                m = m[idx]
             m_idx = 0
             if 'b' in self.labels_material_active:
                 m_params['brightness'] = inverse_z_transform(m[m_idx].item(), 'b')
@@ -636,16 +652,20 @@ class Dataset:
 
         # Light parameters
         if self.ds_args.train_light:
+            light = outputs['light']
+            if light.ndim == 2:
+                light = light[idx]
+
             if self.renderer_args.transmission_mode:
                 l_params = {
                     'location': [0, 0, 0],
-                    'energy': inverse_z_transform(outputs['light'][idx, 0].item(), 'e'),
+                    'energy': inverse_z_transform(light[0].item(), 'e'),
                     'rotation': [0, 0, 0],
                     'angle': 0,
                 }
 
             else:
-                location = to_numpy(outputs['light'][idx, :3])
+                location = to_numpy(light[:3])
                 l_max = np.array([self.ds_stats[xyz]['max'] for xyz in ['lx', 'ly', 'lz']])
                 l_min = np.array([self.ds_stats[xyz]['min'] for xyz in ['lx', 'ly', 'lz']])
                 ranges = l_max - l_min
@@ -653,16 +673,16 @@ class Dataset:
                 location = (location + 1) / 2 * range_max + l_min
 
                 # Inverse z-transform the energy
-                energy = inverse_z_transform(outputs['light'][idx, 3].item(), 'e')
+                energy = inverse_z_transform(light[3].item(), 'e')
 
                 # Rotation angles
                 if self.ds_args.preangles_mode == PREANGLES_MODE_SINCOS:
-                    angles = from_preangles(outputs['light'][idx, 4:]).tolist() + [0., ]
+                    angles = from_preangles(light[4:]).tolist() + [0., ]
                 elif self.ds_args.preangles_mode == PREANGLES_MODE_QUATERNION:
-                    angles = quaternion_to_euler(outputs['light'][idx, 4:]).tolist()
+                    angles = quaternion_to_euler(light[4:]).tolist()
                 else:
                     assert self.ds_args.preangles_mode == PREANGLES_MODE_AXISANGLE
-                    angles = axisangle_to_euler(outputs['light'][idx, 4:]).tolist()
+                    angles = axisangle_to_euler(light[4:]).tolist()
 
                 l_params = {
                     'location': location.tolist(),
@@ -670,13 +690,15 @@ class Dataset:
                     'rotation': angles,
                     'angle': angles[0],
                 }
-        else:
-            assert default_rendering_params is not None, 'Need to provide defaults for missing light parameters.'
+        elif default_rendering_params is not None:
+            logger.warning('Missing light parameters and no defaults provided.')
             l_params = default_rendering_params['light']
             if self.renderer_args.transmission_mode:
                 l_params['location'] = [0, 0, 0]
                 l_params['rotation'] = [0, 0, 0]
                 l_params['angle'] = 0
+        else:
+            l_params = {}
         r_params['light'] = l_params
 
         return r_params
