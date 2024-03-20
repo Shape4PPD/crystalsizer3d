@@ -11,6 +11,7 @@ from typing import Any, Dict, List, Optional, Tuple, Union
 import numpy as np
 import torch
 import torch.nn.functional as F
+from kornia.geometry import axis_angle_to_rotation_matrix
 from matplotlib import pyplot as plt
 from matplotlib.figure import Figure
 from matplotlib.gridspec import GridSpec
@@ -25,14 +26,14 @@ from torch.utils.data import DataLoader
 from torch.utils.tensorboard import SummaryWriter
 
 from crystalsizer3d import LOGS_PATH, START_TIMESTAMP, logger
-from crystalsizer3d.crystal_renderer import render_from_parameters
-from crystalsizer3d.args.dataset_training_args import DatasetTrainingArgs, PREANGLES_MODE_AXISANGLE, PREANGLES_MODE_QUATERNION, \
-    PREANGLES_MODE_SINCOS
+from crystalsizer3d.args.dataset_training_args import DatasetTrainingArgs, PREANGLES_MODE_AXISANGLE, \
+    PREANGLES_MODE_QUATERNION, PREANGLES_MODE_SINCOS
 from crystalsizer3d.args.generator_args import GeneratorArgs
 from crystalsizer3d.args.network_args import NetworkArgs
 from crystalsizer3d.args.optimiser_args import OptimiserArgs
 from crystalsizer3d.args.runtime_args import RuntimeArgs
 from crystalsizer3d.args.transcoder_args import TranscoderArgs
+from crystalsizer3d.crystal_renderer import render_from_parameters
 from crystalsizer3d.nn.checkpoint import Checkpoint
 from crystalsizer3d.nn.data_loader import get_data_loader
 from crystalsizer3d.nn.dataset import Dataset
@@ -52,7 +53,7 @@ from crystalsizer3d.nn.models.transcoder_vae import TranscoderVAE
 from crystalsizer3d.nn.models.vit_pretrained import ViTPretrainedNet
 from crystalsizer3d.nn.models.vitvae import ViTVAE
 from crystalsizer3d.util.ema import EMA
-from crystalsizer3d.util.utils import axisangle_to_matrix, equal_aspect_ratio, geodesic_distance, is_bad, to_numpy
+from crystalsizer3d.util.utils import equal_aspect_ratio, geodesic_distance, is_bad, to_numpy
 
 try:
     from ccdc.morphology import VisualHabitMorphology
@@ -1567,7 +1568,7 @@ class Manager:
 
         else:
             assert self.dataset_args.preangles_mode == PREANGLES_MODE_AXISANGLE
-            R_pred = axisangle_to_matrix(t_pred[:, 4:])
+            R_pred = axis_angle_to_rotation_matrix(t_pred[:, 4:])
 
             # Use the sym_rotations, could be different number for each batch item so have to loop over
             if sym_rotations is not None:
@@ -1585,7 +1586,7 @@ class Manager:
                     rotation_losses[i] = angular_differences[min_idx]
                 rotation_loss = rotation_losses.mean()
             else:
-                R_target = axisangle_to_matrix(t_target[:, 4:])
+                R_target = axis_angle_to_rotation_matrix(t_target[:, 4:])
                 rotation_loss = geodesic_distance(R_pred, R_target).mean()
 
         loss = location_loss + scale_loss + rotation_loss
@@ -1672,8 +1673,8 @@ class Manager:
                 rotation_loss = ((q_pred - q_target)**2).mean()
             else:
                 assert self.dataset_args.preangles_mode == PREANGLES_MODE_AXISANGLE
-                R_pred = axisangle_to_matrix(l_pred[:, 4:])
-                R_target = axisangle_to_matrix(l_target[:, 4:])
+                R_pred = axis_angle_to_rotation_matrix(l_pred[:, 4:])
+                R_target = axis_angle_to_rotation_matrix(l_target[:, 4:])
                 rotation_loss = geodesic_distance(R_pred, R_target).mean()
 
             loss = location_loss + energy_loss + rotation_loss
