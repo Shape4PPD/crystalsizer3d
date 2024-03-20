@@ -304,6 +304,34 @@ def _render_crystal(
     return img
 
 
+def _make_error_image(
+        img_target: np.ndarray,
+        img_pred: np.ndarray,
+        loss_type: str = 'l2'
+) -> Image:
+    """
+    Make an error image.
+    """
+    img_pred2 = np.array(Image.fromarray(img_pred).convert('L')).astype(np.float32) / 255
+    if loss_type == 'l2':
+        err = (img_target - img_pred2)**2
+    elif loss_type == 'l1':
+        err = np.abs(img_target - img_pred2)
+    else:
+        raise NotImplementedError()
+    err = err / err.max()
+    err_pos, err_neg = err.copy(), err.copy()
+    err_pos[img_target > img_pred2] = 0
+    err_neg[img_target < img_pred2] = 0
+    img = np.ones((*img_pred2.shape, 4))
+    img[:, :, 0] = 1 - err_neg
+    img[:, :, 1] = 1 - err_pos - err_neg
+    img[:, :, 2] = 1 - err_pos
+    img[:, :, 3] = np.where(err > 1e-3, 1, 0)
+    img = Image.fromarray((img * 255).astype(np.uint8))
+    return img
+
+
 def _plot_distances(
         ax: Axes,
         manager: Manager,
@@ -618,19 +646,28 @@ def plot_prediction(args: Optional[RuntimeArgs] = None):
     # Plot the digital crystals
     logger.info('Plotting digital crystals.')
     if Y_target is not None:
-        img = _make_3d_crystal_image(manager, args, Y_target, target_or_pred='target')
-        img.save(save_dir / 'digital_target.png')
-    img = _make_3d_crystal_image(manager, args, Y_pred, target_or_pred='pred')
-    img.save(save_dir / 'digital_predicted.png')
+        dig_target = _make_3d_crystal_image(manager, args, Y_target, target_or_pred='target')
+        dig_target.save(save_dir / 'digital_target.png')
+    try:
+        dig_pred = _make_3d_crystal_image(manager, args, Y_pred, target_or_pred='pred')
+        dig_pred.save(save_dir / 'digital_predicted.png')
+    except Exception as e:
+        logger.warning(f'Failed to plot predicted digital crystal: {e}')
 
     # Save the original image
     logger.info('Saving rendered images.')
-    img = to_numpy(X_target).squeeze()
-    Image.fromarray((img * 255).astype(np.uint8)).save(save_dir / 'target.png')
+    img_target = to_numpy(X_target).squeeze()
+    Image.fromarray((img_target * 255).astype(np.uint8)).save(save_dir / 'target.png')
 
     # Render the predicted crystal
-    img = _render_crystal(manager, Y_pred, default_rendering_params)
-    Image.fromarray(img).convert('L').save(save_dir / 'predicted.png')
+    img_pred = _render_crystal(manager, Y_pred, default_rendering_params)
+    Image.fromarray(img_pred).convert('L').save(save_dir / 'predicted.png')
+
+    # Create error images
+    img_l2 = _make_error_image(img_target, img_pred, loss_type='l2')
+    img_l2.save(save_dir / 'error_l2.png')
+    img_l1 = _make_error_image(img_target, img_pred, loss_type='l1')
+    img_l1.save(save_dir / 'error_l1.png')
 
     # Plot the parameter values
     fig = _plot_parameters(manager, args, Y_pred, Y_target)
@@ -643,12 +680,12 @@ def plot_prediction(args: Optional[RuntimeArgs] = None):
 
 
 if __name__ == '__main__':
-    # plot_prediction()
-    args_ = parse_arguments()
-    for i in range(20):
-        args_.ds_idx = i
-        try:
-            plot_prediction(args_)
-        except Exception as e:
-            logger.error(f'Failed to plot prediction for index {i}: {e}')
-            continue
+    plot_prediction()
+    # args_ = parse_arguments()
+    # for i in range(20):
+    #     args_.ds_idx = i
+    #     try:
+    #         plot_prediction(args_)
+    #     except Exception as e:
+    #         logger.error(f'Failed to plot prediction for index {i}: {e}')
+    #         continue
