@@ -8,6 +8,7 @@ import numpy as np
 import timm
 import torch
 import torch.nn.functional as F
+from PIL import Image
 from ccdc.io import EntryReader
 from timm.optim import create_optimizer_v2
 from torch import nn
@@ -17,6 +18,7 @@ from torchvision.transforms import Compose, GaussianBlur
 
 from crystalsizer3d import LOGS_PATH, ROOT_PATH, START_TIMESTAMP, USE_CUDA, logger
 from crystalsizer3d.crystal import Crystal
+from crystalsizer3d.crystal_renderer_mitsuba import build_mitsuba_mesh
 from crystalsizer3d.nn.models.rcf import RCF
 from crystalsizer3d.util.ema import EMA
 from crystalsizer3d.util.utils import to_numpy
@@ -72,54 +74,11 @@ def _generate_crystal(
         point_group_symbol=point_group_symbol,
         distances=torch.tensor(distances) * scale,
         origin=origin,
-        rotvec=rotvec
+        rotation=rotvec,
     )
     crystal.to(device)
 
     return crystal
-
-
-def build_mitsuba_mesh(crystal: Crystal) -> mi.Mesh:
-    """
-    Convert a Crystal object into a Mitsuba mesh.
-    """
-    # Build the mesh in pytorch and convert the parameters to Mitsuba format
-    vertices, faces = crystal.build_mesh()
-    nv, nf = len(vertices), len(faces)
-    vertices = mi.TensorXf(vertices)
-    faces = mi.TensorXi64(faces)
-
-    # Set up the material properties
-    bsdf = {
-        'type': 'roughdielectric',
-        'distribution': 'beckmann',
-        'alpha': 0.02,
-        'int_ior': 1.78,
-    }
-    # bsdf = {
-    #     'type': 'diffuse',
-    #     # 'reflectance': {
-    #     #     'type': 'rgb',
-    #     #     'value': crystal.colour.tolist()
-    #     # }
-    # }
-    props = mi.Properties()
-    props[BSDF_KEY] = mi.load_dict(bsdf)
-
-    # Construct the mitsuba mesh and set the vertex positions and faces
-    mesh = mi.Mesh(
-        SHAPE_NAME,
-        vertex_count=nv,
-        face_count=nf,
-        has_vertex_normals=False,
-        has_vertex_texcoords=False,
-        props=props
-    )
-    mesh_params = mi.traverse(mesh)
-    mesh_params['vertex_positions'] = dr.ravel(vertices)
-    mesh_params['faces'] = dr.ravel(faces)
-
-    return mesh
 
 
 def create_scene(crystal: Crystal, spp=256, res=400) -> mi.Scene:
@@ -388,7 +347,13 @@ def plot_scene():
     Debug function to plot the basic scene.
     """
     spp = 2**9
-    crystal = _generate_crystal()
+    # crystal = _generate_crystal()
+    crystal = _generate_crystal(
+        distances=[1.0, 0.6, 0.6],
+        scale=10,
+        origin=[0, 0, 20],
+        rotvec=[0.2, 0.2, -0.3],
+    )
     scene = create_scene(crystal=crystal, spp=spp)
     image = mi.render(scene)
     plt.imshow(image**(1.0 / 2.2))
@@ -447,8 +412,8 @@ def plot_comparison(
 
 def optimise_scene():
     # Parameters
-    spp = 128
-    res = 100
+    spp = 512
+    res = 200
     use_min_lib = False
     # opt_algorithm = 'radam'
     # opt_algorithm = 'adamw'
@@ -460,16 +425,16 @@ def optimise_scene():
     # opt_algorithm = 'newton-cg'
 
     # lr = 0.1
-    lr = 0.05
+    # lr = 0.05
     # lr = 1e-2
     # lr = 1e-3
-    # lr = 1e-4
+    lr = 1e-4
     # lr = 1e-5
-    n_iterations = 2000
-    plot_freq = 1
+    n_iterations = 1500
+    plot_freq = 3
     plot_n_samples = 4
     multiscale = True
-    probabilistic = True
+    probabilistic = False
     n_samples = 20
     if not probabilistic:
         n_samples = 1
@@ -495,16 +460,42 @@ def optimise_scene():
         rotvec=[0, 0, 0.5],
     )
     crystal_opt = _generate_crystal(
-        # distances=[1.0, 0.5, 0.2],
-        distances=[1.0, 0.3, 0.1],
+        distances=[1.0, 0.5, 0.2],
+        # distances=[1.0, 0.3, 0.1],
         scale=10,
         origin=[0, 0, 20],
-        # rotvec=[0, 0.2, 0.2],
-        rotvec=[0.5, 0.5, -0.3],
+        rotvec=[0, 0.2, 0.2],
+        # rotvec=[0.5, 0.5, -0.3],
     )
+
+    """
+    Tests:
+    target: d=[1.0, 0.5, 0.2], r=[0, 0, 0.5]
+    initial: d=[1.0, 0.5, 0.2], r=[0, 0.2, 0.2], lr=1e-2 (unstable), lr=1e-3 (wobbles, but stable), lr=1e-4 (stable)    
+    """
+
+    crystal_target = _generate_crystal(
+        distances=[1.0, 0.6, 0.6],
+        scale=10,
+        origin=[0, 0, 20],
+        rotvec=[0.2, 0.2, -0.3],
+    )
+    crystal_opt = _generate_crystal(
+        distances=[1.0, 0.5, 0.5],
+        scale=10,
+        origin=[0, 0, 20],
+        rotvec=[0, 0, 0],
+    )
+
     scene_target = create_scene(crystal=crystal_target, spp=spp, res=res)
     scene = create_scene(crystal=crystal_opt, spp=spp, res=res)
     scene_params = mi.traverse(scene)
+
+    # Save the initial scene image
+    if save_plots:
+        img = mi.render(scene_target).numpy()
+        img = np.clip(img**(1.0 / 2.2), 0, 1)
+        Image.fromarray((img * 255).astype(np.uint8)).convert('L').save(save_dir / 'target.png')
 
     @dr.wrap_ad(source='torch', target='drjit')
     def render_image(vertices, faces, seed=1):
@@ -532,7 +523,7 @@ def optimise_scene():
     params = {
         'distances': [crystal_opt.distances],
         'origin': [crystal_opt.origin],
-        'rotvec': [crystal_opt.rotvec],
+        'rotvec': [crystal_opt.rotation],
     }
     if probabilistic:
         # params['distances'].append(crystal_opt.distances_logvar)
@@ -540,7 +531,7 @@ def optimise_scene():
         # params['rotvec'].append(crystal_opt.rotvec_logvar)
         params['distances_logvar'] = [crystal_opt.distances_logvar]
         params['origin_logvar'] = [crystal_opt.origin_logvar]
-        params['rotvec_logvar'] = [crystal_opt.rotvec_logvar]
+        params['rotvec_logvar'] = [crystal_opt.rotation_logvar]
 
     if use_min_lib:
         opt = Minimizer(crystal_opt.parameters(),
@@ -564,11 +555,11 @@ def optimise_scene():
                     {'params': params['rotvec'], 'lr': lr},
                     # {'params': params['origin'], 'lr': lr / 2},
                     # {'params': params['rotvec'], 'lr': lr / 10},
-                    {'params': params['distances'], 'lr': lr},
+                    {'params': params['distances'], 'lr': lr * 100},
                     # {'params': self.hex.temp, 'lr': self.lr_temp}
-                    {'params': params['distances_logvar'], 'lr': lr * 10},
-                    {'params': params['origin_logvar'], 'lr': lr * 10},
-                    {'params': params['rotvec_logvar'], 'lr': lr * 10},
+                    # {'params': params['distances_logvar'], 'lr': lr * 10},
+                    # {'params': params['origin_logvar'], 'lr': lr * 10},
+                    # {'params': params['rotvec_logvar'], 'lr': lr * 10},
                 ],
                 # model_or_params=crystal_opt.parameters(),
                 # model_or_params=agent.parameters(),
@@ -604,14 +595,14 @@ def optimise_scene():
                 std_origin = torch.exp(0.5 * crystal_opt.origin_logvar)
                 eps_origin = torch.randn(n_samples, *std_origin.size(), device=device)
                 origin_samples = crystal_opt.origin + eps_origin * std_origin.unsqueeze(0)
-                std_rotvec = torch.exp(0.5 * crystal_opt.rotvec_logvar)
+                std_rotvec = torch.exp(0.5 * crystal_opt.rotation_logvar)
                 eps_rotvec = torch.randn(n_samples, *std_rotvec.size(), device=device)
-                rotvec_samples = crystal_opt.rotvec + eps_rotvec * std_rotvec.unsqueeze(0)
+                rotvec_samples = crystal_opt.rotation + eps_rotvec * std_rotvec.unsqueeze(0)
 
                 # Set first sample to the mean
                 distances_samples[0] = crystal_opt.distances
                 origin_samples[0] = crystal_opt.origin
-                rotvec_samples[0] = crystal_opt.rotvec
+                rotvec_samples[0] = crystal_opt.rotation
 
                 # Clamp parameters
                 distances_samples = torch.clamp(distances_samples, 1e-1, None)
@@ -631,7 +622,7 @@ def optimise_scene():
                     v, f = crystal_opt.build_mesh(
                         distances=distances_samples[j],
                         origin=origin_samples[j],
-                        rotvec=rotvec_samples[j]
+                        rotation=rotvec_samples[j]
                     )
                 else:
                     v, f = crystal_opt.build_mesh()
@@ -657,11 +648,12 @@ def optimise_scene():
             # img_loss = lp5_loss + 0.5 * l1_loss + 0.25 * l2_loss
             # img_loss = lp5_loss + l1_loss + l2_loss
             # img_loss = lp5_loss   #+ 0.5*l2_loss
-            # img_loss = l1_loss  # + 2 * l2_loss + 4 * l4_loss
+            # img_loss = l1_loss + 2 * l2_loss  #+ 4 * l4_loss
             # img_loss = l1_loss + l2_loss + l4_loss
             # img_loss = l1_loss + 0.5 * l2_loss + 0.25 * l4_loss
             # img_loss = l1_loss + l2_loss  #+ 100 * l4_loss
             # img_loss = l4_loss + 1/2 * l2_loss + 1/4 * l1_loss
+            # img_loss = l1_loss
             img_loss = l2_loss  # + 0.5*l2_loss
             # img_loss = l2_loss + 0.5 * l1_loss + 0.25 * lp5_loss
 
@@ -672,13 +664,13 @@ def optimise_scene():
 
             # Combine losses and backpropagate errors
             # loss = img_loss
-            # loss = img_loss + vgg_loss
+            loss = img_loss + vgg_loss
             # loss_j = img_loss + 1e-3 * vgg_loss + 1e-2 * rcf_loss
             # loss = img_loss + rcf_loss + vgg_loss
             # loss = 10*img_loss + 0.1*vgg_loss
             # loss_j = img_loss   #+ 100*rcf_loss  #+ 0.1*vgg_loss
             # loss = rcf_loss  #+ 10 * img_loss
-            loss = vgg_loss
+            # loss = vgg_loss
 
             # loss = loss + loss_j
 
@@ -688,9 +680,9 @@ def optimise_scene():
             # Logging
             d_diff = torch.norm(crystal_opt.distances - crystal_target.distances)
             o_diff = torch.norm(crystal_opt.origin - crystal_target.origin)
-            r_diff = torch.norm(crystal_opt.rotvec - crystal_target.rotvec)
+            r_diff = torch.norm(crystal_opt.rotation - crystal_target.rotation)
             img_losses.append(img_loss.item())
-            # vgg_losses.append(vgg_loss.item())
+            vgg_losses.append(vgg_loss.item())
             # rcf_losses.append(rcf_loss.item())
             losses.append(loss.item())
             d_diffs.append(d_diff.item())
@@ -714,8 +706,9 @@ def optimise_scene():
                 (
                     f'[{",".join([f"{v:.3E}" for v in crystal_opt.origin_logvar.exp()])}]' if probabilistic else '') + ') ' +
                 f'r-error: {r_diff.item():.3E} ' +
-                f'(r=[' + ','.join([f'{v:.2f}' for v in crystal_opt.rotvec]) + ']' +
-                (f'[{",".join([f"{v:.3E}" for v in crystal_opt.rotvec_logvar.exp()])}]' if probabilistic else '') + ')'
+                f'(r=[' + ','.join([f'{v:.2f}' for v in crystal_opt.rotation]) + ']' +
+                (
+                    f'[{",".join([f"{v:.3E}" for v in crystal_opt.rotation_logvar.exp()])}]' if probabilistic else '') + ')'
             )
 
             return loss
@@ -724,8 +717,11 @@ def optimise_scene():
 
         # Plot
         if i % plot_freq == 0:
-            plot_comparison(img_target, img_samples, rcf_feats_target, rcf_feats_samples, i, loss, save_dir,
-                            plot_n_samples)
+            # plot_comparison(img_target, img_samples, rcf_feats_target, rcf_feats_samples, i, loss, save_dir,
+            #                 plot_n_samples)
+            # Image.fromarray(img_samples[0]).convert('L').save(save_dir / f'opt_{i:05d}.png')
+            img = np.clip(to_numpy(img_samples[0][0])**(1.0 / 2.2), 0, 1)
+            Image.fromarray((img * 255).astype(np.uint8)).convert('L').save(save_dir / f'opt_{i:05d}.png')
 
         # if i > 200:
         #     multiscale = False
@@ -807,7 +803,8 @@ def track_losses():
     distances = k3 * (crystal_target.distances[None, ...] - crystal_opt.distances[None, ...]) + crystal_opt.distances[
         None, ...]
     origin = k3 * (crystal_target.origin[None, ...] - crystal_opt.origin[None, ...]) + crystal_opt.origin[None, ...]
-    rotvec = k4 * (crystal_target.rotvec[None, ...] - crystal_opt.rotvec[None, ...]) + crystal_opt.rotvec[None, ...]
+    rotvec = k4 * (crystal_target.rotation[None, ...] - crystal_opt.rotation[None, ...]) + crystal_opt.rotation[
+        None, ...]
 
     @dr.wrap_ad(source='torch', target='drjit')
     def render_image(vertices, faces, seed=1):
@@ -855,7 +852,7 @@ def track_losses():
         v, f = crystal_opt.build_mesh(
             distances=distances[i],
             origin=origin[i],
-            rotvec=rotvec[i]
+            rotation=rotvec[i]
         )
         img_i = render_image(v, f, seed=i)
         img_i = torch.clip(img_i, 0, 1)
@@ -917,6 +914,6 @@ def track_losses():
 
 
 if __name__ == '__main__':
-    plot_scene()
-    # optimise_scene()
+    # plot_scene()
+    optimise_scene()
     # track_losses()

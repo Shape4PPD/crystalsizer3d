@@ -6,6 +6,7 @@ from typing import Any, Dict, Optional, Tuple
 import cv2
 import numpy as np
 import torch
+import torch.nn.functional as F
 import yaml
 from PIL import Image
 
@@ -21,14 +22,16 @@ from matplotlib.axes import Axes
 from matplotlib.figure import Figure
 from matplotlib.gridspec import GridSpec
 from torch.utils.data import default_collate
-from torchvision.transforms.functional import to_tensor
+from torchvision.transforms.functional import center_crop, crop, to_tensor
 from trimesh import Trimesh
 
 from crystalsizer3d import LOGS_PATH, START_TIMESTAMP, USE_CUDA, logger
 from crystalsizer3d.args.base_args import BaseArgs
 from crystalsizer3d.args.dataset_training_args import PREANGLES_MODE_AXISANGLE, PREANGLES_MODE_QUATERNION, \
     PREANGLES_MODE_SINCOS
+from crystalsizer3d.crystal import Crystal
 from crystalsizer3d.crystal_renderer import render_from_parameters
+from crystalsizer3d.crystal_renderer_mitsuba import render_crystal_scene
 from crystalsizer3d.nn.manager import CCDC_AVAILABLE, Manager
 from crystalsizer3d.util.utils import geodesic_distance, print_args, to_dict, to_numpy, to_rgb
 
@@ -165,7 +168,19 @@ def _prep_distances(
     return distances
 
 
-def _build_crystal(
+def _calculate_sf(
+        mesh1: Trimesh,
+        mesh2: Trimesh
+) -> float:
+    """
+    Calculate the scale factor needed to match the custom implementation with the CSD one.
+    """
+    sf = mesh1.bounding_box.vertices / mesh2.bounding_box.vertices
+    assert np.allclose(sf, sf[0, 0])
+    return float(sf[0, 0])
+
+
+def _build_crystal_csd(
         Y: Dict[str, torch.Tensor],
         manager: Manager,
 ) -> Tuple[VisualHabitMorphology, Trimesh]:
@@ -205,21 +220,101 @@ def _build_crystal(
     return morph, mesh
 
 
+def _build_crystal_custom(
+        Y: Dict[str, torch.Tensor],
+        manager: Manager,
+        apply_origin: bool = True,
+        apply_scale: bool = True,
+        apply_rotation: bool = True,
+        scale_to_csd: bool = True
+) -> Crystal:
+    """
+    Generate a beta-form LGA crystal.
+    """
+    reader = EntryReader()
+    crystal = reader.crystal(manager.ds.dataset_args.crystal_id)
+    lattice_unit_cell = [crystal.cell_lengths[0], crystal.cell_lengths[1], crystal.cell_lengths[2]]
+    lattice_angles = [crystal.cell_angles[0], crystal.cell_angles[1], crystal.cell_angles[2]]
+    point_group_symbol = '222'  # crystal.spacegroup_symbol - this doesn't work
+
+    # Get the required miller indices from the constraints
+    miller_indices = manager.crystal_generator.constraints[:-1]
+
+    # Extract the parameters
+    device = Y['distances'].device
+    distances = [1.] + Y['distances'].tolist()
+
+    # Build the initial (non-transformed or scaled) crystal
+    crystal = Crystal(
+        lattice_unit_cell=lattice_unit_cell,
+        lattice_angles=lattice_angles,
+        miller_indices=miller_indices,
+        point_group_symbol=point_group_symbol,
+        distances=distances,
+        rotation_mode=manager.dataset_args.preangles_mode,
+    )
+    crystal.to(device)
+
+    # Apply scaling to match csd
+    if scale_to_csd:
+        v, f = crystal.build_mesh()
+        mesh_custom = Trimesh(vertices=to_numpy(v), faces=to_numpy(f))
+        _, mesh_csd = _build_crystal_csd(Y, manager)
+        sf = _calculate_sf(mesh_csd, mesh_custom)
+        crystal.distances.data *= sf
+
+    # Apply transformation
+    r_params = manager.ds.denormalise_rendering_params(Y)
+    if apply_origin:
+        crystal.origin.data = torch.tensor(r_params['location'], device=device)
+    if apply_scale:
+        crystal.distances.data *= r_params['scale']
+    if apply_rotation:
+        crystal.rotation.data = Y['transformation'][4:].clone().detach()
+
+    # Rebuild the mesh
+    crystal.build_mesh()
+
+    return crystal
+
+
+def _check_custom_crystal(
+        Y: Dict[str, torch.Tensor],
+        manager: Manager,
+        threshold: float = 0.9
+):
+    """
+    Check if we can use the custom mesh in place of the CSD one.
+    """
+    _, mesh1 = _build_crystal_csd(Y, manager)
+
+    # Build the custom mesh
+    crystal = _build_crystal_custom(Y, manager, apply_origin=False, apply_scale=False, apply_rotation=False, scale_to_csd=True)
+    v2, f2 = crystal.build_mesh()
+    mesh2 = Trimesh(vertices=to_numpy(v2), faces=to_numpy(f2))
+
+    # Check the meshes are close
+    intersection = mesh1.intersection(mesh2)
+    union = mesh1.union(mesh2)
+    iou = intersection.volume / union.volume
+
+    assert iou > threshold, f'IOU too low: {iou:.2f} < {threshold:.2f}.'
+
+
 def _make_3d_crystal_image(
         manager: Manager,
         args: RuntimeArgs,
-        Y: Dict[str, torch.Tensor],
         target_or_pred: str,
-        sym_idx: int = 0
+        Y: Dict[str, torch.Tensor],
+        Y_comp: Optional[Dict[str, torch.Tensor]] = None,
+        sym_idx: int = 0,
+        csd_or_custom: str = 'csd',
 ) -> Image:
     """
     Make a 3D digital crystal plot.
     """
     assert target_or_pred in ['target', 'pred']
-    morph, mesh = _build_crystal(Y, manager)
-    wireframe_r = np.max(np.ptp(np.array(morph.bounding_box), axis=0)) * args.wireframe_r_factor
-    surf_col = args.surface_colour_target if target_or_pred == 'target' else args.surface_colour_pred
-    wire_col = args.wireframe_colour_target if target_or_pred == 'target' else args.wireframe_colour_pred
+    assert csd_or_custom in ['csd', 'custom']
 
     # Set up mlab figure
     fig = mlab.figure(size=(args.img_size_3d * 2, args.img_size_3d * 2))
@@ -233,32 +328,61 @@ def _make_3d_crystal_image(
     fig.scene.render_window.multi_samples = 20
     fig.scene.anti_aliasing_frames = 20
 
-    # Get the scale factor and rotation matrix
-    scale = manager.ds.denormalise_rendering_params(Y)['scale']
-    rot = Y['transformation'][4:][None, ...]
-    if manager.dataset_args.preangles_mode == PREANGLES_MODE_SINCOS:
-        raise NotImplementedError()
-    elif target_or_pred == 'target' and 'sym_rotations' in Y:
-        R = Y['sym_rotations'][sym_idx][None, ...]
-        # R = torch.from_numpy(manager.ds.rotation_matrices[sym_idx].as_matrix()[None, ...])
-    elif manager.dataset_args.preangles_mode == PREANGLES_MODE_QUATERNION:
-        R = quaternion_to_rotation_matrix(rot)
-    else:
-        assert manager.dataset_args.preangles_mode == PREANGLES_MODE_AXISANGLE
-        R = axis_angle_to_rotation_matrix(rot)
-    R = to_numpy(R[0])
-    # R = np.eye(3)
-    from scipy.spatial.transform import Rotation
-    # Rotation.from_matrix()
+    def _add_crystal_mesh(
+            Y_: Dict[str, torch.Tensor],
+            target_or_pred_: str,
+    ):
+        """
+        Add a crystal mesh to the figure.
+        """
+        if csd_or_custom == 'csd':
+            morph, mesh = _build_crystal_csd(Y_, manager)
+        else:
+            crystal = _build_crystal_custom(Y_, manager, apply_origin=False)
+            v, f = crystal.build_mesh()
+            mesh = Trimesh(vertices=to_numpy(v), faces=to_numpy(f))
 
-    # Add crystal mesh
-    v = R @ mesh.vertices.T * scale
-    mlab.triangular_mesh(*v, mesh.faces, figure=fig, color=to_rgb(surf_col), opacity=0.7)
-    for f in morph.facets:
-        fv = np.array(f.coordinates)
-        fv = np.vstack([fv, fv[0]])  # Close the loop
-        fv = R @ fv.T * scale
-        mlab.plot3d(*fv, color=to_rgb(wire_col), tube_radius=wireframe_r)
+        wireframe_r = np.max(np.ptp(mesh.bounding_box.vertices, axis=0)) * args.wireframe_r_factor
+        surf_col = args.surface_colour_target if target_or_pred_ == 'target' else args.surface_colour_pred
+        wire_col = args.wireframe_colour_target if target_or_pred_ == 'target' else args.wireframe_colour_pred
+
+        # Get the scale factor and rotation matrix
+        scale = manager.ds.denormalise_rendering_params(Y_)['scale']
+        rot = Y_['transformation'][4:][None, ...]
+        if target_or_pred_ == 'target' and 'sym_rotations' in Y_:
+            R = Y_['sym_rotations'][sym_idx][None, ...]
+        elif manager.dataset_args.preangles_mode == PREANGLES_MODE_QUATERNION:
+            R = quaternion_to_rotation_matrix(rot)
+        elif manager.dataset_args.preangles_mode == PREANGLES_MODE_AXISANGLE:
+            R = axis_angle_to_rotation_matrix(rot)
+        else:
+            raise NotImplementedError()
+        R = to_numpy(R[0])
+
+        # Add crystal surface mesh
+        if csd_or_custom == 'csd':
+            v = R @ mesh.vertices.T * scale
+        else:
+            v = mesh.vertices.T
+        mlab.triangular_mesh(*v, mesh.faces, figure=fig, color=to_rgb(surf_col), opacity=0.7)
+
+        # Add crystal wireframe
+        if csd_or_custom == 'csd':
+            for f in morph.facets:
+                fv = np.array(f.coordinates)
+                fv = np.vstack([fv, fv[0]])  # Close the loop
+                fv = R @ fv.T * scale
+                mlab.plot3d(*fv, color=to_rgb(wire_col), tube_radius=wireframe_r)
+        else:
+            for fv_idxs in crystal.faces.values():
+                fv = to_numpy(crystal.vertices[fv_idxs])
+                fv = np.vstack([fv, fv[0]])  # Close the loop
+                mlab.plot3d(*fv.T, color=to_rgb(wire_col), tube_radius=wireframe_r)
+
+    # Add the crystal(s)
+    _add_crystal_mesh(Y, target_or_pred)
+    if Y_comp is not None:
+        _add_crystal_mesh(Y_comp, 'pred' if target_or_pred == 'target' else 'target')
 
     # Render
     mlab.view(figure=fig, azimuth=args.azim, elevation=args.elev, distance=args.distance, roll=args.roll,
@@ -290,17 +414,25 @@ def _render_crystal(
         manager: Manager,
         Y: Dict[str, torch.Tensor],
         default_rendering_params: Optional[Dict[str, Any]] = None,
+        pipeline: str = 'blender'
 ) -> np.ndarray:
     """
     Render a 3D crystal from the predicted parameters.
     """
-    morph, mesh = _build_crystal(Y, manager)
-    img = render_from_parameters(
-        mesh=mesh,
-        settings_path=manager.ds.path / 'vcw_settings.json',
-        r_params=manager.ds.denormalise_rendering_params(Y, default_rendering_params=default_rendering_params),
-        attempts=1
-    )
+    if pipeline == 'blender':
+        morph, mesh = _build_crystal_csd(Y, manager)
+        img = render_from_parameters(
+            mesh=mesh,
+            settings_path=manager.ds.path / 'vcw_settings.json',
+            r_params=manager.ds.denormalise_rendering_params(Y, default_rendering_params=default_rendering_params),
+            attempts=1
+        )
+    elif pipeline == 'mitsuba':
+        crystal = _build_crystal_custom(Y, manager)
+        img = render_crystal_scene(crystal, spp=256, res=manager.ds.image_size)
+    else:
+        raise ValueError(f'Unknown pipeline: {pipeline}. Must be one of ["blender", "mitsuba"].')
+
     return img
 
 
@@ -620,16 +752,27 @@ def plot_prediction(args: Optional[RuntimeArgs] = None):
     # Load the input image (and parameters if loading from the dataset)
     if args.image_path is None:
         metas, X_target, Y_target = manager.ds.load_item(args.ds_idx)
+        X_target = to_tensor(X_target)
         Y_target = {
-            k: torch.from_numpy(v).to(torch.float32)[None, ...]
+            k: torch.from_numpy(v).to(torch.float32).to(manager.device)
             for k, v in Y_target.items()
         }
         default_rendering_params = metas['rendering_parameters']
     else:
-        X_target = Image.open(args.image_path).convert('L')
+        X_target = to_tensor(Image.open(args.image_path).convert('L'))
         Y_target = None
         default_rendering_params = None  # todo!
-    X_target = to_tensor(X_target)
+
+        # Crop and resize the image to the working image size
+        # X_target = center_crop(X_target, min(X_target.shape[-2:]))
+        d = min(X_target.shape[-2:])
+        X_target = crop(X_target, top=0, left=X_target.shape[-1] - d, height=d, width=d)
+        X_target = F.interpolate(
+            X_target[None, ...],
+            size=manager.image_shape[-1],
+            mode='bilinear',
+            align_corners=False
+        )[0]
     X_target = default_collate([X_target, ])
     X_target = X_target.to(manager.device)
 
@@ -640,24 +783,44 @@ def plot_prediction(args: Optional[RuntimeArgs] = None):
     # Strip batch dimensions
     X_target = X_target[0]
     Y_pred = {k: v[0] for k, v in Y_pred.items()}
-    if Y_target is not None:
-        Y_target = {k: v[0] for k, v in Y_target.items()}
+
+    # # Check the custom crystal meshes are close enough to the CSD ones
+    # _check_custom_crystal(Y_pred, manager)
+    # if Y_target is not None:
+    #     _check_custom_crystal(Y_target, manager)
 
     # Plot the digital crystals
     logger.info('Plotting digital crystals.')
-    if Y_target is not None:
-        dig_target = _make_3d_crystal_image(manager, args, Y_target, target_or_pred='target')
-        dig_target.save(save_dir / 'digital_target.png')
     try:
-        dig_pred = _make_3d_crystal_image(manager, args, Y_pred, target_or_pred='pred')
-        dig_pred.save(save_dir / 'digital_predicted.png')
+        dig_pred_A = _make_3d_crystal_image(manager, args, target_or_pred='pred', Y=Y_pred)
+        dig_pred_A.save(save_dir / 'digital_predicted_A.png')
+        dig_pred_B = _make_3d_crystal_image(manager, args, target_or_pred='pred', Y=Y_pred, csd_or_custom='custom')
+        dig_pred_B.save(save_dir / 'digital_predicted_B.png')
     except Exception as e:
         logger.warning(f'Failed to plot predicted digital crystal: {e}')
+    if Y_target is not None:
+        dig_target_A = _make_3d_crystal_image(manager, args, target_or_pred='target', Y=Y_target)
+        dig_target_A.save(save_dir / 'digital_target_A.png')
+        dig_target_B = _make_3d_crystal_image(manager, args, target_or_pred='target', Y=Y_target, csd_or_custom='custom')
+        dig_target_B.save(save_dir / 'digital_target_B.png')
+        try:
+            dig_combined_A = _make_3d_crystal_image(manager, args, target_or_pred='pred', Y=Y_pred, Y_comp=Y_target)
+            dig_combined_A.save(save_dir / 'digital_combined_A.png')
+            dig_combined_B = _make_3d_crystal_image(manager, args, target_or_pred='pred', Y=Y_pred, Y_comp=Y_target, csd_or_custom='custom')
+            dig_combined_B.save(save_dir / 'digital_combined_B.png')
+        except Exception as e:
+            logger.warning(f'Failed to plot combined digital crystals: {e}')
+            raise e
 
     # Save the original image
     logger.info('Saving rendered images.')
     img_target = to_numpy(X_target).squeeze()
     Image.fromarray((img_target * 255).astype(np.uint8)).save(save_dir / 'target.png')
+
+    # Re-render using the custom mesh and mitsuba (pipeline B)
+    if Y_target is not None:
+        img_target2 = _render_crystal(manager, Y_target, default_rendering_params, pipeline='mitsuba')
+        Image.fromarray(img_target2).convert('L').save(save_dir / 'target2.png')
 
     # Render the predicted crystal
     img_pred = _render_crystal(manager, Y_pred, default_rendering_params)
@@ -680,8 +843,20 @@ def plot_prediction(args: Optional[RuntimeArgs] = None):
 
 
 if __name__ == '__main__':
-    plot_prediction()
-    # args_ = parse_arguments()
+    # plot_prediction()
+
+    # Iterate over all images in the image_path directory
+    args_ = parse_arguments()
+    img_dir = args_.image_path.parent
+    for img_path in img_dir.iterdir():
+        args_.image_path = img_path
+        try:
+            plot_prediction(args_)
+        except Exception as e:
+            logger.error(f'Failed to plot prediction for image {img_path}: {e}')
+            continue
+
+    # Plot the first 20 images in the dataset
     # for i in range(20):
     #     args_.ds_idx = i
     #     try:

@@ -24,6 +24,7 @@ dependencies:
     - csd-python-api = 3.0
     - cholespy = 1.0
     - gigagan-pytorch = 0.2
+    - manifold3d = 2.4
     - mitsuba = 3.5
     - parti-pytorch = 0.2
     - pytorch-minimize = 0.0.2

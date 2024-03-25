@@ -99,7 +99,7 @@ def _generate_crystal(
         point_group_symbol=point_group_symbol,
         distances=distances,
         origin=origin,
-        rotvec=rotvec
+        rotation=rotvec
     )
     crystal.to(device)
 
@@ -274,7 +274,7 @@ def _plot_perspectives(
                 logger.info(f'Rendering perspective [{kx:.2f}, {ky:.2f}, {kz:.2f}]')
                 rotvec = torch.tensor([kx, ky, kz])
                 q = axis_angle_to_quaternion(rotvec)
-                crystal.rotvec.data = q.to(crystal.rotvec.device)
+                crystal.rotation.data = q.to(crystal.rotation.device)
                 scene = create_scene(crystal=crystal, spp=args.spp, res=args.res)
                 img = mi.render(scene)
                 img = mi.util.convert_to_bitmap(img)

@@ -3,10 +3,11 @@ from typing import Any, Dict, List, Optional, Tuple, Union
 
 import numpy as np
 import torch
-from kornia.geometry import axis_angle_to_quaternion, axis_angle_to_rotation_matrix, quaternion_to_rotation_matrix
+from kornia.geometry import axis_angle_to_rotation_matrix, quaternion_to_rotation_matrix
 from pymatgen.symmetry.groups import PointGroup
 from torch import nn
 
+from crystalsizer3d.args.dataset_training_args import PREANGLES_MODE_AXISANGLE, PREANGLES_MODE_QUATERNION
 from crystalsizer3d.util.utils import normalise_pt as normalise
 
 
@@ -18,10 +19,7 @@ def init_tensor(tensor: Union[torch.Tensor, np.ndarray, List[float]], dtype=torc
         tensor = torch.from_numpy(tensor)
     if type(tensor) == list:
         tensor = torch.tensor(tensor)
-    return tensor.to(dtype).clone()
-
-
-traced_axis_angle_to_rotation_matrix = torch.jit.trace(axis_angle_to_rotation_matrix, torch.rand(1, 3))
+    return tensor.to(dtype).detach().clone()
 
 
 def align_points_to_xy_plane(
@@ -63,7 +61,7 @@ def align_points_to_xy_plane(
     rotation_axis = normalise(torch.cross(normal_vector, z_axis, dim=0))
     rotation_angle = torch.acos(torch.dot(normal_vector, z_axis))
     rotvec = rotation_axis * rotation_angle
-    R = traced_axis_angle_to_rotation_matrix(rotvec[None, :]).squeeze(0)
+    R = axis_angle_to_rotation_matrix(rotvec[None, :]).squeeze(0)
 
     # Step 5: Apply rotation to points
     rotated_points = (R @ translated_points.T).T
@@ -138,10 +136,11 @@ class Crystal(nn.Module):
 
             distances: List[float] = None,
             origin: List[float] = [0, 0, 0],
-            rotvec: List[float] = [0, 0, 0],
+            rotation: List[float] = [0, 0, 0],
+            rotation_mode: str = PREANGLES_MODE_AXISANGLE
     ):
         """
-        Set up the initial crystal and calculates the crystal habit.
+        Set up the initial crystal and calculate the crystal habit.
 
         Outputs
         .vertices - vertices of crystal habit
@@ -150,7 +149,7 @@ class Crystal(nn.Module):
         """
         super().__init__()
 
-        # The 3D unit cell, crystallographic axis a,b,c
+        # The 3D unit cell, crystallographic axes a,b,c
         assert len(lattice_unit_cell) == 3, 'Lattice unit cell must be a list of 3 floats'
         self.lattice_unit_cell = lattice_unit_cell
 
@@ -175,14 +174,22 @@ class Crystal(nn.Module):
         self.distances_logvar = nn.Parameter(torch.ones_like(self.distances) * 2 * torch.log(torch.tensor(0.1)),
                                              requires_grad=True)
 
-        # Transformation
+        # Origin
         self.origin = nn.Parameter(init_tensor(origin), requires_grad=True)
-        rotvec = axis_angle_to_quaternion(init_tensor(rotvec))
-        self.rotvec = nn.Parameter(init_tensor(rotvec), requires_grad=True)
         self.origin_logvar = nn.Parameter(torch.ones_like(self.origin) * 2 * torch.log(torch.tensor(0.01)),
                                           requires_grad=True)
-        self.rotvec_logvar = nn.Parameter(torch.ones_like(self.rotvec) * 2 * torch.log(torch.tensor(0.01)),
-                                          requires_grad=True)
+
+        # Rotation
+        if rotation_mode == PREANGLES_MODE_AXISANGLE:
+            assert len(rotation) == 3, 'Rotation must be a list of 3 floats for axis-angle representation'
+        elif rotation_mode == PREANGLES_MODE_QUATERNION:
+            assert len(rotation) == 4, 'Rotation must be a list of 4 floats for quaternion representation'
+        else:
+            raise ValueError(f'Unsupported rotation mode: {rotation_mode}')
+        self.rotation_mode = rotation_mode
+        self.rotation = nn.Parameter(init_tensor(rotation), requires_grad=True)
+        self.rotation_logvar = nn.Parameter(torch.ones_like(self.rotation) * 2 * torch.log(torch.tensor(0.01)),
+                                            requires_grad=True)
 
         # Register buffers
         self.register_buffer('all_distances', torch.empty(0))
@@ -203,11 +210,16 @@ class Crystal(nn.Module):
             d = torch.clamp(self.distances, 1e-1, None)
             self.distances.data = torch.sort(d, descending=True).values  # todo: parameterise or remove
             self.origin.data = torch.clamp(self.origin, -1e3, 1e3)
-            rv_norm = self.rotvec.norm()
-            self.rotvec.data = self.rotvec / rv_norm
-            # if rv_norm > 2 * torch.pi:
-            #     rv_norm2 = torch.remainder(self.rotvec.norm(), 2 * torch.pi)
-            #     self.rotvec.data = self.rotvec / rv_norm * rv_norm2
+            if self.rotation_mode == PREANGLES_MODE_AXISANGLE:
+                rv_norm = self.rotation.norm()
+                if rv_norm > 2 * torch.pi:
+                    rv_norm2 = torch.remainder(self.rotation.norm(), 2 * torch.pi)
+                    self.rotation.data = self.rotation / rv_norm * rv_norm2
+            elif self.rotation_mode == PREANGLES_MODE_QUATERNION:
+                rv_norm = self.rotation.norm()
+                self.rotation.data = self.rotation / rv_norm
+            else:
+                raise ValueError(f'Unsupported rotation mode: {self.rotation_mode}')
 
     def _init(self):
         """
@@ -292,7 +304,7 @@ class Crystal(nn.Module):
             self,
             distances: Optional[torch.Tensor] = None,
             origin: Optional[torch.Tensor] = None,
-            rotvec: Optional[torch.Tensor] = None,
+            rotation: Optional[torch.Tensor] = None,
             tol: float = 0.001
     ):
         """
@@ -303,8 +315,8 @@ class Crystal(nn.Module):
             distances = self.distances
         if origin is None:
             origin = self.origin
-        if rotvec is None:
-            rotvec = self.rotvec
+        if rotation is None:
+            rotation = self.rotation
 
         # Step 0: Update the distances, taking account of symmetries
         distances = torch.clip(distances, 0, None)
@@ -375,8 +387,12 @@ class Crystal(nn.Module):
             raise ValueError('Not enough faces to build a mesh!')
 
         # Step 4: Apply the rotation
-        # R = axis_angle_to_rotation_matrix(rotvec[None, :]).squeeze(0)
-        R = quaternion_to_rotation_matrix(rotvec[None, :]).squeeze(0)
+        if self.rotation_mode == PREANGLES_MODE_AXISANGLE:
+            R = axis_angle_to_rotation_matrix(rotation[None, :]).squeeze(0)
+        elif self.rotation_mode == PREANGLES_MODE_QUATERNION:
+            R = quaternion_to_rotation_matrix(rotation[None, :]).squeeze(0)
+        else:
+            raise ValueError(f'Unsupported rotation mode: {self.rotation_mode}')
         vertices = vertices @ R.T
         mesh_vertices = torch.cat(mesh_vertices) @ R.T
 

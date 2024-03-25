@@ -87,7 +87,7 @@ def _generate_crystal(
         point_group_symbol=point_group_symbol,
         distances=distances,
         origin=origin,
-        rotvec=rotvec
+        rotation=rotvec
     )
     crystal.to(device)
 
@@ -201,7 +201,7 @@ def prepare_plot(args: Namespace):
     def update(step: int):
         rotvec = torch.from_numpy(v[step]).to(device).to(torch.float32)
         q = axis_angle_to_quaternion(rotvec)
-        crystal.rotvec.data = q.to(crystal.rotvec.device)
+        crystal.rotation.data = q.to(crystal.rotation.device)
         scene = create_scene(crystal=crystal, spp=args.spp, width=args.width, height=args.height)
         img = mi.render(scene)
         img = np.array(mi.util.convert_to_bitmap(img))
