@@ -388,6 +388,8 @@ class Crystal(nn.Module):
 
         # Step 4: Apply the rotation
         if self.rotation_mode == PREANGLES_MODE_AXISANGLE:
+            if torch.allclose(rotation, torch.zeros(3, device=device)):
+                rotation = rotation + torch.randn(3, device=device) * 1e-8
             R = axis_angle_to_rotation_matrix(rotation[None, :]).squeeze(0)
         elif self.rotation_mode == PREANGLES_MODE_QUATERNION:
             R = quaternion_to_rotation_matrix(rotation[None, :]).squeeze(0)
