@@ -86,7 +86,7 @@ def calculate_relative_angles(vertices: torch.Tensor, centroid: torch.Tensor, to
 
 
 @torch.jit.script
-def cluster_vertices(vertices: torch.Tensor, epsilon: float = 1e-3) -> torch.Tensor:
+def cluster_vertices(vertices: torch.Tensor, epsilon: float = 1e-3) -> Tuple[torch.Tensor, torch.Tensor]:
     """
     Cluster a set of vertices based on spatial quantisation.
     """
@@ -100,7 +100,7 @@ def cluster_vertices(vertices: torch.Tensor, epsilon: float = 1e-3) -> torch.Ten
     # Use hash_keys to create a unique identifier for each cluster
     unique_clusters, cluster_indices = torch.unique(hash_keys, dim=0, return_inverse=True)
     if len(unique_clusters) == len(vertices):
-        return vertices_og
+        return vertices_og, torch.arange(len(vertices))
 
     # Calculate mean of points within each cluster
     clustered_vertices = torch.zeros_like(unique_clusters, dtype=vertices.dtype)
@@ -116,7 +116,7 @@ def cluster_vertices(vertices: torch.Tensor, epsilon: float = 1e-3) -> torch.Ten
     # Calculate mean for each cluster
     cluster_centroids = clustered_vertices / counts.unsqueeze(1).expand_as(clustered_vertices)
 
-    return cluster_centroids
+    return cluster_centroids, cluster_indices
 
 
 class Crystal(nn.Module):
@@ -346,15 +346,15 @@ class Crystal(nn.Module):
         mesh_faces = []
         v_idx = 0
         for i, on_face in enumerate(T):
-            face_indices = torch.nonzero(on_face).squeeze()
+            face_vertex_idxs = torch.nonzero(on_face).squeeze()
 
             # If the face does not have enough vertices, skip it
-            if len(face_indices) < 3:
+            if len(face_vertex_idxs) < 3:
                 continue
 
             # Merge nearby vertices
             face_vertices = vertices[on_face]
-            face_vertices = cluster_vertices(face_vertices, 1e-3)
+            face_vertices, _ = cluster_vertices(face_vertices, 1e-3)
             if len(face_vertices) < 3:
                 continue
             centroid = torch.mean(face_vertices, dim=0)
@@ -363,19 +363,19 @@ class Crystal(nn.Module):
             angles = calculate_relative_angles(face_vertices, centroid)
 
             # Sort the vertices based on the angles
-            sorted_indices = torch.argsort(angles)
-            sorted_vertices = face_vertices[sorted_indices]
+            sorted_idxs = torch.argsort(angles)
+            sorted_vertices = face_vertices[sorted_idxs]
 
             # Flip the order if the normal is pointing inwards
             normal = torch.cross(sorted_vertices[0] - centroid, sorted_vertices[1] - centroid, dim=0)
             if torch.dot(normal, centroid) < 0:
-                sorted_indices = sorted_indices.flip(0)
-            sorted_face_indices = face_indices[sorted_indices]
-            faces[i] = sorted_face_indices
+                sorted_idxs = sorted_idxs.flip(0)
+            sorted_face_vertex_idxs = face_vertex_idxs[sorted_idxs]
+            faces[i] = sorted_face_vertex_idxs
 
             # Build the triangular faces
-            mfv = torch.stack([centroid, *face_vertices[sorted_indices]])
-            N = len(face_indices)
+            mfv = torch.stack([centroid, *face_vertices[sorted_idxs]])
+            N = len(face_vertices)
             jdx = torch.arange(N, device=device)
             mfi = torch.stack([torch.zeros(N, device=device, dtype=torch.int64), jdx % N + 1, (jdx + 1) % N + 1])
             mfi = mfi + v_idx
@@ -386,7 +386,11 @@ class Crystal(nn.Module):
         if len(mesh_faces) < 3:
             raise ValueError('Not enough faces to build a mesh!')
 
-        # Step 4: Apply the rotation
+        # Step 4: Merge mesh vertices and correct face indices
+        mesh_vertices, cluster_idxs = cluster_vertices(torch.cat(mesh_vertices))
+        mesh_faces = cluster_idxs[torch.cat(mesh_faces, dim=1).T]
+
+        # Step 5: Apply the rotation
         if self.rotation_mode == PREANGLES_MODE_AXISANGLE:
             if torch.allclose(rotation, torch.zeros(3, device=device)):
                 rotation = rotation + torch.randn(3, device=device) * 1e-8
@@ -396,16 +400,16 @@ class Crystal(nn.Module):
         else:
             raise ValueError(f'Unsupported rotation mode: {self.rotation_mode}')
         vertices = vertices @ R.T
-        mesh_vertices = torch.cat(mesh_vertices) @ R.T
+        mesh_vertices = mesh_vertices @ R.T
 
-        # Step 5: Apply the origin translation
+        # Step 6: Apply the origin translation
         vertices = vertices + origin
         mesh_vertices = mesh_vertices + origin
 
         # Set properties to self
         self.vertices = vertices
         self.faces = faces
-        self.mesh_faces = torch.cat(mesh_faces, dim=1).T
+        self.mesh_faces = mesh_faces
         self.mesh_vertices = mesh_vertices
 
         return self.mesh_vertices.clone(), self.mesh_faces.clone()
