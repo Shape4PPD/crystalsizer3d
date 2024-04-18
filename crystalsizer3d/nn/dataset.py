@@ -14,10 +14,10 @@ from trimesh.exchange.obj import load_obj
 
 from crystalsizer3d import logger
 from crystalsizer3d.args.dataset_synthetic_args import DatasetSyntheticArgs
-from crystalsizer3d.args.dataset_training_args import DatasetTrainingArgs, PREANGLES_MODE_AXISANGLE, \
-    PREANGLES_MODE_QUATERNION, PREANGLES_MODE_SINCOS
+from crystalsizer3d.args.dataset_training_args import DatasetTrainingArgs, ROTATION_MODE_AXISANGLE, \
+    ROTATION_MODE_QUATERNION, ROTATION_MODE_SINCOS
 from crystalsizer3d.args.renderer_args import RendererArgs
-from crystalsizer3d.crystal_renderer import CrystalWellSettings
+from crystalsizer3d.crystal_renderer_blender import CrystalWellSettings
 from crystalsizer3d.util.utils import axisangle_to_euler, euler_to_axisangle, euler_to_quaternion, from_preangles, \
     quaternion_to_euler, to_numpy
 
@@ -104,12 +104,12 @@ class Dataset:
                 labels += self.labels_distance_switches
         if self.ds_args.train_transformation:
             labels += self.labels_transformation
-            if self.ds_args.preangles_mode == PREANGLES_MODE_SINCOS:
+            if self.ds_args.rotation_mode == ROTATION_MODE_SINCOS:
                 labels += self.labels_transformation_sincos
-            elif self.ds_args.preangles_mode == PREANGLES_MODE_QUATERNION:
+            elif self.ds_args.rotation_mode == ROTATION_MODE_QUATERNION:
                 labels += self.labels_transformation_quaternion
             else:
-                assert self.ds_args.preangles_mode == PREANGLES_MODE_AXISANGLE
+                assert self.ds_args.rotation_mode == ROTATION_MODE_AXISANGLE
                 labels += self.labels_transformation_axisangle
 
         if self.ds_args.train_material:
@@ -118,12 +118,12 @@ class Dataset:
             labels += self.labels_light
             if not self.renderer_args.transmission_mode:
                 labels += self.labels_light_location
-                if self.ds_args.preangles_mode == PREANGLES_MODE_SINCOS:
+                if self.ds_args.rotation_mode == ROTATION_MODE_SINCOS:
                     labels += self.labels_light_sincos
-                elif self.ds_args.preangles_mode == PREANGLES_MODE_QUATERNION:
+                elif self.ds_args.rotation_mode == ROTATION_MODE_QUATERNION:
                     labels += self.labels_light_quaternion
                 else:
-                    assert self.ds_args.preangles_mode == PREANGLES_MODE_AXISANGLE
+                    assert self.ds_args.rotation_mode == ROTATION_MODE_AXISANGLE
                     labels += self.labels_light_axisangle
 
         # If any of the labels have 0 variance in the dataset then remove them
@@ -433,13 +433,13 @@ class Dataset:
             #     assert np.all(min_vertex_dists < 0.1), 'Symmetry group is not correct!'
 
             # Get rotation representation
-            if self.ds_args.preangles_mode == PREANGLES_MODE_SINCOS:
+            if self.ds_args.rotation_mode == ROTATION_MODE_SINCOS:
                 rotation_preangles = np.column_stack([
                     np.sin(r_params['rotation']),
                     np.cos(r_params['rotation'])
                 ]).ravel()
 
-            elif self.ds_args.preangles_mode == PREANGLES_MODE_QUATERNION:
+            elif self.ds_args.rotation_mode == ROTATION_MODE_QUATERNION:
                 # Canonical rotations takes the quaternion with the smallest w value
                 if self.ds_args.use_canonical_rotations:
                     sym_q = np.array([Rotation.from_matrix(R).as_quat(canonical=True)[[3, 0, 1, 2]] for R in sym_R])
@@ -449,7 +449,7 @@ class Dataset:
                     rotation_preangles = R0.as_quat(canonical=True)[[3, 0, 1, 2]]
 
             else:
-                assert self.ds_args.preangles_mode == PREANGLES_MODE_AXISANGLE
+                assert self.ds_args.rotation_mode == ROTATION_MODE_AXISANGLE
                 rotation_preangles = R0.as_rotvec()
 
             params['transformation'] = np.array([
@@ -485,15 +485,15 @@ class Dataset:
                 location = 2 * (location - l_min) / range_max - 1
 
                 # Rotation pre-angles - [-1, 1]
-                if self.ds_args.preangles_mode == PREANGLES_MODE_SINCOS:
+                if self.ds_args.rotation_mode == ROTATION_MODE_SINCOS:
                     rotation_preangles = np.column_stack([
                         np.sin(r_params['light']['rotation'][:2]),
                         np.cos(r_params['light']['rotation'][:2])
                     ]).ravel()
-                elif self.ds_args.preangles_mode == PREANGLES_MODE_QUATERNION:
+                elif self.ds_args.rotation_mode == ROTATION_MODE_QUATERNION:
                     rotation_preangles = euler_to_quaternion(r_params['light']['rotation'])
                 else:
-                    assert self.ds_args.preangles_mode == PREANGLES_MODE_AXISANGLE
+                    assert self.ds_args.rotation_mode == ROTATION_MODE_AXISANGLE
                     rotation_preangles = euler_to_axisangle(r_params['light']['rotation'])
 
                 params['light'] = np.array([
@@ -511,7 +511,7 @@ class Dataset:
         """
         Load the mesh for an item.
         """
-        obj_path = self.path / 'crystals' / f'crystals_{idx // self.dataset_args.n_objs_per_file:05d}.obj'
+        obj_path = self.path / 'crystals' / f'crystals_{idx // self.dataset_args.batch_size:05d}.obj'
         with open(obj_path, 'r') as f:
             scene = load_obj(
                 f,
@@ -611,12 +611,12 @@ class Dataset:
             r_params['scale'] = inverse_z_transform(trans[3].item(), 's')
 
             # Rotation angles
-            if self.ds_args.preangles_mode == PREANGLES_MODE_SINCOS:
+            if self.ds_args.rotation_mode == ROTATION_MODE_SINCOS:
                 angles = from_preangles(trans[4:]).tolist()
-            elif self.ds_args.preangles_mode == PREANGLES_MODE_QUATERNION:
+            elif self.ds_args.rotation_mode == ROTATION_MODE_QUATERNION:
                 angles = quaternion_to_euler(trans[4:]).tolist()
             else:
-                assert self.ds_args.preangles_mode == PREANGLES_MODE_AXISANGLE
+                assert self.ds_args.rotation_mode == ROTATION_MODE_AXISANGLE
                 angles = axisangle_to_euler(trans[4:]).tolist()
             r_params['rotation'] = angles
         else:
@@ -676,12 +676,12 @@ class Dataset:
                 energy = inverse_z_transform(light[3].item(), 'e')
 
                 # Rotation angles
-                if self.ds_args.preangles_mode == PREANGLES_MODE_SINCOS:
+                if self.ds_args.rotation_mode == ROTATION_MODE_SINCOS:
                     angles = from_preangles(light[4:]).tolist() + [0., ]
-                elif self.ds_args.preangles_mode == PREANGLES_MODE_QUATERNION:
+                elif self.ds_args.rotation_mode == ROTATION_MODE_QUATERNION:
                     angles = quaternion_to_euler(light[4:]).tolist()
                 else:
-                    assert self.ds_args.preangles_mode == PREANGLES_MODE_AXISANGLE
+                    assert self.ds_args.rotation_mode == ROTATION_MODE_AXISANGLE
                     angles = axisangle_to_euler(light[4:]).tolist()
 
                 l_params = {

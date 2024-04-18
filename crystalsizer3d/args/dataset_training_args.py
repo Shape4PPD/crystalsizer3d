@@ -5,15 +5,6 @@ from typing import Union
 from crystalsizer3d.args.base_args import BaseArgs
 from crystalsizer3d.util.utils import str2bool
 
-PREANGLES_MODE_SINCOS = 'sincos'
-PREANGLES_MODE_QUATERNION = 'quaternion'
-PREANGLES_MODE_AXISANGLE = 'axisangle'
-PREANGLES_MODES = [
-    PREANGLES_MODE_SINCOS,
-    PREANGLES_MODE_QUATERNION,
-    PREANGLES_MODE_AXISANGLE
-]
-
 
 class DatasetTrainingArgs(BaseArgs):
     def __init__(
@@ -32,7 +23,6 @@ class DatasetTrainingArgs(BaseArgs):
             train_combined: bool = False,
             use_distance_switches: bool = True,
             add_coord_grid: bool = False,
-            preangles_mode: str = PREANGLES_MODE_SINCOS,
             check_symmetries: int = 0,
             use_canonical_rotations: bool = False,
             **kwargs
@@ -57,8 +47,6 @@ class DatasetTrainingArgs(BaseArgs):
         self.train_combined = train_combined
         self.use_distance_switches = use_distance_switches
         self.add_coord_grid = add_coord_grid
-        assert preangles_mode in PREANGLES_MODES, f'Angles mode must be one of {PREANGLES_MODES}. {preangles_mode} received.'
-        self.preangles_mode = preangles_mode
         self.check_symmetries = check_symmetries
         self.use_canonical_rotations = use_canonical_rotations
 
@@ -96,8 +84,6 @@ class DatasetTrainingArgs(BaseArgs):
                            help='Use distance switches.')
         group.add_argument('--add-coord-grid', type=str2bool, default=False,
                            help='Add coordinate grid to images as a separate channel.')
-        group.add_argument('--preangles-mode', type=str, default=PREANGLES_MODE_SINCOS, choices=PREANGLES_MODES,
-                           help='Which angles representation to use, "sincos" or "quaternions".')
         group.add_argument('--check-symmetries', type=int, default=0,
                            help='Check symmetries in the meshes so we can use a more reasonable rotational error to the group.')
         group.add_argument('--use-canonical-rotations', type=str2bool, default=False,

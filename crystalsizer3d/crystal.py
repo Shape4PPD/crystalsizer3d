@@ -7,17 +7,23 @@ from kornia.geometry import axis_angle_to_rotation_matrix, quaternion_to_rotatio
 from pymatgen.symmetry.groups import PointGroup
 from torch import nn
 
-from crystalsizer3d.args.dataset_training_args import PREANGLES_MODE_AXISANGLE, PREANGLES_MODE_QUATERNION
 from crystalsizer3d.util.utils import normalise_pt as normalise
 
+ROTATION_MODE_QUATERNION = 'quaternion'
+ROTATION_MODE_AXISANGLE = 'axisangle'
+ROTATION_MODES = [
+    ROTATION_MODE_QUATERNION,
+    ROTATION_MODE_AXISANGLE
+]
 
-def init_tensor(tensor: Union[torch.Tensor, np.ndarray, List[float]], dtype=torch.float32) -> torch.Tensor:
+
+def init_tensor(tensor: Union[torch.Tensor, np.ndarray, List[float], float, int], dtype=torch.float32) -> torch.Tensor:
     """
     Create a clone of a tensor or numpy array.
     """
     if isinstance(tensor, np.ndarray):
         tensor = torch.from_numpy(tensor)
-    if type(tensor) == list:
+    if isinstance(tensor, list) or isinstance(tensor, float) or isinstance(tensor, int):
         tensor = torch.tensor(tensor)
     return tensor.to(dtype).detach().clone()
 
@@ -76,6 +82,28 @@ def align_points_to_xy_plane(
 
 
 # @torch.jit.script
+def rotate_2d_points_to_square(
+        points: torch.Tensor,
+        max_adjustments: int = 20,
+        tol: float = 5 * (np.pi / 180)
+) -> torch.Tensor:
+    """
+    Rotate a set of 2D points to a square.
+    """
+    points = points - torch.mean(points, dim=0)
+    n_adjustments = 0
+    while n_adjustments < max_adjustments:
+        ptp = points.amax(dim=0) - points.amin(dim=0)
+        angle = torch.atan(ptp[1] / ptp[0]) - torch.pi / 4
+        if angle.abs() < tol:
+            break
+        s, c = torch.sin(angle), torch.cos(angle)
+        points = points @ torch.tensor([[c, -s], [s, c]], device=points.device)
+        n_adjustments += 1
+    return points
+
+
+# @torch.jit.script
 def calculate_relative_angles(vertices: torch.Tensor, centroid: torch.Tensor, tol: float = 1e-3) -> torch.Tensor:
     """
     Calculate the angles of a set of vertices relative to the centroid.
@@ -86,7 +114,7 @@ def calculate_relative_angles(vertices: torch.Tensor, centroid: torch.Tensor, to
 
 
 @torch.jit.script
-def cluster_vertices(vertices: torch.Tensor, epsilon: float = 1e-3) -> Tuple[torch.Tensor, torch.Tensor]:
+def merge_vertices(vertices: torch.Tensor, epsilon: float = 1e-3) -> Tuple[torch.Tensor, torch.Tensor]:
     """
     Cluster a set of vertices based on spatial quantisation.
     """
@@ -126,6 +154,7 @@ class Crystal(nn.Module):
     faces: Dict[int, torch.Tensor]
     mesh_vertices: torch.Tensor
     mesh_faces: torch.Tensor
+    bumpmap: torch.Tensor
 
     def __init__(
             self,
@@ -134,10 +163,20 @@ class Crystal(nn.Module):
             miller_indices: List[Tuple[int, int, int]],
             point_group_symbol: str = '1',
 
-            distances: List[float] = None,
-            origin: List[float] = [0, 0, 0],
-            rotation: List[float] = [0, 0, 0],
-            rotation_mode: str = PREANGLES_MODE_AXISANGLE
+            scale: float = 1.0,
+            distances: Optional[List[float]] = None,
+            origin: Optional[List[float]] = None,
+            rotation: Optional[List[float]] = None,
+            rotation_mode: str = ROTATION_MODE_AXISANGLE,
+
+            material_roughness: float = 0.1,
+            material_ior: float = 1.5,
+
+            use_bumpmap: bool = False,
+            bumpmap_dim: int = 100,
+            bumpmap: Optional[torch.Tensor] = None,
+
+            merge_vertices: bool = False
     ):
         """
         Set up the initial crystal and calculate the crystal habit.
@@ -160,10 +199,13 @@ class Crystal(nn.Module):
         # Miller indices should be a list of tuples
         assert len(miller_indices) > 0 and all(len(idx) == 3 for idx in miller_indices), \
             'Miller indices must be a list of tuples of length 3'
-        self.miller_indices = miller_indices
+        self.miller_indices = miller_indices.copy()
 
         # The symmetry group in Hermann–Mauguin notation
         self.point_group_symbol = point_group_symbol
+
+        # Scale
+        self.scale = nn.Parameter(init_tensor(scale), requires_grad=True)
 
         # Distances from the origin to the faces - should be equal to the number of provided miller indices
         if distances is None:
@@ -175,14 +217,21 @@ class Crystal(nn.Module):
                                              requires_grad=True)
 
         # Origin
+        if origin is None:
+            origin = [0, 0, 0]
         self.origin = nn.Parameter(init_tensor(origin), requires_grad=True)
         self.origin_logvar = nn.Parameter(torch.ones_like(self.origin) * 2 * torch.log(torch.tensor(0.01)),
                                           requires_grad=True)
 
         # Rotation
-        if rotation_mode == PREANGLES_MODE_AXISANGLE:
+        if rotation is None:
+            if rotation_mode == ROTATION_MODE_AXISANGLE:
+                rotation = [0, 0, 0]
+            else:
+                rotation = [1, 0, 0, 0]
+        if rotation_mode == ROTATION_MODE_AXISANGLE:
             assert len(rotation) == 3, 'Rotation must be a list of 3 floats for axis-angle representation'
-        elif rotation_mode == PREANGLES_MODE_QUATERNION:
+        elif rotation_mode == ROTATION_MODE_QUATERNION:
             assert len(rotation) == 4, 'Rotation must be a list of 4 floats for quaternion representation'
         else:
             raise ValueError(f'Unsupported rotation mode: {rotation_mode}')
@@ -190,6 +239,22 @@ class Crystal(nn.Module):
         self.rotation = nn.Parameter(init_tensor(rotation), requires_grad=True)
         self.rotation_logvar = nn.Parameter(torch.ones_like(self.rotation) * 2 * torch.log(torch.tensor(0.01)),
                                             requires_grad=True)
+
+        # Material
+        self.material_roughness = nn.Parameter(init_tensor(material_roughness), requires_grad=True)
+        self.material_ior = nn.Parameter(init_tensor(material_ior), requires_grad=True)
+
+        # Bumpmap texture
+        if use_bumpmap:
+            if bumpmap is None:
+                bumpmap = torch.zeros(bumpmap_dim, bumpmap_dim)
+            self.bumpmap = nn.Parameter(init_tensor(bumpmap), requires_grad=True)
+        else:
+            self.bumpmap = None
+        self.use_bumpmap = use_bumpmap
+
+        # Mesh options
+        self.merge_vertices = merge_vertices
 
         # Register buffers
         self.register_buffer('all_distances', torch.empty(0))
@@ -208,14 +273,18 @@ class Crystal(nn.Module):
         """
         with torch.no_grad():
             d = torch.clamp(self.distances, 1e-1, None)
-            self.distances.data = torch.sort(d, descending=True).values  # todo: parameterise or remove
+            d = torch.sort(d, descending=True).values  # todo: parameterise or remove
+            sf = 1 / d.amax()  # Fix the max distance to 1 and adjust scale
+            self.distances.data = d * sf
+            self.scale.data = torch.clamp(self.scale / sf, 1e-8, 1e8)
+
             self.origin.data = torch.clamp(self.origin, -1e3, 1e3)
-            if self.rotation_mode == PREANGLES_MODE_AXISANGLE:
+            if self.rotation_mode == ROTATION_MODE_AXISANGLE:
                 rv_norm = self.rotation.norm()
                 if rv_norm > 2 * torch.pi:
                     rv_norm2 = torch.remainder(self.rotation.norm(), 2 * torch.pi)
                     self.rotation.data = self.rotation / rv_norm * rv_norm2
-            elif self.rotation_mode == PREANGLES_MODE_QUATERNION:
+            elif self.rotation_mode == ROTATION_MODE_QUATERNION:
                 rv_norm = self.rotation.norm()
                 self.rotation.data = self.rotation / rv_norm
             else:
@@ -248,7 +317,7 @@ class Crystal(nn.Module):
         sym_group = PointGroup(self.point_group_symbol)
         symmetry_operations = sym_group.symmetry_ops
 
-        all_miller_indices = self.miller_indices
+        all_miller_indices = self.miller_indices.copy()
         all_distances = self.distances.clone()
         symmetry_idx = list(range(len(all_distances)))
         for idx, (indices, dist) in enumerate(zip(self.miller_indices, self.distances)):
@@ -294,6 +363,7 @@ class Crystal(nn.Module):
         """
         Update the distances of the crystal habit.
         """
+        raise DeprecationWarning('This method is not being used.')
         if not isinstance(distances, torch.Tensor):
             distances = init_tensor(distances)
         with torch.no_grad():
@@ -302,15 +372,18 @@ class Crystal(nn.Module):
 
     def build_mesh(
             self,
+            scale: Optional[torch.Tensor] = None,
             distances: Optional[torch.Tensor] = None,
             origin: Optional[torch.Tensor] = None,
             rotation: Optional[torch.Tensor] = None,
-            tol: float = 0.001
+            tol: float = 1e-3
     ):
         """
         Take the face normals and distances and calculate where the vertices and edges lie.
         """
         device = self.origin.device
+        if scale is None:
+            scale = self.scale
         if distances is None:
             distances = self.distances
         if origin is None:
@@ -354,7 +427,8 @@ class Crystal(nn.Module):
 
             # Merge nearby vertices
             face_vertices = vertices[on_face]
-            face_vertices, _ = cluster_vertices(face_vertices, 1e-3)
+            if self.merge_vertices:
+                face_vertices, _ = merge_vertices(face_vertices, tol)
             if len(face_vertices) < 3:
                 continue
             centroid = torch.mean(face_vertices, dim=0)
@@ -387,30 +461,40 @@ class Crystal(nn.Module):
             raise ValueError('Not enough faces to build a mesh!')
 
         # Step 4: Merge mesh vertices and correct face indices
-        mesh_vertices, cluster_idxs = cluster_vertices(torch.cat(mesh_vertices))
-        mesh_faces = cluster_idxs[torch.cat(mesh_faces, dim=1).T]
+        mesh_vertices = torch.cat(mesh_vertices)
+        mesh_faces = torch.cat(mesh_faces, dim=1).T
+        if self.merge_vertices:
+            mesh_vertices, cluster_idxs = merge_vertices(mesh_vertices)
+            mesh_faces = cluster_idxs[mesh_faces]
 
         # Step 5: Apply the rotation
-        if self.rotation_mode == PREANGLES_MODE_AXISANGLE:
+        if self.rotation_mode == ROTATION_MODE_AXISANGLE:
             if torch.allclose(rotation, torch.zeros(3, device=device)):
                 rotation = rotation + torch.randn(3, device=device) * 1e-8
             R = axis_angle_to_rotation_matrix(rotation[None, :]).squeeze(0)
-        elif self.rotation_mode == PREANGLES_MODE_QUATERNION:
+        elif self.rotation_mode == ROTATION_MODE_QUATERNION:
             R = quaternion_to_rotation_matrix(rotation[None, :]).squeeze(0)
         else:
             raise ValueError(f'Unsupported rotation mode: {self.rotation_mode}')
         vertices = vertices @ R.T
         mesh_vertices = mesh_vertices @ R.T
 
-        # Step 6: Apply the origin translation
+        # Step 6: Apply the scaling
+        vertices = vertices * scale
+        mesh_vertices = mesh_vertices * scale
+
+        # Step 7: Apply the origin translation
         vertices = vertices + origin
         mesh_vertices = mesh_vertices + origin
 
         # Set properties to self
         self.vertices = vertices
         self.faces = faces
-        self.mesh_faces = mesh_faces
         self.mesh_vertices = mesh_vertices
+        self.mesh_faces = mesh_faces
+
+        # Step 8: Construct the UV map
+        self._build_uv_map()
 
         return self.mesh_vertices.clone(), self.mesh_faces.clone()
 
@@ -425,3 +509,90 @@ class Crystal(nn.Module):
         b = torch.stack([self.all_distances[n1], self.all_distances[n2], self.all_distances[n3]])
         intersection_point = torch.linalg.solve(A, b.unsqueeze(1))
         return intersection_point.squeeze()
+
+    def _build_uv_map(self):
+        """
+        Construct the UV map of the crystal habit.
+        """
+        if self.merge_vertices:
+            raise RuntimeError('Cannot build UV map with merged vertices!')
+        device = self.origin.device
+
+        # Detach the faces and vertices from the computation
+        f, v = self.mesh_faces.detach(), self.mesh_vertices.detach()
+        faces = {}
+        face_uvs = {}
+
+        # Construct a grid where each cell contains the planar coordinates of a face
+        centroid_idxs = f[:, 0].unique(dim=0)
+        grid_dim = np.sqrt(len(centroid_idxs)).astype(int) + 1
+        rows = [[] for _ in range(grid_dim)]
+        row_heights = [0] * grid_dim
+        col_widths = [0] * grid_dim
+        col_idxs = torch.stack([torch.arange(4)] * 4)
+        row_idxs = col_idxs.T
+        sorted_idxs = torch.argsort((row_idxs**2 + col_idxs**2).flatten())
+        positions = torch.zeros_like(sorted_idxs)
+        positions[sorted_idxs] = torch.arange(len(positions))
+        positions = positions.reshape(4, 4)
+
+        # Calculate the planar coordinates for each face
+        for i, c_idx in enumerate(centroid_idxs):
+            # Extract the face vertices and calculate the planar coordinates
+            face = f[f[:, 0] == c_idx]
+            fv_idxs = face.flatten().unique()
+            faces[i] = fv_idxs
+            v2 = align_points_to_xy_plane(v[fv_idxs[1:]])[:, :2]
+            v2 = torch.cat([torch.zeros((1, 2), device=device), v2])  # Add the centroid back in
+            v2 = rotate_2d_points_to_square(v2)  # Rotate so the bounding box is square
+            v2 = v2 - v2.amin(dim=0)  # Put close to the origin, but keep positive
+
+            # Add the planar coordinates to the grid and update the row heights and column widths
+            cell_pos = (positions == i).nonzero()[0]
+            row_idx, col_idx = cell_pos[0].item(), cell_pos[1].item()
+            rows[row_idx].append(v2)
+            row_heights[row_idx] = max(row_heights[row_idx], v2[:, 1].max().item())
+            col_widths[col_idx] = max(col_widths[col_idx], v2[:, 0].max().item())
+
+        # Add a little padding
+        pad = max(max(row_heights), max(col_widths)) * 0.1
+        row_heights = [h + pad for h in row_heights]
+        col_widths = [w + pad for w in col_widths]
+
+        # Centre each set of coordinates in their cells, offset them and scale to [0,1]
+        uv_map = torch.zeros((len(v), 2), device=device)
+        sf = 1 / max(sum(row_heights), sum(col_widths))
+        for row_idx, row in enumerate(rows):
+            for col_idx, v2 in enumerate(row):
+                cell_midpoint = torch.tensor([col_widths[col_idx], row_heights[row_idx]], device=device) / 2
+                offset = torch.tensor([sum(col_widths[:col_idx]), sum(row_heights[:row_idx])], device=device)
+                v2 = v2 - v2.mean(dim=0) + cell_midpoint + offset
+                v2 = v2 * sf
+                rows[row_idx][col_idx] = v2
+                face_idx = positions[row_idx, col_idx].item()
+                vertex_idxs = faces[face_idx]
+                uv_map[vertex_idxs] = v2
+                face_uvs[face_idx] = v2
+
+        # plot_uv_map(rows, row_heights, col_widths, sf)
+        self.uv_map = uv_map
+
+
+def plot_uv_map(rows, row_heights, col_widths, sf):
+    import matplotlib.pyplot as plt
+    from crystalsizer3d.util.utils import to_numpy
+
+    # Plot the UV map
+    fig, ax = plt.subplots()
+    ax.axhline(y=0, color='k')
+    for row_idx, row in enumerate(rows):
+        ax.axhline(y=sum(row_heights[:row_idx]) * sf, color='k')
+        for col_idx, v2 in enumerate(row):
+            if row_idx == 0:
+                ax.axvline(x=sum(col_widths[:col_idx]) * sf, color='k')
+                if col_idx == len(row) - 1:
+                    ax.axvline(x=sum(col_widths) * sf, color='k')
+            ax.plot(*to_numpy(v2).T, '-o')
+    ax.set_xlim(0, 1)
+    ax.set_ylim(0, 1)
+    plt.show()

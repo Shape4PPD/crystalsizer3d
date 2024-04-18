@@ -7,6 +7,7 @@ from argparse import ArgumentParser
 from pathlib import Path
 from typing import Tuple
 
+import cv2
 import numpy as np
 import yaml
 from PIL import Image
@@ -15,8 +16,10 @@ from trimesh.exchange.obj import export_obj, load_obj
 
 from crystalsizer3d import LOGS_PATH, START_TIMESTAMP, logger
 from crystalsizer3d.args.dataset_synthetic_args import DatasetSyntheticArgs
-from crystalsizer3d.args.renderer_args import RendererArgs
-from crystalsizer3d.crystal_renderer import CrystalRenderer, CrystalWellSettings, blender_render
+from crystalsizer3d.args.renderer_args import ENGINE_BLENDER, ENGINE_MITSUBA, RendererArgs
+from crystalsizer3d.crystal_renderer import CrystalRenderer
+from crystalsizer3d.crystal_renderer_blender import CrystalRendererBlender, CrystalWellSettings, blender_render
+from crystalsizer3d.crystal_renderer_mitsuba import CrystalRendererMitsuba
 from crystalsizer3d.util.utils import print_args, set_seed, to_dict
 
 PARAMETER_HEADERS = [
@@ -57,6 +60,7 @@ def validate(
     with open(output_dir / 'options.yml', 'r') as f:
         spec = yaml.load(f, Loader=yaml.FullLoader)
         dataset_args = DatasetSyntheticArgs.from_args(spec['dataset_args'])
+        renderer_args = RendererArgs.from_args(spec['renderer_args'])
 
     n_examples = min(dataset_args.validate_n_samples, dataset_args.n_samples)
     if n_examples <= 0:
@@ -72,21 +76,32 @@ def validate(
     from crystalsizer3d.crystal_generator import CrystalGenerator
     generator = CrystalGenerator(
         crystal_id=dataset_args.crystal_id,
+        miller_indices=dataset_args.miller_indices,
         ratio_means=dataset_args.ratio_means,
         ratio_stds=dataset_args.ratio_stds,
         zingg_bbox=dataset_args.zingg_bbox,
         constraints=dataset_args.distance_constraints,
     )
 
-    # Copy over the rendering parameters
-    settings_path = val_dir / 'vcw_settings.json'
-    shutil.copy(output_dir / 'vcw_settings.json', settings_path)
-    vcw_settings = CrystalWellSettings()
-    vcw_settings.from_json(settings_path)
-    vcw_settings.path = settings_path
-    vcw_settings.settings_dict['number_images'] = 1
-    vcw_settings.settings_dict['crystal_import_path'] = str(obj_val_path.absolute())
-    vcw_settings.settings_dict['output_path'] = str(val_dir.absolute())
+    # Copy over the rendering parameters if using Blender
+    if renderer_args.render_engine == ENGINE_BLENDER:
+        settings_path = val_dir / 'vcw_settings.json'
+        shutil.copy(output_dir / 'vcw_settings.json', settings_path)
+        vcw_settings = CrystalWellSettings()
+        vcw_settings.from_json(settings_path)
+        vcw_settings.path = settings_path
+        vcw_settings.settings_dict['number_images'] = 1
+        vcw_settings.settings_dict['crystal_import_path'] = str(obj_val_path.absolute())
+        vcw_settings.settings_dict['output_path'] = str(val_dir.absolute())
+
+    # Otherwise, initialise the crystal renderer
+    else:
+        renderer = CrystalRendererMitsuba(
+            param_path=output_dir / 'parameters.csv',
+            dataset_args=dataset_args,
+            renderer_args=renderer_args,
+            quiet_render=True
+        )
 
     # Load rendering parameters
     logger.info('Loading rendering parameters.')
@@ -142,46 +157,51 @@ def validate(
             # Load the parameters for this idx
             example = data[idx]
             r_params = example['rendering_parameters']
+            img_path = val_dir / '0000000001.png'
 
             # Build the crystal
             logger.info('Re-generating crystal.')
-            ref_idxs = [''.join(str(i) for i in k) for k in generator.distances.keys()]
-            _, z, m = generator.generate_crystal(
-                rel_rates=np.array([example[f'd{i}_{k}'] for i, k in enumerate(ref_idxs)]),
-            )
-
-            # Write the mesh to file
-            scene = Scene()
-            scene.add_geometry([m, ])
-            with open(obj_val_path, 'w') as f:
-                f.write(export_obj(
-                    scene,
-                    header=None,
-                    include_normals=True,
-                    include_color=False
-                ))
+            ref_idxs = [''.join(str(i) for i in k) for k in generator.miller_indices]
+            rel_distances = np.array([example[f'd{i}_{k}'] for i, k in enumerate(ref_idxs)])
+            _, z, m = generator.generate_crystal(rel_distances=rel_distances)
 
             # Re-render the crystal using the same rendering parameters
-            vcw_settings.settings_dict['crystal_location'] = r_params['location']
-            vcw_settings.settings_dict['crystal_scale'] = r_params['scale']
-            vcw_settings.settings_dict['crystal_rotation'] = r_params['rotation']
-            vcw_settings.settings_dict['crystal_material_min_ior'] = r_params['material']['ior']
-            vcw_settings.settings_dict['crystal_material_max_ior'] = r_params['material']['ior']
-            vcw_settings.settings_dict['crystal_material_min_brightness'] = r_params['material']['brightness']
-            vcw_settings.settings_dict['crystal_material_max_brightness'] = r_params['material']['brightness']
-            vcw_settings.settings_dict['crystal_material_min_roughness'] = r_params['material']['roughness']
-            vcw_settings.settings_dict['crystal_material_max_roughness'] = r_params['material']['roughness']
-            if not vcw_settings.settings_dict['transmission_mode']:
-                vcw_settings.settings_dict['light_angle_min'] = np.rad2deg(r_params['light']['angle'])
-                vcw_settings.settings_dict['light_angle_max'] = np.rad2deg(r_params['light']['angle'])
-                vcw_settings.settings_dict['light_location'] = r_params['light']['location']
-                vcw_settings.settings_dict['light_rotation'] = r_params['light']['rotation']
-            vcw_settings.settings_dict['light_energy'] = r_params['light']['energy']
-            vcw_settings.write_json()
-            blender_render(vcw_settings, attempts=3, quiet=True)
+            if renderer_args.render_engine == ENGINE_BLENDER:
+                # Write the mesh to file
+                scene = Scene()
+                scene.add_geometry([m, ])
+                with open(obj_val_path, 'w') as f:
+                    f.write(export_obj(
+                        scene,
+                        header=None,
+                        include_normals=True,
+                        include_color=False
+                    ))
+
+                # Update the rendering parameters
+                vcw_settings.settings_dict['crystal_location'] = r_params['location']
+                vcw_settings.settings_dict['crystal_scale'] = r_params['scale']
+                vcw_settings.settings_dict['crystal_rotation'] = r_params['rotation']
+                vcw_settings.settings_dict['crystal_material_min_ior'] = r_params['material']['ior']
+                vcw_settings.settings_dict['crystal_material_max_ior'] = r_params['material']['ior']
+                vcw_settings.settings_dict['crystal_material_min_brightness'] = r_params['material']['brightness']
+                vcw_settings.settings_dict['crystal_material_max_brightness'] = r_params['material']['brightness']
+                vcw_settings.settings_dict['crystal_material_min_roughness'] = r_params['material']['roughness']
+                vcw_settings.settings_dict['crystal_material_max_roughness'] = r_params['material']['roughness']
+                if not vcw_settings.settings_dict['transmission_mode']:
+                    vcw_settings.settings_dict['light_angle_min'] = np.rad2deg(r_params['light']['angle'])
+                    vcw_settings.settings_dict['light_angle_max'] = np.rad2deg(r_params['light']['angle'])
+                    vcw_settings.settings_dict['light_location'] = r_params['light']['location']
+                    vcw_settings.settings_dict['light_rotation'] = r_params['light']['rotation']
+                vcw_settings.settings_dict['light_energy'] = r_params['light']['energy']
+                vcw_settings.write_json()
+                blender_render(vcw_settings, attempts=3, quiet=True)
+
+            else:
+                img = renderer.render_from_parameters(r_params)
+                cv2.imwrite(str(img_path), img)
 
             # Save the images side by side for comparison
-            img_path = val_dir / '0000000001.png'
             img_path_compare = val_dir / f'compare_{idx:05d}.png'
             img_og = Image.open(example['image'])
             img_new = Image.open(img_path)
@@ -194,61 +214,62 @@ def validate(
             assert np.allclose(z[0], example['si']), f'Zingg SI values do not match: {z[0]} != {example["si"]}'
             assert np.allclose(z[1], example['il']), f'Zingg IL values do not match: {z[1]} != {example["il"]}'
 
-            # Load the saved mesh from disk
-            obj_path = obj_dir / f'crystals_{idx // dataset_args.n_objs_per_file:05d}.obj'
-            vertices = []
-            normals = []
-            reading = False
-            with open(obj_path, 'r') as f:
-                for line in f:
-                    line = line.strip()
-                    if line.startswith(f'o {generator.crystal_id}_{idx:06d}'):
-                        reading = True
-                        continue
-                    if reading:
-                        if line.startswith('v '):
-                            vertices.append(np.array([float(v) for v in line.split(' ')[1:]]))
-                        elif line.startswith('vn '):
-                            normals.append(np.array([float(v) for v in line.split(' ')[1:]]))
-                        elif line == '':
-                            break
+            if renderer_args.render_engine == ENGINE_BLENDER:
+                # Load the saved mesh from disk
+                obj_path = obj_dir / f'crystals_{idx // dataset_args.batch_size:05d}.obj'
+                vertices = []
+                normals = []
+                reading = False
+                with open(obj_path, 'r') as f:
+                    for line in f:
+                        line = line.strip()
+                        if line.startswith(f'o {generator.crystal_id}_{idx:06d}'):
+                            reading = True
+                            continue
+                        if reading:
+                            if line.startswith('v '):
+                                vertices.append(np.array([float(v) for v in line.split(' ')[1:]]))
+                            elif line.startswith('vn '):
+                                normals.append(np.array([float(v) for v in line.split(' ')[1:]]))
+                            elif line == '':
+                                break
 
-            # Check the vertices and normals match the re-generated mesh
-            assert np.allclose(m.vertices, np.array(vertices)), 'Vertices do not match!'
-            assert np.allclose(m.vertex_normals, np.array(normals)), 'Vertex normals do not match!'
+                # Check the vertices and normals match the re-generated mesh
+                assert np.allclose(m.vertices, np.array(vertices)), 'Vertices do not match!'
+                assert np.allclose(m.vertex_normals, np.array(normals)), 'Vertex normals do not match!'
 
-            # Check that the rendering parameters that come out are the same that went in
-            render_params_path = val_dir / '0000000001.png.json'
-            with open(render_params_path) as f:
-                r_params2 = json.load(f)
-                assert np.allclose(r_params['location'], r_params2['crystals']['locations'][0]), \
-                    'Location does not match!'
-                assert np.allclose(r_params['scale'], r_params2['crystals']['scales'][0]), \
-                    'Scale does not match!'
-                assert np.allclose(r_params['rotation'], r_params2['crystals']['rotations'][0]), \
-                    'Rotation does not match!'
-                assert np.allclose(r_params['material']['ior'], r_params2['materials']['iors'][0]), \
-                    'IOR does not match!'
-                assert np.allclose(r_params['material']['brightness'], r_params2['materials']['brightnesses'][0]), \
-                    'Brightness does not match!'
-                if not vcw_settings.settings_dict['transmission_mode']:
-                    assert np.allclose(r_params['light']['angle'], r_params2['light']['angle']), \
-                        'Light angle does not match!'
-                    assert np.allclose(r_params['light']['location'], r_params2['light']['location']), \
-                        'Light location does not match!'
-                    assert np.allclose(r_params['light']['rotation'], r_params2['light']['rotation']), \
-                        'Light rotation does not match!'
-                assert np.allclose(r_params['light']['energy'], r_params2['light']['energy']), \
-                    'Light energy does not match!'
-                s1, s2 = np.array(example['segmentation']), np.array(r_params2['segmentation'][0])
-                if s1.shape == s2.shape:
-                    max_s_err = np.max(np.abs(s1 - s2))
-                    mean_s_err = np.mean(np.abs(s1 - s2))
-                    err = f' Max err = {max_s_err:.3E}. Mean err = {mean_s_err:.3E}.'
-                else:
-                    err = f' Shapes do not match ({s1.shape} != {s2.shape}).'
-                assert s1.shape == s2.shape and np.allclose(s1, s2, atol=0.1), \
-                    f'Segmentations do not match! {err}.'
+                # Check that the rendering parameters that come out are the same that went in
+                render_params_path = val_dir / '0000000001.png.json'
+                with open(render_params_path) as f:
+                    r_params2 = json.load(f)
+                    assert np.allclose(r_params['location'], r_params2['crystals']['locations'][0]), \
+                        'Location does not match!'
+                    assert np.allclose(r_params['scale'], r_params2['crystals']['scales'][0]), \
+                        'Scale does not match!'
+                    assert np.allclose(r_params['rotation'], r_params2['crystals']['rotations'][0]), \
+                        'Rotation does not match!'
+                    assert np.allclose(r_params['material']['ior'], r_params2['materials']['iors'][0]), \
+                        'IOR does not match!'
+                    assert np.allclose(r_params['material']['brightness'], r_params2['materials']['brightnesses'][0]), \
+                        'Brightness does not match!'
+                    if not vcw_settings.settings_dict['transmission_mode']:
+                        assert np.allclose(r_params['light']['angle'], r_params2['light']['angle']), \
+                            'Light angle does not match!'
+                        assert np.allclose(r_params['light']['location'], r_params2['light']['location']), \
+                            'Light location does not match!'
+                        assert np.allclose(r_params['light']['rotation'], r_params2['light']['rotation']), \
+                            'Light rotation does not match!'
+                    assert np.allclose(r_params['light']['energy'], r_params2['light']['energy']), \
+                        'Light energy does not match!'
+                    s1, s2 = np.array(example['segmentation']), np.array(r_params2['segmentation'][0])
+                    if s1.shape == s2.shape:
+                        max_s_err = np.max(np.abs(s1 - s2))
+                        mean_s_err = np.mean(np.abs(s1 - s2))
+                        err = f' Max err = {max_s_err:.3E}. Mean err = {mean_s_err:.3E}.'
+                    else:
+                        err = f' Shapes do not match ({s1.shape} != {s2.shape}).'
+                    assert s1.shape == s2.shape and np.allclose(s1, s2, atol=0.1), \
+                        f'Segmentations do not match! {err}.'
 
             # Assert that the images aren't too different
             img_og = np.array(img_og).astype(np.float32)
@@ -259,8 +280,9 @@ def validate(
                 f'Images are too different! (Mean diff={mean_diff:.3E}, Max diff={max_diff:.1f})'
 
             # Clean up
-            obj_val_path.unlink()
-            render_params_path.unlink()
+            if renderer_args.render_engine == ENGINE_BLENDER:
+                obj_val_path.unlink()
+                render_params_path.unlink()
             img_path.unlink()
             logger.info('Validation passed.')
 
@@ -269,7 +291,8 @@ def validate(
             failed_idxs.append(idx)
 
     # Clean up
-    settings_path.unlink()
+    if renderer_args.render_engine == ENGINE_BLENDER:
+        settings_path.unlink()
 
     if len(failed_idxs) > 0:
         logger.warning(f'Validation failed for {len(failed_idxs)}/{n_examples} examples!')
@@ -282,7 +305,7 @@ def validate(
         logger.info('Validation complete. All examples passed!')
 
 
-def main():
+def generate_dataset():
     """
     Generate a dataset of synthetic crystal images.
     """
@@ -328,6 +351,7 @@ def main():
         from crystalsizer3d.crystal_generator import CrystalGenerator
         generator = CrystalGenerator(
             crystal_id=dataset_args.crystal_id,
+            miller_indices=dataset_args.miller_indices,
             ratio_means=dataset_args.ratio_means,
             ratio_stds=dataset_args.ratio_stds,
             zingg_bbox=dataset_args.zingg_bbox,
@@ -340,10 +364,10 @@ def main():
 
         # Save all meshes to obj files, with limited number of objects per file
         logger.info(f'Saving meshes to {obj_dir}.')
-        n_files = int(np.ceil(len(crystals) / dataset_args.n_objs_per_file))
+        n_files = int(np.ceil(len(crystals) / dataset_args.batch_size))
         for i in range(n_files):
-            start_idx = i * dataset_args.n_objs_per_file
-            end_idx = (i + 1) * dataset_args.n_objs_per_file
+            start_idx = i * dataset_args.batch_size
+            end_idx = (i + 1) * dataset_args.batch_size
             meshes = [c[2] for c in crystals[start_idx:end_idx]]
             scene = Scene()
             scene.add_geometry(meshes)
@@ -360,7 +384,7 @@ def main():
         logger.info(f'Saving crystal parameters to {param_path}.')
         with open(param_path, 'w') as f:
             headers = PARAMETER_HEADERS.copy()
-            ref_idxs = [''.join(str(i) for i in k) for k in generator.distances.keys()]
+            ref_idxs = [''.join(str(i) for i in k) for k in dataset_args.miller_indices]
             for i, hkl in enumerate(ref_idxs):
                 headers.append(f'd{i}_{hkl}')
             writer = csv.DictWriter(f, fieldnames=headers)
@@ -379,16 +403,27 @@ def main():
 
     # Render the crystals
     logger.info('Rendering crystals.')
-    renderer = CrystalRenderer(
-        obj_dir=obj_dir,
-        dataset_args=dataset_args,
-        renderer_args=renderer_args,
-        quiet_render=True
-    )
+    if renderer_args.render_engine == ENGINE_BLENDER:
+        renderer = CrystalRendererBlender(
+            obj_dir=obj_dir,
+            dataset_args=dataset_args,
+            renderer_args=renderer_args,
+            quiet_render=True
+        )
+    elif renderer_args.render_engine == ENGINE_MITSUBA:
+        renderer = CrystalRendererMitsuba(
+            param_path=param_path,
+            dataset_args=dataset_args,
+            renderer_args=renderer_args,
+            quiet_render=False
+        )
+    else:
+        raise ValueError(f'Unknown render engine: {renderer_args.render_engine}!')
     renderer.render()
 
     # Annotate a single image for reference
-    renderer.annotate_image()
+    if hasattr(renderer, 'annotate_image'):
+        renderer.annotate_image()
 
     # Re-generate a few images from the parameters to check that they match
     validate(output_dir=save_dir)
@@ -449,9 +484,10 @@ def resume(
                     f'and updating parameters for these entries.')
 
         # Generate some replacement crystals
-        from scr.crystal_generator import CrystalGenerator
+        from crystalsizer3d.crystal_generator import CrystalGenerator
         generator = CrystalGenerator(
             crystal_id=dataset_args.crystal_id,
+            miller_indices=dataset_args.miller_indices,
             ratio_means=dataset_args.ratio_means,
             ratio_stds=dataset_args.ratio_stds,
             zingg_bbox=dataset_args.zingg_bbox,
@@ -545,7 +581,7 @@ def resume(
     logger.info('Checking for missing images and parameters.')
     assert obj_dir.exists(), f'Crystals directory does not exist: {obj_dir}'
     Ns = dataset_args.n_samples
-    No = dataset_args.n_objs_per_file
+    No = dataset_args.batch_size
     Nb = math.ceil(Ns / No)
     bad_obj_files = []
     for i in range(Nb):
@@ -599,7 +635,7 @@ def resume(
 
 if __name__ == '__main__':
     set_seed(1)
-    main()
+    generate_dataset()
 
     # -- Use to re-validate a directory --
     # validate(

@@ -26,8 +26,8 @@ from torch.utils.data import DataLoader
 from torch.utils.tensorboard import SummaryWriter
 
 from crystalsizer3d import LOGS_PATH, START_TIMESTAMP, logger
-from crystalsizer3d.args.dataset_training_args import DatasetTrainingArgs, PREANGLES_MODE_AXISANGLE, \
-    PREANGLES_MODE_QUATERNION, PREANGLES_MODE_SINCOS
+from crystalsizer3d.args.dataset_training_args import DatasetTrainingArgs, ROTATION_MODE_AXISANGLE, \
+    ROTATION_MODE_QUATERNION, ROTATION_MODE_SINCOS
 from crystalsizer3d.args.generator_args import GeneratorArgs
 from crystalsizer3d.args.network_args import NetworkArgs
 from crystalsizer3d.args.optimiser_args import OptimiserArgs
@@ -1345,12 +1345,12 @@ class Manager:
 
         if self.dataset_args.train_transformation:
             n_params = len(self.ds.labels_transformation)
-            if self.dataset_args.preangles_mode == PREANGLES_MODE_SINCOS:
+            if self.dataset_args.rotation_mode == ROTATION_MODE_SINCOS:
                 n_params += len(self.ds.labels_transformation_sincos)
-            elif self.dataset_args.preangles_mode == PREANGLES_MODE_QUATERNION:
+            elif self.dataset_args.rotation_mode == ROTATION_MODE_QUATERNION:
                 n_params += len(self.ds.labels_transformation_quaternion)
             else:
-                assert self.dataset_args.preangles_mode == PREANGLES_MODE_AXISANGLE
+                assert self.dataset_args.rotation_mode == ROTATION_MODE_AXISANGLE
                 n_params += len(self.ds.labels_transformation_axisangle)
             output['transformation'] = Y[:, idx:idx + n_params]
             idx += n_params
@@ -1535,13 +1535,13 @@ class Manager:
         location_loss = ((t_pred[:, :3] - t_target[:, :3])**2).mean()
         scale_loss = ((t_pred[:, 3] - t_target[:, 3])**2).mean()
 
-        if self.dataset_args.preangles_mode == PREANGLES_MODE_SINCOS:
+        if self.dataset_args.rotation_mode == ROTATION_MODE_SINCOS:
             preangles_pred = t_pred[:, 4:].reshape(-1, 3, 2)
             preangles_target = t_target[:, 4:].reshape(-1, 3, 2)
             v_norms = preangles_pred.norm(dim=-1, keepdim=True)
             preangles_pred = preangles_pred / v_norms
             rotation_loss = ((preangles_pred - preangles_target)**2).mean()
-        elif self.dataset_args.preangles_mode == PREANGLES_MODE_QUATERNION:
+        elif self.dataset_args.rotation_mode == ROTATION_MODE_QUATERNION:
             q_pred = t_pred[:, 4:]
             v_norms = q_pred.norm(dim=-1, keepdim=True)
             q_pred = q_pred / v_norms
@@ -1567,7 +1567,7 @@ class Manager:
                 rotation_loss = ((q_pred - t_target[:, 4:])**2).mean()
 
         else:
-            assert self.dataset_args.preangles_mode == PREANGLES_MODE_AXISANGLE
+            assert self.dataset_args.rotation_mode == ROTATION_MODE_AXISANGLE
             R_pred = axis_angle_to_rotation_matrix(t_pred[:, 4:])
 
             # Use the sym_rotations, could be different number for each batch item so have to loop over
@@ -1590,7 +1590,7 @@ class Manager:
                 rotation_loss = geodesic_distance(R_pred, R_target).mean()
 
         loss = location_loss + scale_loss + rotation_loss
-        if self.dataset_args.preangles_mode != PREANGLES_MODE_AXISANGLE:
+        if self.dataset_args.rotation_mode != ROTATION_MODE_AXISANGLE:
             preangles_loss = ((v_norms - 1)**2).mean()
             loss = loss + preangles_loss
 
@@ -1601,7 +1601,7 @@ class Manager:
             'losses/transformation': loss.item()
         }
 
-        if self.dataset_args.preangles_mode != PREANGLES_MODE_AXISANGLE:
+        if self.dataset_args.rotation_mode != ROTATION_MODE_AXISANGLE:
             stats['transformation/l_preangles'] = preangles_loss.item()
 
         return loss, stats
@@ -1659,26 +1659,26 @@ class Manager:
             location_loss = ((l_pred[:, :3] - l_target[:, :3])**2).mean()
             energy_loss = ((l_pred[:, 3] - l_target[:, 3])**2).mean()
 
-            if self.dataset_args.preangles_mode == PREANGLES_MODE_SINCOS:
+            if self.dataset_args.rotation_mode == ROTATION_MODE_SINCOS:
                 preangles_pred = l_pred[:, 4:].reshape(-1, 2, 2)
                 preangles_target = l_target[:, 4:].reshape(-1, 2, 2)
                 v_norms = preangles_pred.norm(dim=-1, keepdim=True)
                 preangles_pred = preangles_pred / v_norms
                 rotation_loss = ((preangles_pred - preangles_target)**2).mean()
-            elif self.ds_args.preangles_mode == PREANGLES_MODE_QUATERNION:
+            elif self.ds_args.rotation_mode == ROTATION_MODE_QUATERNION:
                 q_pred = l_pred[:, 4:]
                 q_target = l_target[:, 4:]
                 v_norms = q_pred.norm(dim=-1, keepdim=True)
                 q_pred = q_pred / v_norms
                 rotation_loss = ((q_pred - q_target)**2).mean()
             else:
-                assert self.dataset_args.preangles_mode == PREANGLES_MODE_AXISANGLE
+                assert self.dataset_args.rotation_mode == ROTATION_MODE_AXISANGLE
                 R_pred = axis_angle_to_rotation_matrix(l_pred[:, 4:])
                 R_target = axis_angle_to_rotation_matrix(l_target[:, 4:])
                 rotation_loss = geodesic_distance(R_pred, R_target).mean()
 
             loss = location_loss + energy_loss + rotation_loss
-            if self.dataset_args.preangles_mode != PREANGLES_MODE_AXISANGLE:
+            if self.dataset_args.rotation_mode != ROTATION_MODE_AXISANGLE:
                 preangles_loss = ((v_norms - 1)**2).mean()
                 loss = loss + preangles_loss
 
@@ -1689,7 +1689,7 @@ class Manager:
                 'losses/light': loss.item()
             }
 
-            if self.dataset_args.preangles_mode != PREANGLES_MODE_AXISANGLE:
+            if self.dataset_args.rotation_mode != ROTATION_MODE_AXISANGLE:
                 stats['light/l_preangles'] = preangles_loss.item()
 
         return loss, stats
@@ -2054,14 +2054,14 @@ class Manager:
             idx += 3
             groups['t/scale'] = (idx, idx + 1)
             idx += 1
-            if self.dataset_args.preangles_mode == PREANGLES_MODE_SINCOS:
+            if self.dataset_args.rotation_mode == ROTATION_MODE_SINCOS:
                 groups['t/rotation'] = (idx, idx + 6)
                 idx += 6
-            elif self.dataset_args.preangles_mode == PREANGLES_MODE_QUATERNION:
+            elif self.dataset_args.rotation_mode == ROTATION_MODE_QUATERNION:
                 groups['t/rotation'] = (idx, idx + 4)
                 idx += 4
             else:
-                assert self.dataset_args.preangles_mode == PREANGLES_MODE_AXISANGLE
+                assert self.dataset_args.rotation_mode == ROTATION_MODE_AXISANGLE
                 groups['t/rotation'] = (idx, idx + 3)
                 idx += 3
 
@@ -2081,14 +2081,14 @@ class Manager:
                 idx += 3
                 groups['l/energy'] = (idx, idx + 1)
                 idx += 1
-                if self.dataset_args.preangles_mode == PREANGLES_MODE_SINCOS:
+                if self.dataset_args.rotation_mode == ROTATION_MODE_SINCOS:
                     groups['l/rotation'] = (idx, idx + 6)
                     idx += 6
-                elif self.dataset_args.preangles_mode == PREANGLES_MODE_QUATERNION:
+                elif self.dataset_args.rotation_mode == ROTATION_MODE_QUATERNION:
                     groups['l/rotation'] = (idx, idx + 4)
                     idx += 4
                 else:
-                    assert self.dataset_args.preangles_mode == PREANGLES_MODE_AXISANGLE
+                    assert self.dataset_args.rotation_mode == ROTATION_MODE_AXISANGLE
                     groups['l/rotation'] = (idx, idx + 3)
                     idx += 3
 
@@ -2381,9 +2381,9 @@ class Manager:
                 t_pred2 = to_numpy(Y_pred2['transformation'][idx_])
 
             # Adjust the target rotation to the best matching symmetry group
-            if self.dataset_args.preangles_mode in [PREANGLES_MODE_QUATERNION, PREANGLES_MODE_AXISANGLE]:
+            if self.dataset_args.rotation_mode in [ROTATION_MODE_QUATERNION, ROTATION_MODE_AXISANGLE]:
                 sgi = self.sym_group_idxs[idx_]
-                if self.dataset_args.preangles_mode == PREANGLES_MODE_QUATERNION:
+                if self.dataset_args.rotation_mode == ROTATION_MODE_QUATERNION:
                     t_target[4:] = to_numpy(Y_target['sym_rotations'][idx_][sgi])
                 else:
                     R = to_numpy(Y_target['sym_rotations'][idx_][sgi])
@@ -2410,9 +2410,9 @@ class Manager:
             ax_.set_title('Transformation')
             ax_.set_xticks(locs)
             xlabels = self.ds.labels_transformation.copy()
-            if self.dataset_args.preangles_mode == PREANGLES_MODE_SINCOS:
+            if self.dataset_args.rotation_mode == ROTATION_MODE_SINCOS:
                 xlabels += self.ds.labels_transformation_sincos
-            elif self.dataset_args.preangles_mode == PREANGLES_MODE_QUATERNION:
+            elif self.dataset_args.rotation_mode == ROTATION_MODE_QUATERNION:
                 xlabels += self.ds.labels_transformation_quaternion
             else:
                 xlabels += self.ds.labels_transformation_axisangle
@@ -2479,9 +2479,9 @@ class Manager:
             else:
                 xlabels = self.ds.labels_light_location.copy()
                 xlabels += self.ds.labels_light.copy()
-                if self.dataset_args.preangles_mode == PREANGLES_MODE_SINCOS:
+                if self.dataset_args.rotation_mode == ROTATION_MODE_SINCOS:
                     xlabels += self.ds.labels_light_sincos
-                elif self.dataset_args.preangles_mode == PREANGLES_MODE_QUATERNION:
+                elif self.dataset_args.rotation_mode == ROTATION_MODE_QUATERNION:
                     xlabels += self.ds.labels_light_quaternion
                 else:
                     xlabels += self.ds.labels_light_axisangle
@@ -2566,7 +2566,7 @@ class Manager:
                         growth_rates = self.crystal_generator.get_expanded_growth_rates(distances)
                         morph_pred = VisualHabitMorphology.from_growth_rates(self.crystal_generator.crystal,
                                                                              growth_rates)
-                        _, _, mesh_pred = self.crystal_generator.generate_crystal(rel_rates=distances,
+                        _, _, mesh_pred = self.crystal_generator.generate_crystal(rel_distances=distances,
                                                                                   validate=False)
                         plot_3d(fig.add_subplot(gs[row_idx + 2, i], projection='3d'), 'Predicted',
                                 morph_pred, mesh_pred, default_colours[1])
@@ -2742,9 +2742,9 @@ class Manager:
 
         def plot_transformation(ax_, idx_):
             xlabels = self.ds.labels_transformation.copy()
-            if self.dataset_args.preangles_mode == PREANGLES_MODE_SINCOS:
+            if self.dataset_args.rotation_mode == ROTATION_MODE_SINCOS:
                 xlabels += self.ds.labels_transformation_sincos
-            elif self.dataset_args.preangles_mode == PREANGLES_MODE_QUATERNION:
+            elif self.dataset_args.rotation_mode == ROTATION_MODE_QUATERNION:
                 xlabels += self.ds.labels_transformation_quaternion
             else:
                 xlabels += self.ds.labels_transformation_axisangle
@@ -2773,9 +2773,9 @@ class Manager:
             else:
                 xlabels = self.ds.labels_light_location.copy()
                 xlabels += self.ds.labels_light
-                if self.dataset_args.preangles_mode == PREANGLES_MODE_SINCOS:
+                if self.dataset_args.rotation_mode == ROTATION_MODE_SINCOS:
                     xlabels += self.ds.labels_light_sincos
-                elif self.dataset_args.preangles_mode == PREANGLES_MODE_QUATERNION:
+                elif self.dataset_args.rotation_mode == ROTATION_MODE_QUATERNION:
                     xlabels += self.ds.labels_light_quaternion
                 else:
                     xlabels += self.ds.labels_light_axisangle

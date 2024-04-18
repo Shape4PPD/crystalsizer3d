@@ -27,8 +27,8 @@ from trimesh import Trimesh
 
 from crystalsizer3d import LOGS_PATH, START_TIMESTAMP, USE_CUDA, logger
 from crystalsizer3d.args.base_args import BaseArgs
-from crystalsizer3d.args.dataset_training_args import PREANGLES_MODE_AXISANGLE, PREANGLES_MODE_QUATERNION, \
-    PREANGLES_MODE_SINCOS
+from crystalsizer3d.args.dataset_training_args import ROTATION_MODE_AXISANGLE, ROTATION_MODE_QUATERNION, \
+    ROTATION_MODE_SINCOS
 from crystalsizer3d.crystal import Crystal
 from crystalsizer3d.crystal_renderer import render_from_parameters
 from crystalsizer3d.crystal_renderer_mitsuba import render_crystal_scene
@@ -209,7 +209,7 @@ def _build_crystal_csd(
     max_attempts = 10
     while True:
         try:
-            _, _, mesh = manager.crystal_generator.generate_crystal(rel_rates=distances, validate=False)
+            _, _, mesh = manager.crystal_generator.generate_crystal(rel_distances=distances, validate=False)
             break
         except AssertionError as e:
             if build_attempts < max_attempts and str(e) == 'Mesh is not watertight!':
@@ -242,7 +242,24 @@ def _build_crystal_custom(
 
     # Extract the parameters
     device = Y['distances'].device
-    distances = [1.] + Y['distances'].tolist()
+
+    # Normalise the distances
+    distances = to_numpy(Y['distances']).astype(float)
+    distances = _prep_distances(manager, distances)
+    if manager.dataset_args.use_distance_switches:
+        switches = to_numpy(Y['distance_switches'])
+        distances = np.where(switches < .5, 0, distances)
+    distances[distances < 0] = 0
+    distances /= distances.max()
+
+    growth_rates = manager.crystal_generator.get_expanded_growth_rates(distances)
+    # morph = VisualHabitMorphology.from_growth_rates(crystal, growth_rates)
+
+    miller_indices = []
+    distances = []
+    for (mi, d) in growth_rates:
+        miller_indices.append(mi.hkl)
+        distances.append(d * 100)
 
     # Build the initial (non-transformed or scaled) crystal
     crystal = Crystal(
@@ -251,17 +268,17 @@ def _build_crystal_custom(
         miller_indices=miller_indices,
         point_group_symbol=point_group_symbol,
         distances=distances,
-        rotation_mode=manager.dataset_args.preangles_mode,
+        rotation_mode=manager.dataset_args.rotation_mode,
     )
     crystal.to(device)
 
-    # Apply scaling to match csd
-    if scale_to_csd:
-        v, f = crystal.build_mesh()
-        mesh_custom = Trimesh(vertices=to_numpy(v), faces=to_numpy(f))
-        _, mesh_csd = _build_crystal_csd(Y, manager)
-        sf = _calculate_sf(mesh_csd, mesh_custom)
-        crystal.distances.data *= sf
+    # # Apply scaling to match csd
+    # if scale_to_csd:
+    #     v, f = crystal.build_mesh()
+    #     mesh_custom = Trimesh(vertices=to_numpy(v), faces=to_numpy(f))
+    #     _, mesh_csd = _build_crystal_csd(Y, manager)
+    #     sf = _calculate_sf(mesh_csd, mesh_custom)
+    #     crystal.distances.data *= sf
 
     # Apply transformation
     r_params = manager.ds.denormalise_rendering_params(Y)
@@ -274,6 +291,8 @@ def _build_crystal_custom(
 
     # Rebuild the mesh
     crystal.build_mesh()
+    # v2, f2 = crystal.build_mesh()
+    # mesh2 = Trimesh(vertices=to_numpy(v2), faces=to_numpy(f2))
 
     return crystal
 
@@ -289,7 +308,8 @@ def _check_custom_crystal(
     _, mesh1 = _build_crystal_csd(Y, manager)
 
     # Build the custom mesh
-    crystal = _build_crystal_custom(Y, manager, apply_origin=False, apply_scale=False, apply_rotation=False, scale_to_csd=True)
+    crystal = _build_crystal_custom(Y, manager, apply_origin=False, apply_scale=False, apply_rotation=False,
+                                    scale_to_csd=True)
     v2, f2 = crystal.build_mesh()
     mesh2 = Trimesh(vertices=to_numpy(v2), faces=to_numpy(f2))
 
@@ -351,9 +371,9 @@ def _make_3d_crystal_image(
         rot = Y_['transformation'][4:][None, ...]
         if target_or_pred_ == 'target' and 'sym_rotations' in Y_:
             R = Y_['sym_rotations'][sym_idx][None, ...]
-        elif manager.dataset_args.preangles_mode == PREANGLES_MODE_QUATERNION:
+        elif manager.dataset_args.rotation_mode == ROTATION_MODE_QUATERNION:
             R = quaternion_to_rotation_matrix(rot)
-        elif manager.dataset_args.preangles_mode == PREANGLES_MODE_AXISANGLE:
+        elif manager.dataset_args.rotation_mode == ROTATION_MODE_AXISANGLE:
             R = axis_angle_to_rotation_matrix(rot)
         else:
             raise NotImplementedError()
@@ -513,7 +533,7 @@ def _get_closest_target_rotation(
     Get the closest target rotation to the predicted rotation, accounting for symmetries.
     """
     sym_rotations = Y_target['sym_rotations']
-    if manager.dataset_args.preangles_mode == PREANGLES_MODE_QUATERNION:
+    if manager.dataset_args.rotation_mode == ROTATION_MODE_QUATERNION:
         raise NotImplementedError('Needs testing!')
         v_norms = r_pred.norm(dim=-1, keepdim=True)
         r_pred = r_pred / v_norms
@@ -525,7 +545,7 @@ def _get_closest_target_rotation(
         r_target = rotation_matrix_to_quaternion(sym_rotations)[min_idx]
 
     else:
-        assert manager.dataset_args.preangles_mode == PREANGLES_MODE_AXISANGLE
+        assert manager.dataset_args.rotation_mode == ROTATION_MODE_AXISANGLE
         R_pred = axis_angle_to_rotation_matrix(torch.from_numpy(r_pred)[None, ...])
         R_pred = R_pred.expand(len(sym_rotations), -1, -1)
         angular_differences = geodesic_distance(R_pred, sym_rotations)
@@ -550,7 +570,7 @@ def _plot_transformation(
     locs = np.arange(len(t_pred))
     if t_target is not None:
         # Adjust the target rotation to the best matching symmetry group
-        if manager.dataset_args.preangles_mode in [PREANGLES_MODE_QUATERNION, PREANGLES_MODE_AXISANGLE] \
+        if manager.dataset_args.rotation_mode in [ROTATION_MODE_QUATERNION, ROTATION_MODE_AXISANGLE] \
                 and 'sym_rotations' in Y_target:
             t_target[4:] = _get_closest_target_rotation(manager, t_pred[4:], Y_target)
         bar_width = 0.35
@@ -758,6 +778,10 @@ def plot_prediction(args: Optional[RuntimeArgs] = None):
             for k, v in Y_target.items()
         }
         default_rendering_params = metas['rendering_parameters']
+
+        # _check_custom_crystal(Y_target, manager)
+        # exit()
+
     else:
         X_target = to_tensor(Image.open(args.image_path).convert('L'))
         Y_target = None
@@ -784,10 +808,10 @@ def plot_prediction(args: Optional[RuntimeArgs] = None):
     X_target = X_target[0]
     Y_pred = {k: v[0] for k, v in Y_pred.items()}
 
-    # # Check the custom crystal meshes are close enough to the CSD ones
-    # _check_custom_crystal(Y_pred, manager)
-    # if Y_target is not None:
-    #     _check_custom_crystal(Y_target, manager)
+    # Check the custom crystal meshes are close enough to the CSD ones
+    _check_custom_crystal(Y_pred, manager)
+    if Y_target is not None:
+        _check_custom_crystal(Y_target, manager)
 
     # Plot the digital crystals
     logger.info('Plotting digital crystals.')
@@ -801,16 +825,18 @@ def plot_prediction(args: Optional[RuntimeArgs] = None):
     if Y_target is not None:
         dig_target_A = _make_3d_crystal_image(manager, args, target_or_pred='target', Y=Y_target)
         dig_target_A.save(save_dir / 'digital_target_A.png')
-        dig_target_B = _make_3d_crystal_image(manager, args, target_or_pred='target', Y=Y_target, csd_or_custom='custom')
+        dig_target_B = _make_3d_crystal_image(manager, args, target_or_pred='target', Y=Y_target,
+                                              csd_or_custom='custom')
         dig_target_B.save(save_dir / 'digital_target_B.png')
-        try:
-            dig_combined_A = _make_3d_crystal_image(manager, args, target_or_pred='pred', Y=Y_pred, Y_comp=Y_target)
-            dig_combined_A.save(save_dir / 'digital_combined_A.png')
-            dig_combined_B = _make_3d_crystal_image(manager, args, target_or_pred='pred', Y=Y_pred, Y_comp=Y_target, csd_or_custom='custom')
-            dig_combined_B.save(save_dir / 'digital_combined_B.png')
-        except Exception as e:
-            logger.warning(f'Failed to plot combined digital crystals: {e}')
-            raise e
+        # try:
+        #     dig_combined_A = _make_3d_crystal_image(manager, args, target_or_pred='pred', Y=Y_pred, Y_comp=Y_target)
+        #     dig_combined_A.save(save_dir / 'digital_combined_A.png')
+        #     dig_combined_B = _make_3d_crystal_image(manager, args, target_or_pred='pred', Y=Y_pred, Y_comp=Y_target, csd_or_custom='custom')
+        #     dig_combined_B.save(save_dir / 'digital_combined_B.png')
+        # except Exception as e:
+        #     logger.warning(f'Failed to plot combined digital crystals: {e}')
+        #     raise e
+    exit()
 
     # Save the original image
     logger.info('Saving rendered images.')
@@ -843,18 +869,18 @@ def plot_prediction(args: Optional[RuntimeArgs] = None):
 
 
 if __name__ == '__main__':
-    # plot_prediction()
+    plot_prediction()
 
-    # Iterate over all images in the image_path directory
-    args_ = parse_arguments()
-    img_dir = args_.image_path.parent
-    for img_path in img_dir.iterdir():
-        args_.image_path = img_path
-        try:
-            plot_prediction(args_)
-        except Exception as e:
-            logger.error(f'Failed to plot prediction for image {img_path}: {e}')
-            continue
+    # # Iterate over all images in the image_path directory
+    # args_ = parse_arguments()
+    # img_dir = args_.image_path.parent
+    # for img_path in img_dir.iterdir():
+    #     args_.image_path = img_path
+    #     try:
+    #         plot_prediction(args_)
+    #     except Exception as e:
+    #         logger.error(f'Failed to plot prediction for image {img_path}: {e}')
+    #         continue
 
     # Plot the first 20 images in the dataset
     # for i in range(20):
@@ -864,3 +890,4 @@ if __name__ == '__main__':
     #     except Exception as e:
     #         logger.error(f'Failed to plot prediction for index {i}: {e}')
     #         continue
+# --image-path=/home/tom0/projects/CrystalSizer_v2/logs/transmission_46/LGA_000040.jpg

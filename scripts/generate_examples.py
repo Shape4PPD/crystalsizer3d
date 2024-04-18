@@ -15,7 +15,7 @@ from trimesh import Trimesh
 
 from crystalsizer3d import LOGS_PATH, START_TIMESTAMP, USE_CUDA, logger
 from crystalsizer3d.args.base_args import BaseArgs
-from crystalsizer3d.args.dataset_training_args import PREANGLES_MODE_AXISANGLE, PREANGLES_MODE_QUATERNION, PREANGLES_MODE_SINCOS
+from crystalsizer3d.args.dataset_training_args import ROTATION_MODE_AXISANGLE, ROTATION_MODE_QUATERNION, ROTATION_MODE_SINCOS
 from crystalsizer3d.nn.manager import CCDC_AVAILABLE, Manager
 from crystalsizer3d.util.utils import equal_aspect_ratio, normalise, print_args, str2bool, to_dict, to_numpy
 
@@ -100,7 +100,7 @@ def _build_crystal(
         growth_rates = manager.crystal_generator.get_expanded_growth_rates(distances)
         morph = VisualHabitMorphology.from_growth_rates(manager.crystal_generator.crystal,
                                                         growth_rates)
-        _, _, mesh = manager.crystal_generator.generate_crystal(rel_rates=distances,
+        _, _, mesh = manager.crystal_generator.generate_crystal(rel_distances=distances,
                                                                 validate=False)
         return morph, mesh
     except Exception as e:
@@ -219,12 +219,12 @@ def _plot_transformation(
     ax.set_title('Transformation')
     ax.set_xticks(locs)
     xlabels = manager.ds.labels_transformation.copy()
-    if manager.dataset_args.preangles_mode == PREANGLES_MODE_SINCOS:
+    if manager.dataset_args.rotation_mode == ROTATION_MODE_SINCOS:
         xlabels += manager.ds.labels_transformation_sincos
-    elif manager.dataset_args.preangles_mode == PREANGLES_MODE_QUATERNION:
+    elif manager.dataset_args.rotation_mode == ROTATION_MODE_QUATERNION:
         xlabels += manager.ds.labels_transformation_quaternion
     else:
-        assert manager.dataset_args.preangles_mode == PREANGLES_MODE_AXISANGLE
+        assert manager.dataset_args.rotation_mode == ROTATION_MODE_AXISANGLE
         xlabels += manager.ds.labels_transformation_axisangle
     ax.set_xticklabels(xlabels)
     if 'transformation' not in share_ax:
@@ -279,12 +279,12 @@ def _plot_light(
     ax.set_title('Light')
     ax.set_xticks(locs)
     xlabels = manager.ds.labels_light.copy()
-    if manager.dataset_args.preangles_mode == PREANGLES_MODE_SINCOS:
+    if manager.dataset_args.rotation_mode == ROTATION_MODE_SINCOS:
         xlabels += manager.ds.labels_light_sincos
-    elif manager.dataset_args.preangles_mode == PREANGLES_MODE_QUATERNION:
+    elif manager.dataset_args.rotation_mode == ROTATION_MODE_QUATERNION:
         xlabels += manager.ds.labels_light_quaternion
     else:
-        assert manager.dataset_args.preangles_mode == PREANGLES_MODE_AXISANGLE
+        assert manager.dataset_args.rotation_mode == ROTATION_MODE_AXISANGLE
         xlabels += manager.ds.labels_light_axisangle
     ax.set_xticklabels(xlabels)
     if 'light' not in share_ax:
@@ -410,7 +410,7 @@ def _make_parameter_vector(
         dists /= dists.max()
         try:
             rel_rates2, zingg, _ = manager.crystal_generator.generate_crystal(
-                rel_rates=to_numpy(dists).astype(float),
+                rel_distances=to_numpy(dists).astype(float),
                 validate=False
             )
             dists = torch.from_numpy(rel_rates2)
@@ -442,9 +442,9 @@ def _make_parameter_vector(
         idx += 1
 
         # Rotation
-        assert ds_args.preangles_mode in [PREANGLES_MODE_QUATERNION, PREANGLES_MODE_AXISANGLE], \
+        assert ds_args.rotation_mode in [ROTATION_MODE_QUATERNION, ROTATION_MODE_AXISANGLE], \
             'Only quaternion or axis-angle pre-angles are supported.'
-        if ds_args.preangles_mode == PREANGLES_MODE_QUATERNION:
+        if ds_args.rotation_mode == ROTATION_MODE_QUATERNION:
             q = Y[idx:idx + 4]
             for i, k in enumerate(ds.labels_transformation_quaternion):
                 if k in item:
@@ -486,9 +486,9 @@ def _make_parameter_vector(
         idx += 1
 
         # Rotation
-        assert ds_args.preangles_mode in [PREANGLES_MODE_QUATERNION, PREANGLES_MODE_AXISANGLE], \
+        assert ds_args.rotation_mode in [ROTATION_MODE_QUATERNION, ROTATION_MODE_AXISANGLE], \
             'Only quaternion or axis-angle pre-angles are supported.'
-        if ds_args.preangles_mode == PREANGLES_MODE_QUATERNION:
+        if ds_args.rotation_mode == ROTATION_MODE_QUATERNION:
             q = Y[idx:idx + 4]
             for i, k in enumerate(ds.labels_light_quaternion):
                 if k in item:
