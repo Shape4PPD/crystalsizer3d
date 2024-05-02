@@ -1,6 +1,5 @@
 import csv
 import json
-import math
 import shutil
 import time
 from argparse import ArgumentParser
@@ -11,15 +10,12 @@ import cv2
 import numpy as np
 import yaml
 from PIL import Image
-from trimesh import Scene, Trimesh
-from trimesh.exchange.obj import export_obj, load_obj
 
 from crystalsizer3d import LOGS_PATH, START_TIMESTAMP, logger
 from crystalsizer3d.args.dataset_synthetic_args import DatasetSyntheticArgs
-from crystalsizer3d.args.renderer_args import ENGINE_BLENDER, ENGINE_MITSUBA, RendererArgs
+from crystalsizer3d.args.renderer_args import RendererArgs
+from crystalsizer3d.crystal_generator import CrystalGenerator
 from crystalsizer3d.crystal_renderer import CrystalRenderer
-from crystalsizer3d.crystal_renderer_blender import CrystalRendererBlender, CrystalWellSettings, blender_render
-from crystalsizer3d.crystal_renderer_mitsuba import CrystalRendererMitsuba
 from crystalsizer3d.util.utils import print_args, set_seed, to_dict
 
 PARAMETER_HEADERS = [
@@ -69,8 +65,6 @@ def validate(
 
     val_dir = output_dir / 'validation'
     val_dir.mkdir(exist_ok=True)
-    obj_dir = output_dir / 'crystals'
-    obj_val_path = val_dir / 'crystal.obj'
 
     # Initialise synthetic crystal generator
     from crystalsizer3d.crystal_generator import CrystalGenerator
@@ -83,25 +77,13 @@ def validate(
         constraints=dataset_args.distance_constraints,
     )
 
-    # Copy over the rendering parameters if using Blender
-    if renderer_args.render_engine == ENGINE_BLENDER:
-        settings_path = val_dir / 'vcw_settings.json'
-        shutil.copy(output_dir / 'vcw_settings.json', settings_path)
-        vcw_settings = CrystalWellSettings()
-        vcw_settings.from_json(settings_path)
-        vcw_settings.path = settings_path
-        vcw_settings.settings_dict['number_images'] = 1
-        vcw_settings.settings_dict['crystal_import_path'] = str(obj_val_path.absolute())
-        vcw_settings.settings_dict['output_path'] = str(val_dir.absolute())
-
-    # Otherwise, initialise the crystal renderer
-    else:
-        renderer = CrystalRendererMitsuba(
-            param_path=output_dir / 'parameters.csv',
-            dataset_args=dataset_args,
-            renderer_args=renderer_args,
-            quiet_render=True
-        )
+    # Initialise the crystal renderer
+    renderer = CrystalRenderer(
+        param_path=output_dir / 'parameters.csv',
+        dataset_args=dataset_args,
+        renderer_args=renderer_args,
+        quiet_render=True
+    )
 
     # Load rendering parameters
     logger.info('Loading rendering parameters.')
@@ -142,6 +124,19 @@ def validate(
             # Include the rendering parameters and segmentations
             item['rendering_parameters'] = rendering_parameters[row['image']]
             item['segmentation'] = segmentations[row['image']]
+
+            # Add the bumpmap path if it exists
+            if renderer_args.crystal_bumpmap_dim > -1:
+                bumpmap_path = output_dir / 'bumpmaps' / f'{row["image"][:-4]}.npz'
+                assert bumpmap_path.exists(), f'Bumpmap path does not exist: {bumpmap_path}'
+                item['rendering_parameters']['bumpmap'] = bumpmap_path
+
+            # Add the clean image if it exists
+            if dataset_args.generate_clean:
+                clean_img_path = output_dir / 'images_clean' / row['image']
+                assert clean_img_path.exists(), f'Clean image path does not exist: {clean_img_path}'
+                item['clean_image'] = clean_img_path
+
             data[idx] = item
 
     # Pick some random indices to render
@@ -165,41 +160,9 @@ def validate(
             rel_distances = np.array([example[f'd{i}_{k}'] for i, k in enumerate(ref_idxs)])
             _, z, m = generator.generate_crystal(rel_distances=rel_distances)
 
-            # Re-render the crystal using the same rendering parameters
-            if renderer_args.render_engine == ENGINE_BLENDER:
-                # Write the mesh to file
-                scene = Scene()
-                scene.add_geometry([m, ])
-                with open(obj_val_path, 'w') as f:
-                    f.write(export_obj(
-                        scene,
-                        header=None,
-                        include_normals=True,
-                        include_color=False
-                    ))
-
-                # Update the rendering parameters
-                vcw_settings.settings_dict['crystal_location'] = r_params['location']
-                vcw_settings.settings_dict['crystal_scale'] = r_params['scale']
-                vcw_settings.settings_dict['crystal_rotation'] = r_params['rotation']
-                vcw_settings.settings_dict['crystal_material_min_ior'] = r_params['material']['ior']
-                vcw_settings.settings_dict['crystal_material_max_ior'] = r_params['material']['ior']
-                vcw_settings.settings_dict['crystal_material_min_brightness'] = r_params['material']['brightness']
-                vcw_settings.settings_dict['crystal_material_max_brightness'] = r_params['material']['brightness']
-                vcw_settings.settings_dict['crystal_material_min_roughness'] = r_params['material']['roughness']
-                vcw_settings.settings_dict['crystal_material_max_roughness'] = r_params['material']['roughness']
-                if not vcw_settings.settings_dict['transmission_mode']:
-                    vcw_settings.settings_dict['light_angle_min'] = np.rad2deg(r_params['light']['angle'])
-                    vcw_settings.settings_dict['light_angle_max'] = np.rad2deg(r_params['light']['angle'])
-                    vcw_settings.settings_dict['light_location'] = r_params['light']['location']
-                    vcw_settings.settings_dict['light_rotation'] = r_params['light']['rotation']
-                vcw_settings.settings_dict['light_energy'] = r_params['light']['energy']
-                vcw_settings.write_json()
-                blender_render(vcw_settings, attempts=3, quiet=True)
-
-            else:
-                img = renderer.render_from_parameters(r_params)
-                cv2.imwrite(str(img_path), img)
+            # Render the crystal
+            img = renderer.render_from_parameters(r_params)
+            cv2.imwrite(str(img_path), img)
 
             # Save the images side by side for comparison
             img_path_compare = val_dir / f'compare_{idx:05d}.png'
@@ -214,63 +177,6 @@ def validate(
             assert np.allclose(z[0], example['si']), f'Zingg SI values do not match: {z[0]} != {example["si"]}'
             assert np.allclose(z[1], example['il']), f'Zingg IL values do not match: {z[1]} != {example["il"]}'
 
-            if renderer_args.render_engine == ENGINE_BLENDER:
-                # Load the saved mesh from disk
-                obj_path = obj_dir / f'crystals_{idx // dataset_args.batch_size:05d}.obj'
-                vertices = []
-                normals = []
-                reading = False
-                with open(obj_path, 'r') as f:
-                    for line in f:
-                        line = line.strip()
-                        if line.startswith(f'o {generator.crystal_id}_{idx:06d}'):
-                            reading = True
-                            continue
-                        if reading:
-                            if line.startswith('v '):
-                                vertices.append(np.array([float(v) for v in line.split(' ')[1:]]))
-                            elif line.startswith('vn '):
-                                normals.append(np.array([float(v) for v in line.split(' ')[1:]]))
-                            elif line == '':
-                                break
-
-                # Check the vertices and normals match the re-generated mesh
-                assert np.allclose(m.vertices, np.array(vertices)), 'Vertices do not match!'
-                assert np.allclose(m.vertex_normals, np.array(normals)), 'Vertex normals do not match!'
-
-                # Check that the rendering parameters that come out are the same that went in
-                render_params_path = val_dir / '0000000001.png.json'
-                with open(render_params_path) as f:
-                    r_params2 = json.load(f)
-                    assert np.allclose(r_params['location'], r_params2['crystals']['locations'][0]), \
-                        'Location does not match!'
-                    assert np.allclose(r_params['scale'], r_params2['crystals']['scales'][0]), \
-                        'Scale does not match!'
-                    assert np.allclose(r_params['rotation'], r_params2['crystals']['rotations'][0]), \
-                        'Rotation does not match!'
-                    assert np.allclose(r_params['material']['ior'], r_params2['materials']['iors'][0]), \
-                        'IOR does not match!'
-                    assert np.allclose(r_params['material']['brightness'], r_params2['materials']['brightnesses'][0]), \
-                        'Brightness does not match!'
-                    if not vcw_settings.settings_dict['transmission_mode']:
-                        assert np.allclose(r_params['light']['angle'], r_params2['light']['angle']), \
-                            'Light angle does not match!'
-                        assert np.allclose(r_params['light']['location'], r_params2['light']['location']), \
-                            'Light location does not match!'
-                        assert np.allclose(r_params['light']['rotation'], r_params2['light']['rotation']), \
-                            'Light rotation does not match!'
-                    assert np.allclose(r_params['light']['energy'], r_params2['light']['energy']), \
-                        'Light energy does not match!'
-                    s1, s2 = np.array(example['segmentation']), np.array(r_params2['segmentation'][0])
-                    if s1.shape == s2.shape:
-                        max_s_err = np.max(np.abs(s1 - s2))
-                        mean_s_err = np.mean(np.abs(s1 - s2))
-                        err = f' Max err = {max_s_err:.3E}. Mean err = {mean_s_err:.3E}.'
-                    else:
-                        err = f' Shapes do not match ({s1.shape} != {s2.shape}).'
-                    assert s1.shape == s2.shape and np.allclose(s1, s2, atol=0.1), \
-                        f'Segmentations do not match! {err}.'
-
             # Assert that the images aren't too different
             img_og = np.array(img_og).astype(np.float32)
             img_new = np.array(img_new).astype(np.float32)
@@ -280,9 +186,6 @@ def validate(
                 f'Images are too different! (Mean diff={mean_diff:.3E}, Max diff={max_diff:.1f})'
 
             # Clean up
-            if renderer_args.render_engine == ENGINE_BLENDER:
-                obj_val_path.unlink()
-                render_params_path.unlink()
             img_path.unlink()
             logger.info('Validation passed.')
 
@@ -290,10 +193,7 @@ def validate(
             logger.warning(f'Validation failed: {e}')
             failed_idxs.append(idx)
 
-    # Clean up
-    if renderer_args.render_engine == ENGINE_BLENDER:
-        settings_path.unlink()
-
+    # Report any failed indices
     if len(failed_idxs) > 0:
         logger.warning(f'Validation failed for {len(failed_idxs)}/{n_examples} examples!')
 
@@ -316,13 +216,19 @@ def generate_dataset():
 
     # Create a directory to save dataset and logs
     save_dir = LOGS_PATH / START_TIMESTAMP
-    images_dir = LOGS_PATH / START_TIMESTAMP / 'images'
+    param_path = save_dir / 'parameters.csv'
+    images_dir = save_dir / 'images'
     images_dir.mkdir(parents=True, exist_ok=True)
 
-    # Create a directory to save blender files
-    if dataset_args.generate_blender:
-        blender_dir = LOGS_PATH / START_TIMESTAMP / 'blender'
-        blender_dir.mkdir(exist_ok=True)
+    # Create a directory to save clean images
+    if dataset_args.generate_clean:
+        clean_images_dir = save_dir / 'images_clean'
+        clean_images_dir.mkdir(exist_ok=True)
+
+    # Create a directory to save bumpmaps
+    if renderer_args.crystal_bumpmap_dim > -1:
+        bumpmap_dir = save_dir / 'bumpmaps'
+        bumpmap_dir.mkdir(exist_ok=True)
 
     # Save arguments to json file
     with open(save_dir / 'options.yml', 'w') as f:
@@ -333,92 +239,49 @@ def generate_dataset():
         }
         yaml.dump(spec, f)
 
-    # Generate crystal shapes
-    obj_dir = save_dir / 'crystals'
-    obj_dir.mkdir(exist_ok=True)
-    param_path = save_dir / 'parameters.csv'
-    if dataset_args.obj_path is not None:
-        # Copy the obj and parameters files to the save directory
-        logger.info(f'Using pre-generated crystal shapes from {dataset_args.obj_path}.')
-        if dataset_args.obj_path.is_dir():
-            for f in dataset_args.obj_path.glob('*.obj'):
-                shutil.copy(f, obj_dir)
-        else:
-            shutil.copy(dataset_args.obj_path, obj_dir)
-        shutil.copy(dataset_args.param_path, param_path)
-    else:
-        # Initialise synthetic crystal generator
-        from crystalsizer3d.crystal_generator import CrystalGenerator
-        generator = CrystalGenerator(
-            crystal_id=dataset_args.crystal_id,
-            miller_indices=dataset_args.miller_indices,
-            ratio_means=dataset_args.ratio_means,
-            ratio_stds=dataset_args.ratio_stds,
-            zingg_bbox=dataset_args.zingg_bbox,
-            constraints=dataset_args.distance_constraints,
-        )
+    # Initialise synthetic crystal generator
+    generator = CrystalGenerator(
+        crystal_id=dataset_args.crystal_id,
+        miller_indices=dataset_args.miller_indices,
+        ratio_means=dataset_args.ratio_means,
+        ratio_stds=dataset_args.ratio_stds,
+        zingg_bbox=dataset_args.zingg_bbox,
+        constraints=dataset_args.distance_constraints,
+    )
 
-        # Generate randomised crystals
-        logger.info('Generating crystals.')
-        crystals = generator.generate_crystals(num=dataset_args.n_samples)
+    # Generate randomised crystals
+    logger.info('Generating crystals.')
+    crystals = generator.generate_crystals(num=dataset_args.n_samples)
 
-        # Save all meshes to obj files, with limited number of objects per file
-        logger.info(f'Saving meshes to {obj_dir}.')
-        n_files = int(np.ceil(len(crystals) / dataset_args.batch_size))
-        for i in range(n_files):
-            start_idx = i * dataset_args.batch_size
-            end_idx = (i + 1) * dataset_args.batch_size
-            meshes = [c[2] for c in crystals[start_idx:end_idx]]
-            scene = Scene()
-            scene.add_geometry(meshes)
-            obj_path = obj_dir / f'crystals_{i:05d}.obj'
-            with open(obj_path, 'w') as f:
-                f.write(export_obj(
-                    scene,
-                    header=None,
-                    include_normals=True,
-                    include_color=False
-                ))
-
-        # Save parameters to a csv file
-        logger.info(f'Saving crystal parameters to {param_path}.')
-        with open(param_path, 'w') as f:
-            headers = PARAMETER_HEADERS.copy()
-            ref_idxs = [''.join(str(i) for i in k) for k in dataset_args.miller_indices]
-            for i, hkl in enumerate(ref_idxs):
-                headers.append(f'd{i}_{hkl}')
-            writer = csv.DictWriter(f, fieldnames=headers)
-            writer.writeheader()
-            for i, (rel_rates, zingg_vals, _) in enumerate(crystals):
-                entry = {
-                    'crystal_id': generator.crystal_id,
-                    'idx': i,
-                    'image': f'{i:010d}.png',
-                    'si': zingg_vals[0],
-                    'il': zingg_vals[1],
-                }
-                for j, hkl in enumerate(ref_idxs):
-                    entry[f'd{j}_{hkl}'] = rel_rates[j]
-                writer.writerow(entry)
+    # Save parameters to a csv file
+    logger.info(f'Saving crystal parameters to {param_path}.')
+    with open(param_path, 'w') as f:
+        headers = PARAMETER_HEADERS.copy()
+        ref_idxs = [''.join(str(i) for i in k) for k in dataset_args.miller_indices]
+        for i, hkl in enumerate(ref_idxs):
+            headers.append(f'd{i}_{hkl}')
+        writer = csv.DictWriter(f, fieldnames=headers)
+        writer.writeheader()
+        for i, (rel_rates, zingg_vals, _) in enumerate(crystals):
+            entry = {
+                'crystal_id': generator.crystal_id,
+                'idx': i,
+                'image': f'{i:010d}.png',
+                'si': zingg_vals[0],
+                'il': zingg_vals[1],
+            }
+            for j, hkl in enumerate(ref_idxs):
+                entry[f'd{j}_{hkl}'] = rel_rates[j]
+            writer.writerow(entry)
 
     # Render the crystals
     logger.info('Rendering crystals.')
-    if renderer_args.render_engine == ENGINE_BLENDER:
-        renderer = CrystalRendererBlender(
-            obj_dir=obj_dir,
-            dataset_args=dataset_args,
-            renderer_args=renderer_args,
-            quiet_render=True
-        )
-    elif renderer_args.render_engine == ENGINE_MITSUBA:
-        renderer = CrystalRendererMitsuba(
-            param_path=param_path,
-            dataset_args=dataset_args,
-            renderer_args=renderer_args,
-            quiet_render=False
-        )
-    else:
-        raise ValueError(f'Unknown render engine: {renderer_args.render_engine}!')
+    renderer = CrystalRenderer(
+        param_path=param_path,
+        dataset_args=dataset_args,
+        renderer_args=renderer_args,
+        quiet_render=False
+    )
     renderer.render()
 
     # Annotate a single image for reference
@@ -451,32 +314,13 @@ def resume(
     # Set a timer going to record how long this takes
     start_time = time.time()
 
-    # Check images dir exists
+    # Check parameters and images dir exists
+    param_path = save_dir / 'parameters.csv'
+    assert param_path.exists(), f'Parameters file does not exist: {param_path}'
     images_dir = save_dir / 'images'
     assert images_dir.exists(), f'Images directory does not exist: {images_dir}'
 
-    # Instantiate the renderer
-    obj_dir = save_dir / 'crystals'
-    renderer = CrystalRenderer(
-        obj_dir=obj_dir,
-        dataset_args=dataset_args,
-        renderer_args=renderer_args,
-        quiet_render=True
-    )
-
-    # If it was originally made in parallel, make sure the fix is in parallel too
-    tmp_dir = save_dir / 'tmp_output'
-    if renderer.n_workers > 1:
-        if not tmp_dir.exists():
-            logger.info('Temporary output directory does not exist. Can\'t fix/resume this.')
-            return
-        assert not (save_dir / 'segmentations.json').exists(), \
-            'Segmentations file already exists! Try fixing in serial mode.'
-        assert not (save_dir / 'rendering_parameters.json').exists(), \
-            'Rendering parameters file already exists! Try fixing in serial mode.'
-
     # Check for any errored renders as we need to create new crystals shapes for these
-    errored_objs = []
     if (save_dir / 'errored.json').exists():
         with open(save_dir / 'errored.json', 'r') as f:
             errored = json.load(f)
@@ -484,7 +328,6 @@ def resume(
                     f'and updating parameters for these entries.')
 
         # Generate some replacement crystals
-        from crystalsizer3d.crystal_generator import CrystalGenerator
         generator = CrystalGenerator(
             crystal_id=dataset_args.crystal_id,
             miller_indices=dataset_args.miller_indices,
@@ -497,7 +340,6 @@ def resume(
         hkls = [''.join(str(i) for i in k) for k in generator.distances.keys()]
 
         # Load the parameters
-        param_path = save_dir / 'parameters.csv'
         param_bkup_path = save_dir / f'parameters.bkup_{START_TIMESTAMP}.csv'
         shutil.copy(param_path, param_bkup_path)
         logger.info(f'Backed up parameters to {param_bkup_path}.')
@@ -508,7 +350,6 @@ def resume(
         # Update the errored entries
         updated_idxs = []
         for i, (idx, dets) in enumerate(errored.items()):
-            errored_objs.append(obj_dir / dets['obj_file'])
             rel_rates, zingg_vals, mesh = crystals[i]
 
             # Update the parameters
@@ -520,43 +361,6 @@ def resume(
             rows[row_idx]['il'] = zingg_vals[1]
             for j, hkl in enumerate(hkls):
                 rows[row_idx][f'd{j}_{hkl}'] = rel_rates[j]
-
-            # Load the batch of meshes
-            obj_path = obj_dir / dets['obj_file']
-            with open(obj_path, 'r') as f:
-                scene = load_obj(
-                    f,
-                    group_material=False,
-                    skip_materials=True,
-                    maintain_order=True,
-                )
-
-            # Rebuild the scene with the new mesh
-            meshes = []
-            keys = sorted(list(scene['geometry'].keys()))
-            for k in keys:
-                if k == f'{dataset_args.crystal_id}_{int(idx):06d}':
-                    m = mesh
-                else:
-                    mesh_params = scene['geometry'][k]
-                    m = Trimesh(vertices=mesh_params['vertices'], faces=mesh_params['faces'], process=True,
-                                validate=True)
-                m.metadata['name'] = k
-                meshes.append(m)
-            scene = Scene()
-            scene.add_geometry(meshes)
-
-            # Update the obj file
-            obj_bkup_path = obj_dir / (dets['obj_file'] + f'.bkup_{START_TIMESTAMP}.obj')
-            shutil.copy(obj_path, obj_bkup_path)
-            logger.info(f'Backed up obj file to {obj_bkup_path}.')
-            with open(obj_path, 'w') as f:
-                f.write(export_obj(
-                    scene,
-                    header=None,
-                    include_normals=True,
-                    include_color=False
-                ))
             updated_idxs.append(idx)
 
         # Save updated parameters back to file
@@ -577,49 +381,21 @@ def resume(
                 json.dump(errored, f)
             raise RuntimeError('Some errored entries could not be fixed.')
 
-    # Check each obj file to see if we have all images and parameters present for it
-    logger.info('Checking for missing images and parameters.')
-    assert obj_dir.exists(), f'Crystals directory does not exist: {obj_dir}'
-    Ns = dataset_args.n_samples
-    No = dataset_args.batch_size
-    Nb = math.ceil(Ns / No)
-    bad_obj_files = []
-    for i in range(Nb):
-        if (i + 1) % 10 == 0:
-            logger.info(f'Checking batch {i + 1}/{Nb}.')
-        obj_path = obj_dir / f'crystals_{i:05d}.obj'
-        assert obj_path.exists(), f'Object file does not exist: {obj_path}'
-        n_objs_in_file = Ns - (i * No) if i == Nb - 1 else No
-        img_idxs = np.arange(i * No, i * No + n_objs_in_file)
-        for j in img_idxs:
-            img_path = images_dir / f'{j:010d}.png'
-            if not img_path.exists():
-                bad_obj_files.append(obj_path)
-                break
-
-        # Check that the batch parameters and segmentations exist for all the good batches
-        if obj_path in bad_obj_files:
-            continue
-        batch_params = tmp_dir / f'params_{i:010d}.json'
-        batch_segmentations = tmp_dir / f'segmentations_{i:010d}.json'
-        if not batch_params.exists() or not batch_segmentations.exists():
-            bad_obj_files.append(obj_path)
-    for errored_obj_file in errored_objs:
-        assert errored_obj_file in bad_obj_files, \
-            f'Errored obj file {errored_obj_file} not found in bad obj files!'
-
-    # If all images are present, nothing to do
-    if len(bad_obj_files) == 0:
-        logger.info('No missing images found.')
-        elapsed_time = time.time() - start_time
-        logger.info(f'Finished in {elapsed_time // 60:.0f}m {elapsed_time % 60:.0f}s.')
-        return
-
-    # Re-render bad batches
-    logger.info(f'Re-rendering {len(bad_obj_files)} batches.')
-    renderer.render(
-        obj_paths=bad_obj_files,
+    # Now just re-run the render which should catch any missing images
+    renderer = CrystalRenderer(
+        param_path=save_dir / 'parameters.csv',
+        dataset_args=dataset_args,
+        renderer_args=renderer_args,
+        quiet_render=True
     )
+
+    # If it was originally made in parallel, make sure the fix is in parallel too
+    tmp_dir = save_dir / 'tmp_output'
+    if renderer.n_workers > 1:
+        if not tmp_dir.exists():
+            logger.info('Temporary output directory does not exist. Can\'t fix/resume this.')
+            return
+    renderer.render()
 
     # Annotate a single image for reference
     renderer.annotate_image()
@@ -644,5 +420,5 @@ if __name__ == '__main__':
 
     # -- Use to fix a broken run --
     # resume(
-    #     save_dir=LOGS_PATH / '20240220_1011',
+    #     save_dir=LOGS_PATH / '20240502_1355',
     # )

@@ -483,7 +483,7 @@ def _plot_single_prediction(
                 r_params=manager.ds.denormalise_rendering_params(Y_pred, 0),
                 attempts=1
             )
-            _plot_image(fig.add_subplot(gs[row_idx, 0]), 'Blender', img)
+            _plot_image(fig.add_subplot(gs[row_idx, 0]), 'Render', img)
         except Exception as e:
             _plot_error(fig.add_subplot(gs[row_idx, 0]), f'Rendering failed:\n{e}')
     else:

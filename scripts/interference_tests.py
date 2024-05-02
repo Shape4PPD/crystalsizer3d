@@ -1,15 +1,17 @@
-from typing import List, Tuple
+from typing import List
 
 import matplotlib.pyplot as plt
 import mitsuba as mi
 import numpy as np
 import torch
-from PIL import Image, ImageDraw
 from ccdc.io import EntryReader
 
 from crystalsizer3d import USE_CUDA
 from crystalsizer3d.crystal import Crystal, ROTATION_MODE_AXISANGLE
-from crystalsizer3d.crystal_renderer_mitsuba import Bubble, build_mitsuba_mesh
+from crystalsizer3d.crystal_renderer import Scene
+from crystalsizer3d.scene_components.bubble import make_bubbles
+from crystalsizer3d.scene_components.bumpmap import generate_bumpmap
+from crystalsizer3d.util.utils import to_numpy
 
 if USE_CUDA:
     if 'cuda_ad_rgb' not in mi.variants():
@@ -19,22 +21,6 @@ if USE_CUDA:
 else:
     mi.set_variant('llvm_ad_rgb')
     device = torch.device('cpu')
-
-from mitsuba import ScalarTransform4f as T
-
-# dr.set_log_level(dr.LogLevel.Info)
-# dr.set_thread_count(1)
-
-# save_plots = True
-# show_plots = False
-save_plots = False
-show_plots = True
-
-SHAPE_NAME = 'crystal'
-VERTEX_KEY = SHAPE_NAME + '.vertex_positions'
-FACES_KEY = SHAPE_NAME + '.faces'
-BSDF_KEY = SHAPE_NAME + '.bsdf'
-COLOUR_KEY = BSDF_KEY + '.reflectance.value'
 
 
 def _generate_crystal(
@@ -80,90 +66,6 @@ def _generate_crystal(
     return crystal
 
 
-def create_scene(
-        crystal: Crystal,
-        bubbles: List[Bubble],
-        radiance: Tuple[float, float, float] = (0.5, 0.5, 0.5),
-        spp: int = 256,
-        res: int = 400
-) -> mi.Scene:
-    """
-    Create a Mitsuba scene containing the given crystal.
-    """
-    scene_dict = {
-        'type': 'scene',
-
-        # Camera and rendering parameters
-        'integrator': {
-            'type': 'path',
-        },
-        'sensor': {
-            'type': 'thinlens',
-            'aperture_radius': 0.5,
-            'focus_distance': 90,
-            'fov': 25,
-            'to_world': T.look_at(
-                origin=[0, 0, 100],
-                target=[0, 0, 0],
-                up=[0, 1, 0]
-            ),
-            'sampler': {
-                'type': 'stratified',  # seems better than independent
-                'sample_count': spp
-            },
-            'film': {
-                'type': 'hdrfilm',
-                'width': res,
-                'height': res,
-                'filter': {'type': 'gaussian'},
-                'sample_border': True,
-            },
-        },
-
-        # Emitters
-        'light': {
-            'type': 'rectangle',
-            'to_world': T.scale(50),
-            'emitter': {
-                'type': 'area',
-                'radiance': {
-                    'type': 'rgb',
-                    'value': radiance
-                }
-            },
-        },
-
-        # Shapes
-        'surface': {
-            'type': 'rectangle',
-            'to_world': T.translate([0, 0, 1]) @ T.scale(25),
-            'surface_material': {
-                'type': 'dielectric',
-                'int_ior': 1.,
-                # 'specular_transmittance': {
-                #     'type': 'bitmap',
-                #     # 'bitmap': mi.Bitmap(dr.ones(mi.TensorXf, (12, 12, 3)))
-                #     # 'bitmap': mi.Bitmap(surf),
-                #     'filename': str(ROOT_PATH / 'tmp' / 'grid_1000x1000.png'),
-                #     # 'type': 'rgb',
-                #     # 'value': (1,0,0),
-                #     'wrap_mode': 'clamp',
-                # }
-            },
-        },
-        SHAPE_NAME: build_mitsuba_mesh(crystal)
-    }
-
-    # Add bubbles
-    for bubble in bubbles:
-        scene_dict[bubble.SHAPE_NAME] = bubble.build_mesh()
-
-    # Load the scene
-    scene = mi.load_dict(scene_dict)
-
-    return scene
-
-
 def plot_scene():
     """
     Plot the scene with some interference patterns.
@@ -171,27 +73,25 @@ def plot_scene():
     spp = 2**9
 
     # Bubble parameters
-    n_bubbles = 0
-    bubbles_min_x = -10
-    bubbles_max_x = 10
-    bubbles_min_y = -10
-    bubbles_max_y = 10
+    n_bubbles = 50
+    bubbles_min_x = -20
+    bubbles_max_x = 20
+    bubbles_min_y = -20
+    bubbles_max_y = 20
     bubbles_min_z = 0
-    bubbles_max_z = 10
+    bubbles_max_z = 20
     bubbles_min_scale = 0.001
     bubbles_max_scale = 1
-    bubbles_min_alpha = 0.05
-    bubbles_max_alpha = 0.2
+    bubbles_min_roughness = 0.05
+    bubbles_max_roughness = 0.2
     bubbles_min_ior = 1.1
     bubbles_max_ior = 1.8
 
     # Bumpmap defects
-    n_defects = 200
+    n_defects = 20
     defect_max_z = 1
-    defect_min_length = 0.001
-    defect_max_length = 0.4
-    defect_min_width = 0.0001
-    defect_max_width = 0.001
+    defect_min_width = 0.001
+    defect_max_width = 0.01
 
     # Create the crystal
     crystal = _generate_crystal(
@@ -202,58 +102,53 @@ def plot_scene():
     )
 
     # Create some bubbles
-    bubbles = []
-    for i in range(n_bubbles):
-        bubble = Bubble(
-            shape_name=f'bubble_{i}',
-            origin=[
-                np.random.uniform(bubbles_min_x, bubbles_max_x),
-                np.random.uniform(bubbles_min_y, bubbles_max_y),
-                np.random.uniform(bubbles_min_z, bubbles_max_z),
-            ],
-            scale=np.random.uniform(bubbles_min_scale, bubbles_max_scale),
-            roughness=np.random.uniform(bubbles_min_alpha, bubbles_max_alpha),
-            ior=np.random.uniform(bubbles_min_ior, bubbles_max_ior),
+    if n_bubbles > 0:
+        bubbles = make_bubbles(
+            n_bubbles=n_bubbles,
+            min_x=bubbles_min_x,
+            max_x=bubbles_max_x,
+            min_y=bubbles_min_y,
+            max_y=bubbles_max_y,
+            min_z=bubbles_min_z,
+            max_z=bubbles_max_z,
+            min_scale=bubbles_min_scale,
+            max_scale=bubbles_max_scale,
+            min_roughness=bubbles_min_roughness,
+            max_roughness=bubbles_max_roughness,
+            min_ior=bubbles_min_ior,
+            max_ior=bubbles_max_ior,
+            device=device,
         )
-        bubble.to(device)
-        bubbles.append(bubble)
+    else:
+        bubbles = []
 
-    # Draw some line defects onto the bumpmap
-    bumpmap_dim = crystal.bumpmap.shape[0]
-    bumpmap = Image.new('L', (bumpmap_dim, bumpmap_dim), color=int(255 / 2))
-    draw = ImageDraw.Draw(bumpmap)
-    for i in range(n_defects):
-        z = int(np.random.uniform() * 255)
-        l = max(1, int(np.random.uniform(defect_min_length, defect_max_length) * bumpmap.width))
-        w = max(1, int(np.random.uniform(defect_min_width, defect_max_width) * bumpmap.width))
+    # Generate a defect bumpmap
+    crystal.bumpmap.data = generate_bumpmap(
+        crystal=crystal,
+        n_defects=n_defects,
+        defect_min_width=defect_min_width,
+        defect_max_width=defect_max_width,
+        defect_max_z=defect_max_z,
+    )
 
-        # Pick random start point
-        x0 = np.random.randint(0, bumpmap.width)
-        y0 = np.random.randint(0, bumpmap.height)
-
-        # Pick a random angle and calculate end point
-        angle = np.random.uniform(0, 2 * np.pi)
-        x1 = x0 + int(l * np.cos(angle))
-        y1 = y0 + int(l * np.sin(angle))
-
-        # Draw line between points
-        draw.line((x0, y0, x1, y1), fill=z, width=w)
-    bumpmap = (np.array(bumpmap).astype(np.float32) / 255 - 0.5) * 2 * defect_max_z
-    crystal.bumpmap.data = torch.from_numpy(bumpmap).to(device)
-
-    scene = create_scene(
+    # Render the scene
+    scene = Scene(
         crystal=crystal,
         bubbles=bubbles,
-        radiance=(0.6, 0.5, 0.3),
-        spp=spp
+        spp=spp,
+        light_radiance=(0.6, 0.5, 0.3),
     )
-    image = mi.render(scene)
-    plt.imshow(image**(1.0 / 2.2))
-    plt.axis('off')
+    image = scene.render()
+
+    # Plot it
+    fig, axes = plt.subplots(1, 2, figsize=(10, 5))
+    axes[0].imshow(image)
+    axes[0].axis('off')
+    axes[1].imshow(to_numpy(crystal.bumpmap), cmap='gray')
+    axes[1].axis('off')
+    fig.tight_layout()
     plt.show()
 
 
 if __name__ == '__main__':
     plot_scene()
-    # optimise_scene()
-    # track_losses()

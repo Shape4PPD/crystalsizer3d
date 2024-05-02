@@ -14,10 +14,9 @@ from trimesh.exchange.obj import load_obj
 
 from crystalsizer3d import logger
 from crystalsizer3d.args.dataset_synthetic_args import DatasetSyntheticArgs
-from crystalsizer3d.args.dataset_training_args import DatasetTrainingArgs, ROTATION_MODE_AXISANGLE, \
-    ROTATION_MODE_QUATERNION, ROTATION_MODE_SINCOS
+from crystalsizer3d.args.dataset_training_args import DatasetTrainingArgs
 from crystalsizer3d.args.renderer_args import RendererArgs
-from crystalsizer3d.crystal_renderer_blender import CrystalWellSettings
+from crystalsizer3d.crystal import ROTATION_MODE_AXISANGLE, ROTATION_MODE_QUATERNION
 from crystalsizer3d.util.utils import axisangle_to_euler, euler_to_axisangle, euler_to_quaternion, from_preangles, \
     quaternion_to_euler, to_numpy
 
@@ -104,9 +103,7 @@ class Dataset:
                 labels += self.labels_distance_switches
         if self.ds_args.train_transformation:
             labels += self.labels_transformation
-            if self.ds_args.rotation_mode == ROTATION_MODE_SINCOS:
-                labels += self.labels_transformation_sincos
-            elif self.ds_args.rotation_mode == ROTATION_MODE_QUATERNION:
+            if self.ds_args.rotation_mode == ROTATION_MODE_QUATERNION:
                 labels += self.labels_transformation_quaternion
             else:
                 assert self.ds_args.rotation_mode == ROTATION_MODE_AXISANGLE
@@ -118,9 +115,7 @@ class Dataset:
             labels += self.labels_light
             if not self.renderer_args.transmission_mode:
                 labels += self.labels_light_location
-                if self.ds_args.rotation_mode == ROTATION_MODE_SINCOS:
-                    labels += self.labels_light_sincos
-                elif self.ds_args.rotation_mode == ROTATION_MODE_QUATERNION:
+                if self.ds_args.rotation_mode == ROTATION_MODE_QUATERNION:
                     labels += self.labels_light_quaternion
                 else:
                     assert self.ds_args.rotation_mode == ROTATION_MODE_AXISANGLE
@@ -511,6 +506,7 @@ class Dataset:
         """
         Load the mesh for an item.
         """
+        raise NotImplementedError
         obj_path = self.path / 'crystals' / f'crystals_{idx // self.dataset_args.batch_size:05d}.obj'
         with open(obj_path, 'r') as f:
             scene = load_obj(

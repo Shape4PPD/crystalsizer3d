@@ -1,5 +1,4 @@
 from argparse import ArgumentParser
-from pathlib import Path
 from typing import List, Optional, Tuple
 
 from crystalsizer3d.args.base_args import BaseArgs
@@ -19,7 +18,6 @@ class DatasetSyntheticArgs(BaseArgs):
             zingg_bbox: List[float],
             distance_constraints: Optional[str] = None,
             n_samples: int = 1000,
-            obj_path: Optional[Path] = None,
             batch_size: int = 100,
             image_size: int = 200,
             centre_crystals: bool = False,
@@ -29,7 +27,7 @@ class DatasetSyntheticArgs(BaseArgs):
             min_area: float = 0.05,
             max_area: float = 0.5,
             validate_n_samples: int = 10,
-            generate_blender: bool = False,
+            generate_clean: bool = False,
             **kwargs
     ):
         # Check arguments are valid
@@ -56,20 +54,8 @@ class DatasetSyntheticArgs(BaseArgs):
         self.distance_constraints = distance_constraints
         assert n_samples > 0, f'Number of samples must be greater than 0. {n_samples} received.'
         self.n_samples = n_samples
-        param_path = None
-        if obj_path is not None:
-            if type(obj_path) == str:
-                obj_path = Path(obj_path)
-            assert obj_path.exists(), f'Object file "{obj_path}" does not exist.'
-            param_path = obj_path.parent / 'parameters.csv'
-            if not param_path.exists() and obj_path.is_dir():
-                param_path = obj_path / 'parameters.csv'
-            if not param_path.exists():
-                param_path = obj_path.parent.parent / 'parameters.csv'
-            assert param_path.exists(), f'Parameters file "{param_path}" does not exist.'
-        self.obj_path = obj_path
         self.batch_size = batch_size
-        self.param_path = param_path
+        self.param_path = None
         assert image_size > 0, f'Image size must be greater than 0. {image_size} received.'
         self.image_size = image_size
         self.centre_crystals = centre_crystals
@@ -82,10 +68,7 @@ class DatasetSyntheticArgs(BaseArgs):
         assert max_area < 1, f'Maximum area must be less than 1. {max_area} received.'
         self.max_area = max_area
         self.validate_n_samples = validate_n_samples
-        if generate_blender and n_samples > 100:
-            raise ValueError('Generating more than 100 blender files at a time is '
-                             'disabled for sanity reasons (disk space).')
-        self.generate_blender = generate_blender
+        self.generate_clean = generate_clean
 
     @classmethod
     def add_args(cls, parser: ArgumentParser):
@@ -107,10 +90,8 @@ class DatasetSyntheticArgs(BaseArgs):
                             help='Constraints to apply to the crystal face distances. Must be in the format "111>012>0".')
         parser.add_argument('--n-samples', type=int, default=1,
                             help='Number of samples to generate.')
-        parser.add_argument('--obj-path', type=Path, default=None,
-                            help='Path to the obj file to use (skipping the crystal generation).')
         parser.add_argument('--batch-size', type=int, default=100,
-                            help='Number of meshes to save per obj file.')
+                            help='Number of crystals to render per batch.')
         parser.add_argument('--image-size', type=int, default=512,
                             help='Image size.')
         parser.add_argument('--centre-crystals', type=str2bool, default=False,
@@ -126,5 +107,5 @@ class DatasetSyntheticArgs(BaseArgs):
                             help='Maximum area of the image covered by the crystal.')
         parser.add_argument('--validate-n-samples', type=int, default=10,
                             help='Number of samples to re-generate for validation.')
-        parser.add_argument('--generate-blender', type=str2bool, default=False,
-                            help='Generate blender files (warning: file size).')
+        parser.add_argument('--generate-clean', type=str2bool, default=True,
+                            help='Generate clean images (no interference).')

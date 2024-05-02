@@ -27,11 +27,7 @@ from trimesh import Trimesh
 
 from crystalsizer3d import LOGS_PATH, START_TIMESTAMP, USE_CUDA, logger
 from crystalsizer3d.args.base_args import BaseArgs
-from crystalsizer3d.args.dataset_training_args import ROTATION_MODE_AXISANGLE, ROTATION_MODE_QUATERNION, \
-    ROTATION_MODE_SINCOS
 from crystalsizer3d.crystal import Crystal
-from crystalsizer3d.crystal_renderer import render_from_parameters
-from crystalsizer3d.crystal_renderer_mitsuba import render_crystal_scene
 from crystalsizer3d.nn.manager import CCDC_AVAILABLE, Manager
 from crystalsizer3d.util.utils import geodesic_distance, print_args, to_dict, to_numpy, to_rgb
 
@@ -434,24 +430,12 @@ def _render_crystal(
         manager: Manager,
         Y: Dict[str, torch.Tensor],
         default_rendering_params: Optional[Dict[str, Any]] = None,
-        pipeline: str = 'blender'
 ) -> np.ndarray:
     """
     Render a 3D crystal from the predicted parameters.
     """
-    if pipeline == 'blender':
-        morph, mesh = _build_crystal_csd(Y, manager)
-        img = render_from_parameters(
-            mesh=mesh,
-            settings_path=manager.ds.path / 'vcw_settings.json',
-            r_params=manager.ds.denormalise_rendering_params(Y, default_rendering_params=default_rendering_params),
-            attempts=1
-        )
-    elif pipeline == 'mitsuba':
-        crystal = _build_crystal_custom(Y, manager)
-        img = render_crystal_scene(crystal, spp=256, res=manager.ds.image_size)
-    else:
-        raise ValueError(f'Unknown pipeline: {pipeline}. Must be one of ["blender", "mitsuba"].')
+    crystal = _build_crystal_custom(Y, manager)
+    img = render_crystal_scene(crystal, spp=256, res=manager.ds.image_size)
 
     return img
 

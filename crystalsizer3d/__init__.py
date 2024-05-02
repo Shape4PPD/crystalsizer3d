@@ -28,10 +28,6 @@ def _load_env_path(k: str, default: Path):
     return ep
 
 
-# Blender and PCS addon paths
-BLENDER_PATH = _load_env_path('BLENDER_PATH', Path(''))
-PCS_PATH = _load_env_path('PCS_PATH', Path(''))
-
 # Number of parallel workers to use for tasks
 N_WORKERS = int(os.getenv('N_WORKERS', 8))
 

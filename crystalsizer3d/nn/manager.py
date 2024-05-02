@@ -2585,7 +2585,7 @@ class Manager:
                                                                           metas[idx]['rendering_parameters']),
                             attempts=1
                         )
-                        plot_image(fig.add_subplot(gs[row_idx, i]), 'Blender', img)
+                        plot_image(fig.add_subplot(gs[row_idx, i]), 'Render', img)
                     except Exception as e:
                         plot_error(fig.add_subplot(gs[row_idx, i]), f'Rendering failed:\n{e}')
                 else:

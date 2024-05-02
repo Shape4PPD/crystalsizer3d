@@ -6,8 +6,9 @@ import random
 from argparse import Namespace
 from json import JSONEncoder
 from math import log2
+from multiprocessing import Lock
 from pathlib import Path
-from typing import Optional, Union
+from typing import Optional, Tuple, Union
 
 import matplotlib.colors as mcolors
 import numpy as np
@@ -224,3 +225,78 @@ def to_rgb(c: Union[str, np.ndarray]):
     if type(c) == str:
         return mcolors.to_rgb(c)
     return c
+
+
+def line_equation_coefficients(
+        p1: torch.Tensor,
+        p2: torch.Tensor,
+        perpendicular: bool = False,
+        eps: float = 1e-6
+) -> torch.Tensor:
+    """
+    Calculate the coefficients of the line that passes through p1 and p2 in the form ax + by + c = 0.
+    If perpendicular is True, the coefficients of the line perpendicular to this line that passes through the midpoint of p1 and p2 are returned.
+    """
+    diff = p2 - p1
+    midpoint = (p1 + p2) / 2
+    one = torch.tensor(1., device=p1.device)
+    zero = torch.tensor(0., device=p1.device)
+    if perpendicular and diff[1].abs() < eps:
+        return torch.stack([zero, one, -midpoint[1]])
+    elif not perpendicular and diff[0].abs() < eps:
+        return torch.stack([one, zero, -midpoint[0]])
+
+    # Calculate slope (x)
+    m = diff[1] / diff[0]
+    if perpendicular:
+        m = -1 / m
+
+    # Calculate y-intercept (b)
+    b = midpoint[1] - m * midpoint[0]
+
+    return torch.stack([-m, one, -b])
+
+
+def line_intersection(
+        l1: Tuple[float, float, float],
+        l2: Tuple[float, float, float]
+) -> Optional[torch.Tensor]:
+    """
+    Calculate the intersection point of two lines in the form ax + by + c = 0.
+    """
+    a1, b1, c1 = l1
+    a2, b2, c2 = l2
+
+    # Compute determinant
+    det = a1 * b2 - a2 * b1
+
+    # Check if lines are parallel
+    if det.abs() < 1e-6:
+        return None  # Lines are parallel, no intersection
+
+    # Calculate intersection point
+    x = (-c1 * b2 + c2 * b1) / det
+    y = (-a1 * c2 + a2 * c1) / det
+
+    return torch.stack([x, y])
+
+
+def append_json(file_path: Path, new_data: dict, lock: Optional[Lock] = None):
+    """
+    Append new data to a JSON file.
+    """
+    if lock is not None:
+        with lock:
+            append_json(file_path, new_data)
+        return
+    if not file_path.exists():
+        data = {}
+    else:
+        with open(file_path, 'r') as f:
+            data = json.load(f)
+    if len(data) > 0:
+        for k in new_data.keys():
+            assert k not in data, f'Key "{k}" already exists in {file_path}'
+    data.update(new_data)
+    with open(file_path, 'w') as f:
+        json.dump(data, f, indent=4)

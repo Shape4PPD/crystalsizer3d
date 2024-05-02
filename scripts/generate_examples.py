@@ -15,7 +15,7 @@ from trimesh import Trimesh
 
 from crystalsizer3d import LOGS_PATH, START_TIMESTAMP, USE_CUDA, logger
 from crystalsizer3d.args.base_args import BaseArgs
-from crystalsizer3d.args.dataset_training_args import ROTATION_MODE_AXISANGLE, ROTATION_MODE_QUATERNION, ROTATION_MODE_SINCOS
+from crystalsizer3d.crystal import ROTATION_MODE_AXISANGLE, ROTATION_MODE_QUATERNION
 from crystalsizer3d.nn.manager import CCDC_AVAILABLE, Manager
 from crystalsizer3d.util.utils import equal_aspect_ratio, normalise, print_args, str2bool, to_dict, to_numpy
 
@@ -463,8 +463,6 @@ def _make_parameter_vector(
     # Material parameters are z-score standardised
     if ds_args.train_material:
         labels_material = ds.labels_material
-        if ds_args.include_roughness:
-            labels_material += ['r']
         for k in labels_material:
             if k in item:
                 assert -1 <= item[k] <= 1, f'Material parameter {k} must be in [-2, 2]. {item[k]} received.'

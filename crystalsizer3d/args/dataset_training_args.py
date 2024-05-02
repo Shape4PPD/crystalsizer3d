@@ -59,7 +59,7 @@ class DatasetTrainingArgs(BaseArgs):
         group.add_argument('--dataset-path', type=Path,
                            help='Path to the dataset.')
         group.add_argument('--check-image-paths', type=str2bool, default=False,
-                           help='Check that the image paths exist for all images in dataset (can be slow for large datasets).')
+                           help='Check that the image paths exist for all images in dataset (slow for large datasets).')
         group.add_argument('--train-test-split', type=float, default=0.8,
                            help='Train/test split.')
         group.add_argument('--augment', type=str2bool, default=False,

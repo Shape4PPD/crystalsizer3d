@@ -3,16 +3,10 @@ from typing import List, Tuple
 
 from crystalsizer3d.args.base_args import BaseArgs
 
-ENGINE_BLENDER = 'blender'
-ENGINE_MITSUBA = 'mitsuba'
-ENGINES = [ENGINE_BLENDER, ENGINE_MITSUBA]
-
 
 class RendererArgs(BaseArgs):
     def __init__(
             self,
-            render_engine: str = ENGINE_MITSUBA,
-            device: str = 'CPU',
             spp: int = 256,
 
             integrator_max_depth: int = 64,
@@ -42,11 +36,13 @@ class RendererArgs(BaseArgs):
             max_brightness: float = 0.9,
             min_roughness: float = 0.0,
             max_roughness: float = 0.4,
+
             crystal_bumpmap_dim: int = -1,
-            crystal_material_name: str = 'GLASS',
-            custom_material_name: str = 'default',
-            remesh_mode: str = 'NONE',
-            remesh_octree_depth: int = 4,
+            min_defects: int = 0,
+            max_defects: int = 10,
+            defect_min_width: float = 0.0001,
+            defect_max_width: float = 0.001,
+            defect_max_z: float = 0.1,
 
             min_bubbles: int = 0,
             max_bubbles: int = 0,
@@ -64,8 +60,6 @@ class RendererArgs(BaseArgs):
             **kwargs
     ):
         # Rendering settings
-        self.render_engine = render_engine
-        self.device = device
         self.spp = spp
 
         # Integrator parameters
@@ -100,11 +94,14 @@ class RendererArgs(BaseArgs):
         self.max_brightness = max_brightness
         self.min_roughness = min_roughness
         self.max_roughness = max_roughness
+
+        # Bumpmap defects
         self.crystal_bumpmap_dim = crystal_bumpmap_dim
-        self.crystal_material_name = crystal_material_name
-        self.custom_material_name = custom_material_name
-        self.remesh_mode = remesh_mode
-        self.remesh_octree_depth = remesh_octree_depth
+        self.min_defects = min_defects
+        self.max_defects = max_defects
+        self.defect_min_width = defect_min_width
+        self.defect_max_width = defect_max_width
+        self.defect_max_z = defect_max_z
 
         # Bubble properties
         self.min_bubbles = min_bubbles
@@ -126,11 +123,6 @@ class RendererArgs(BaseArgs):
         Add arguments to a command parser.
         """
         group = parser.add_argument_group('Renderer Args')
-
-        group.add_argument('--render-engine', type=str, default=ENGINE_MITSUBA, choices=ENGINES,
-                           help='Render engine to use.')
-        group.add_argument('--device', type=str, default='GPU',
-                           help='Device to use for rendering.')
         group.add_argument('--spp', type=int, default=256,
                            help='Samples per pixel.')
 
@@ -189,8 +181,6 @@ class RendererArgs(BaseArgs):
                            help='Minimum roughness.')
         group.add_argument('--max-roughness', type=float, default=0.4,
                            help='Maximum roughness.')
-        group.add_argument('--crystal-bumpmap-dim', type=int, default=-1,
-                           help='Bumpmap dimension. -1 for no bumpmap.')
         group.add_argument('--crystal-material-name', type=str, default='GLASS',
                            help='Crystal material')
         group.add_argument('--custom-material-name', type=str, default='default',
@@ -199,6 +189,20 @@ class RendererArgs(BaseArgs):
                            help='Remesh mode.')
         group.add_argument('--remesh-octree-depth', type=int, default=8,
                            help='Octree depth for remeshing.')
+
+        # Bumpmap defects
+        group.add_argument('--crystal-bumpmap-dim', type=int, default=1000,
+                           help='Bumpmap dimension. -1 for no bumpmap.')
+        group.add_argument('--min-defects', type=int, default=0,
+                           help='Minimum number of defects.')
+        group.add_argument('--max-defects', type=int, default=10,
+                           help='Maximum number of defects.')
+        group.add_argument('--defect-min-width', type=float, default=0.0001,
+                           help='Minimum defect width.')
+        group.add_argument('--defect-max-width', type=float, default=0.001,
+                           help='Maximum defect width.')
+        group.add_argument('--defect-max-z', type=float, default=1,
+                           help='Maximum defect z-coordinate.')
 
         # Bubbles
         group.add_argument('--min-bubbles', type=int, default=50,
@@ -225,3 +229,5 @@ class RendererArgs(BaseArgs):
                            help='Minimum index of refraction of the bubble.')
         group.add_argument('--bubbles-max-ior', type=float, default=1.8,
                            help='Maximum index of refraction of the bubble.')
+
+        return group

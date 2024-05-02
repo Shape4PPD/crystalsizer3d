@@ -4,9 +4,11 @@ from typing import Any, Dict, List, Optional, Tuple, Union
 import numpy as np
 import torch
 from kornia.geometry import axis_angle_to_rotation_matrix, quaternion_to_rotation_matrix
+from kornia.utils import draw_convex_polygon
 from pymatgen.symmetry.groups import PointGroup
 from torch import nn
 
+from crystalsizer3d import logger
 from crystalsizer3d.util.utils import normalise_pt as normalise
 
 ROTATION_MODE_QUATERNION = 'quaternion'
@@ -155,6 +157,7 @@ class Crystal(nn.Module):
     mesh_vertices: torch.Tensor
     mesh_faces: torch.Tensor
     bumpmap: torch.Tensor
+    uv_mask: torch.Tensor
 
     def __init__(
             self,
@@ -245,13 +248,17 @@ class Crystal(nn.Module):
         self.material_ior = nn.Parameter(init_tensor(material_ior), requires_grad=True)
 
         # Bumpmap texture
-        if use_bumpmap:
-            if bumpmap is None:
-                bumpmap = torch.zeros(bumpmap_dim, bumpmap_dim)
-            self.bumpmap = nn.Parameter(init_tensor(bumpmap), requires_grad=True)
-        else:
-            self.bumpmap = None
+        if bumpmap_dim == -1:
+            if use_bumpmap:
+                logger.warning('Bumpmap dimension set to -1, disabling bumpmap')
+            use_bumpmap = False
+            bumpmap_dim = 10
+        if bumpmap is None:
+            bumpmap = torch.zeros(bumpmap_dim, bumpmap_dim)
+        self.bumpmap = nn.Parameter(init_tensor(bumpmap), requires_grad=True)
+        self.bumpmap_dim = bumpmap_dim
         self.use_bumpmap = use_bumpmap
+        self.uv_faces = {}  # Location of the face vertices on the UV map
 
         # Mesh options
         self.merge_vertices = merge_vertices
@@ -262,10 +269,19 @@ class Crystal(nn.Module):
         self.register_buffer('vertices', torch.empty(0))
         self.register_buffer('mesh_vertices', torch.empty(0))
         self.register_buffer('mesh_faces', torch.empty(0, dtype=torch.int64))
+        self.register_buffer('uv_mask', torch.empty(0, dtype=torch.bool))
 
         # Initialise the crystal
         with torch.no_grad():
             self._init()
+
+    def to(self, *args, **kwargs):
+        """
+        Override the to method to ensure that the uv_faces are also moved to the correct device.
+        """
+        super().to(*args, **kwargs)
+        for k, v in self.uv_faces.items():
+            self.uv_faces[k] = v.to(*args, **kwargs)
 
     def clamp_parameters(self):
         """
@@ -307,7 +323,7 @@ class Crystal(nn.Module):
         )
 
         # Step 4: Build the crystal habit
-        # self.build_mesh()
+        self.build_mesh()
 
     def _calculate_symmetry(self):
         """
@@ -516,12 +532,14 @@ class Crystal(nn.Module):
         """
         if self.merge_vertices:
             raise RuntimeError('Cannot build UV map with merged vertices!')
+        if not self.use_bumpmap or self.bumpmap is None:
+            return
         device = self.origin.device
 
         # Detach the faces and vertices from the computation
         f, v = self.mesh_faces.detach(), self.mesh_vertices.detach()
         faces = {}
-        face_uvs = {}
+        uv_faces = {}
 
         # Construct a grid where each cell contains the planar coordinates of a face
         centroid_idxs = f[:, 0].unique(dim=0)
@@ -572,18 +590,30 @@ class Crystal(nn.Module):
                 face_idx = positions[row_idx, col_idx].item()
                 vertex_idxs = faces[face_idx]
                 uv_map[vertex_idxs] = v2
-                face_uvs[face_idx] = v2
+                uv_faces[face_idx] = v2
 
-        # plot_uv_map(rows, row_heights, col_widths, sf)
+        # Construct a mask image showing where the crystal faces lie on the UV map.
+        uv_mask = torch.zeros_like(self.bumpmap)[None, None, ...]
+        colour = torch.tensor([1.0], device=uv_mask.device)
+        for face_uv in uv_faces.values():
+            face_uv = face_uv[1:]  # Skip the centroid
+            img_coords = (face_uv * (self.bumpmap_dim - 1)).round().to(torch.int64)
+            uv_mask = draw_convex_polygon(uv_mask, img_coords[None, ...], colour)
+        uv_mask = uv_mask.squeeze().to(torch.bool)
+
         self.uv_map = uv_map
+        self.uv_faces = uv_faces
+        self.uv_mask = uv_mask
+        # plot_uv_map(rows, row_heights, col_widths, sf, mask)
 
 
-def plot_uv_map(rows, row_heights, col_widths, sf):
+def plot_uv_map(rows, row_heights, col_widths, sf, uv_mask):
     import matplotlib.pyplot as plt
     from crystalsizer3d.util.utils import to_numpy
 
     # Plot the UV map
     fig, ax = plt.subplots()
+    ax.imshow(to_numpy(uv_mask), extent=(0, 1, 0, 1), origin='lower', cmap='gray')
     ax.axhline(y=0, color='k')
     for row_idx, row in enumerate(rows):
         ax.axhline(y=sum(row_heights[:row_idx]) * sf, color='k')

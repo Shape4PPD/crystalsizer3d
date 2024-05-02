@@ -18,7 +18,6 @@ from torchvision.transforms import Compose, GaussianBlur
 
 from crystalsizer3d import LOGS_PATH, ROOT_PATH, START_TIMESTAMP, USE_CUDA, logger
 from crystalsizer3d.crystal import Crystal
-from crystalsizer3d.crystal_renderer_mitsuba import build_mitsuba_mesh
 from crystalsizer3d.nn.models.rcf import RCF
 from crystalsizer3d.util.ema import EMA
 from crystalsizer3d.util.utils import to_numpy
@@ -85,6 +84,19 @@ def create_scene(crystal: Crystal, spp=256, res=400) -> mi.Scene:
     """
     Create a Mitsuba scene containing the given crystal.
     """
+    from crystalsizer3d.scene_components.utils import build_crystal_mesh
+    crystal_mesh = build_crystal_mesh(
+        crystal,
+        material_bsdf={
+            'type': 'roughdielectric',
+            'distribution': 'beckmann',
+            'alpha': 0.02,
+            'int_ior': 1.78,
+        },
+        shape_name=SHAPE_NAME,
+        bsdf_key=BSDF_KEY
+    )
+
     scene = mi.load_dict({
         'type': 'scene',
 
@@ -177,7 +189,7 @@ def create_scene(crystal: Crystal, spp=256, res=400) -> mi.Scene:
             },
 
         },
-        SHAPE_NAME: build_mitsuba_mesh(crystal)
+        SHAPE_NAME: crystal_mesh
     })
 
     return scene
@@ -347,7 +359,6 @@ def plot_scene():
     Debug function to plot the basic scene.
     """
     spp = 2**9
-    # crystal = _generate_crystal()
     crystal = _generate_crystal(
         distances=[1.0, 0.6, 0.6],
         scale=10,

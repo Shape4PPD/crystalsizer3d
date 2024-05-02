@@ -25,10 +25,10 @@ else:
 
 from mitsuba import ScalarTransform4f as T
 
-# save_plots = False
-# show_plots = True
-save_plots = True
-show_plots = False
+save_plots = False
+show_plots = True
+# save_plots = True
+# show_plots = False
 
 SHAPE_NAME = 'sphere'
 VERTEX_KEY = SHAPE_NAME + '.vertex_positions'
@@ -124,7 +124,7 @@ def create_scene(shape: Sphere, spp=256, res=400) -> mi.Scene:
             'type': 'prb_projective',
             'max_depth': 16,
             'rr_depth': 3,
-            # 'sppi': 0
+            'sppi': 0
         },
         'sensor': {
             'type': 'perspective',
@@ -180,7 +180,8 @@ def to_multiscale(img: torch.Tensor, blur: GaussianBlur) -> List[torch.Tensor]:
 def plot_scene():
     spp = 2**9
     sphere = Sphere(scale=2)
-    scene = create_scene(shape=sphere.mesh)
+    sphere = sphere.to(device)
+    scene = create_scene(shape=sphere)
     image = mi.render(scene, spp=spp)
     plt.imshow(image**(1.0 / 2.2))
     plt.axis('off')
@@ -263,7 +264,7 @@ def optimise_scene():
         if i > 0:
             # Take a gradient step and update the parameters
             loss.backward()
-            # r_err.backward()   # Debug to check that the radius is being updated
+            # r_diff.backward()   # Debug to check that the radius is being updated
             opt.step()
         opt.zero_grad()
 

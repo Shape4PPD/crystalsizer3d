@@ -8,10 +8,7 @@ import numpy as np
 import torch
 import yaml
 from ccdc.io import EntryReader
-from kornia.geometry import axis_angle_to_quaternion
-from matplotlib import pyplot as plt
 from mayavi import mlab
-import drjit as dr
 import mitsuba as mi
 
 from crystalsizer3d import LOGS_PATH, START_TIMESTAMP, USE_CUDA, logger
@@ -32,7 +29,6 @@ from mitsuba import ScalarTransform4f as T
 # Off-screen rendering
 mlab.options.offscreen = True
 
-
 SHAPE_NAME = 'crystal'
 VERTEX_KEY = SHAPE_NAME + '.vertex_positions'
 FACES_KEY = SHAPE_NAME + '.faces'
@@ -51,8 +47,8 @@ def get_args() -> Namespace:
                         default='10,3,1.3', help='Crystal face distances.')
 
     # Images
-    parser.add_argument('--res', type=int, default=1000, help='Width and height of images in pixels.')
-    parser.add_argument('--spp', type=int, default=2048, help='Samples per pixel.')
+    parser.add_argument('--res', type=int, default=100, help='Width and height of images in pixels.')
+    parser.add_argument('--spp', type=int, default=16, help='Samples per pixel.')
 
     # 3D plot
     parser.add_argument('--azim', type=float, default=150,
@@ -105,46 +101,24 @@ def _generate_crystal(
 
     return crystal
 
-def build_mitsuba_mesh(crystal: Crystal) -> mi.Mesh:
-    """
-    Convert a Crystal object into a Mitsuba mesh.
-    """
-    # Build the mesh in pytorch and convert the parameters to Mitsuba format
-    vertices, faces = crystal.build_mesh()
-    nv, nf = len(vertices), len(faces)
-    vertices = mi.TensorXf(vertices)
-    faces = mi.TensorXi64(faces)
-
-    # Set up the material properties
-    bsdf = {
-        'type': 'roughdielectric',
-        'distribution': 'beckmann',
-        'alpha': 0.02,
-        'int_ior': 1.78,
-    }
-    props = mi.Properties()
-    props[BSDF_KEY] = mi.load_dict(bsdf)
-
-    # Construct the mitsuba mesh and set the vertex positions and faces
-    mesh = mi.Mesh(
-        SHAPE_NAME,
-        vertex_count=nv,
-        face_count=nf,
-        has_vertex_normals=False,
-        has_vertex_texcoords=False,
-        props=props
-    )
-    mesh_params = mi.traverse(mesh)
-    mesh_params['vertex_positions'] = dr.ravel(vertices)
-    mesh_params['faces'] = dr.ravel(faces)
-
-    return mesh
-
 
 def create_scene(crystal: Crystal, spp: int = 256, res: int = 400) -> mi.Scene:
     """
     Create a Mitsuba scene containing the given crystal.
     """
+    from crystalsizer3d.scene_components.utils import build_crystal_mesh
+    crystal_mesh = build_crystal_mesh(
+        crystal,
+        material_bsdf={
+            'type': 'roughdielectric',
+            'distribution': 'beckmann',
+            'alpha': 0.02,
+            'int_ior': 1.78,
+        },
+        shape_name=SHAPE_NAME,
+        bsdf_key=BSDF_KEY
+    )
+
     scene = mi.load_dict({
         'type': 'scene',
 
@@ -189,7 +163,7 @@ def create_scene(crystal: Crystal, spp: int = 256, res: int = 400) -> mi.Scene:
         },
 
         # Shapes
-        SHAPE_NAME: build_mitsuba_mesh(crystal)
+        SHAPE_NAME: crystal_mesh
     })
 
     return scene
@@ -228,7 +202,7 @@ def _plot_digital_crystal(
         fv = to_numpy(crystal.vertices[fv_idxs])
         fv = np.vstack([fv, fv[0]])  # Close the loop
         mlab.plot3d(*fv.T, color=to_rgb(args.wireframe_colour),
-                        tube_radius=crystal.distances[0].item() * wireframe_radius_factor)
+                    tube_radius=crystal.distances[0].item() * wireframe_radius_factor)
     crystal.origin.data = origin
 
     # Render
@@ -267,14 +241,13 @@ def _plot_perspectives(
     """
     Render different perspectives of the crystal.
     """
-    k = torch.linspace(0, 1, args.n_rotations_per_axis+1)[:-1] * np.pi
+    k = torch.linspace(0, 1, args.n_rotations_per_axis + 1)[:-1] * np.pi
     for kx in k:
         for ky in k:
             for kz in k:
                 logger.info(f'Rendering perspective [{kx:.2f}, {ky:.2f}, {kz:.2f}]')
-                rotvec = torch.tensor([kx, ky, kz])
-                q = axis_angle_to_quaternion(rotvec)
-                crystal.rotation.data = q.to(crystal.rotation.device)
+                rotvec = torch.tensor([kx, ky, kz], device=device)
+                crystal.rotation.data = rotvec
                 scene = create_scene(crystal=crystal, spp=args.spp, res=args.res)
                 img = mi.render(scene)
                 img = mi.util.convert_to_bitmap(img)
@@ -304,7 +277,7 @@ def plot_views():
     _plot_digital_crystal(crystal, args, output_dir)
 
     # Make perspective renderings
-    # _plot_perspectives(crystal, args, output_dir)
+    _plot_perspectives(crystal, args, output_dir)
 
 
 if __name__ == '__main__':
