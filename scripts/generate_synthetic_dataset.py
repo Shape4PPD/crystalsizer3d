@@ -4,7 +4,6 @@ import shutil
 import time
 from argparse import ArgumentParser
 from pathlib import Path
-from typing import Tuple
 
 import cv2
 import numpy as np
@@ -13,7 +12,6 @@ from PIL import Image
 
 from crystalsizer3d import LOGS_PATH, START_TIMESTAMP, logger
 from crystalsizer3d.args.dataset_synthetic_args import DatasetSyntheticArgs
-from crystalsizer3d.args.renderer_args import RendererArgs
 from crystalsizer3d.crystal_generator import CrystalGenerator
 from crystalsizer3d.crystal_renderer import CrystalRenderer
 from crystalsizer3d.util.utils import print_args, set_seed, to_dict
@@ -27,13 +25,12 @@ PARAMETER_HEADERS = [
 ]
 
 
-def parse_args(printout: bool = True) -> Tuple[DatasetSyntheticArgs, RendererArgs]:
+def parse_args(printout: bool = True) -> DatasetSyntheticArgs:
     """
     Parse command line arguments and build parameter holders.
     """
     parser = ArgumentParser(description='Generate a dataset of segmented objects found in videos.')
     DatasetSyntheticArgs.add_args(parser)
-    RendererArgs.add_args(parser)
 
     # Do the parsing
     args = parser.parse_args()
@@ -42,9 +39,8 @@ def parse_args(printout: bool = True) -> Tuple[DatasetSyntheticArgs, RendererArg
 
     # Instantiate the parameter holder
     dataset_args = DatasetSyntheticArgs.from_args(args)
-    renderer_args = RendererArgs.from_args(args)
 
-    return dataset_args, renderer_args
+    return dataset_args
 
 
 def validate(
@@ -56,7 +52,6 @@ def validate(
     with open(output_dir / 'options.yml', 'r') as f:
         spec = yaml.load(f, Loader=yaml.FullLoader)
         dataset_args = DatasetSyntheticArgs.from_args(spec['dataset_args'])
-        renderer_args = RendererArgs.from_args(spec['renderer_args'])
 
     n_examples = min(dataset_args.validate_n_samples, dataset_args.n_samples)
     if n_examples <= 0:
@@ -81,7 +76,6 @@ def validate(
     renderer = CrystalRenderer(
         param_path=output_dir / 'parameters.csv',
         dataset_args=dataset_args,
-        renderer_args=renderer_args,
         quiet_render=True
     )
 
@@ -126,7 +120,7 @@ def validate(
             item['segmentation'] = segmentations[row['image']]
 
             # Add the bumpmap path if it exists
-            if renderer_args.crystal_bumpmap_dim > -1:
+            if dataset_args.crystal_bumpmap_dim > -1:
                 bumpmap_path = output_dir / 'bumpmaps' / f'{row["image"][:-4]}.npz'
                 assert bumpmap_path.exists(), f'Bumpmap path does not exist: {bumpmap_path}'
                 item['rendering_parameters']['bumpmap'] = bumpmap_path
@@ -209,7 +203,7 @@ def generate_dataset():
     """
     Generate a dataset of synthetic crystal images.
     """
-    dataset_args, renderer_args = parse_args()
+    dataset_args = parse_args()
 
     # Set a timer going to record how long this takes
     start_time = time.time()
@@ -226,7 +220,7 @@ def generate_dataset():
         clean_images_dir.mkdir(exist_ok=True)
 
     # Create a directory to save bumpmaps
-    if renderer_args.crystal_bumpmap_dim > -1:
+    if dataset_args.crystal_bumpmap_dim > -1:
         bumpmap_dir = save_dir / 'bumpmaps'
         bumpmap_dir.mkdir(exist_ok=True)
 
@@ -235,7 +229,6 @@ def generate_dataset():
         spec = {
             'created': START_TIMESTAMP,
             'dataset_args': to_dict(dataset_args),
-            'renderer_args': to_dict(renderer_args),
         }
         yaml.dump(spec, f)
 
@@ -279,7 +272,6 @@ def generate_dataset():
     renderer = CrystalRenderer(
         param_path=param_path,
         dataset_args=dataset_args,
-        renderer_args=renderer_args,
         quiet_render=False
     )
     renderer.render()
@@ -309,7 +301,6 @@ def resume(
     with open(save_dir / 'options.yml', 'r') as f:
         args = yaml.load(f, Loader=yaml.FullLoader)
         dataset_args = DatasetSyntheticArgs.from_args(args['dataset_args'])
-        renderer_args = RendererArgs.from_args(args['renderer_args'])
 
     # Set a timer going to record how long this takes
     start_time = time.time()
@@ -385,7 +376,6 @@ def resume(
     renderer = CrystalRenderer(
         param_path=save_dir / 'parameters.csv',
         dataset_args=dataset_args,
-        renderer_args=renderer_args,
         quiet_render=True
     )
 

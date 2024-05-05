@@ -1646,7 +1646,7 @@ class Manager:
         """
         Calculate the light properties losses.
         """
-        if self.ds.renderer_args.transmission_mode:
+        if self.ds.dataset_args.transmission_mode:
             assert l_pred.shape[-1] == 1
             energy_loss = ((l_pred - l_target)**2).mean()
             loss = energy_loss
@@ -2073,7 +2073,7 @@ class Manager:
 
         # Lighting has three independent components - location, energy and rotation
         if self.dataset_args.train_light:
-            if self.ds.renderer_args.transmission_mode:
+            if self.ds.dataset_args.transmission_mode:
                 groups['l/energy'] = (idx, idx + 1)
                 idx += 1
             else:
@@ -2474,7 +2474,7 @@ class Manager:
             ax_.set_title('Light')
             ax_.set_xticks(locs)
 
-            if self.ds.renderer_args.transmission_mode:
+            if self.ds.dataset_args.transmission_mode:
                 xlabels = self.ds.labels_light.copy()
             else:
                 xlabels = self.ds.labels_light_location.copy()
@@ -2768,7 +2768,7 @@ class Manager:
                 ax_.axvline(locs[i] + .5, color='black', linestyle='--', linewidth=1)
 
         def plot_light(ax_, idx_):
-            if self.ds.renderer_args.transmission_mode:
+            if self.ds.dataset_args.transmission_mode:
                 xlabels = self.ds.labels_light.copy()
             else:
                 xlabels = self.ds.labels_light_location.copy()
@@ -2780,7 +2780,7 @@ class Manager:
                 else:
                     xlabels += self.ds.labels_light_axisangle
             locs = _plot_bar_chart('light', idx_, ax_, xlabels, 'Light')
-            if not self.ds.renderer_args.transmission_mode:
+            if not self.ds.dataset_args.transmission_mode:
                 offset = 1.6 * bar_width
                 ax_.axvspan(locs[0] - offset, locs[2] + offset, alpha=0.1, color='green')
                 ax_.axvspan(locs[3] - offset, locs[3] + offset, alpha=0.1, color='red')

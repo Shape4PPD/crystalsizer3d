@@ -17,11 +17,11 @@ from ccdc.io import EntryReader
 
 from crystalsizer3d import N_WORKERS, USE_CUDA, logger
 from crystalsizer3d.args.dataset_synthetic_args import DatasetSyntheticArgs
-from crystalsizer3d.args.renderer_args import RendererArgs
 from crystalsizer3d.crystal import Crystal
 from crystalsizer3d.scene_components.bubble import Bubble, make_bubbles
 from crystalsizer3d.scene_components.bumpmap import generate_bumpmap
 from crystalsizer3d.scene_components.scene import Scene
+from crystalsizer3d.scene_components.utils import RenderError
 from crystalsizer3d.util.utils import SEED, append_json, to_numpy
 
 # Ensure that CUDA will work in subprocesses
@@ -37,27 +37,19 @@ else:
     device = torch.device('cpu')
 
 
-class RenderError(RuntimeError):
-    def __init__(self, message: str, idx: int = None):
-        super().__init__(message)
-        self.idx = idx
-
-
 def _initialise_crystal(
         params: dict,
         dataset_args: DatasetSyntheticArgs,
-        renderer_args: RendererArgs,
         scale_init: float = 1
 ) -> Crystal:
     """
     Initialise a crystal object from the parameters.
     """
     da = dataset_args
-    ra = renderer_args
 
     # Sample material parameters
-    ior = np.random.uniform(ra.min_ior, ra.max_ior)
-    roughness = np.random.uniform(ra.min_roughness, ra.max_roughness)
+    ior = np.random.uniform(da.min_ior, da.max_ior)
+    roughness = np.random.uniform(da.min_roughness, da.max_roughness)
 
     # Create the crystal
     crystal = Crystal(
@@ -66,20 +58,20 @@ def _initialise_crystal(
         rotation_mode=da.rotation_mode,
         material_roughness=roughness,
         material_ior=ior,
-        use_bumpmap=ra.crystal_bumpmap_dim > 0,
-        bumpmap_dim=ra.crystal_bumpmap_dim
+        use_bumpmap=da.crystal_bumpmap_dim > 0,
+        bumpmap_dim=da.crystal_bumpmap_dim
     )
     crystal.to(device)
 
     # Create the crystal bumpmap
-    if ra.crystal_bumpmap_dim > 0:
-        n_defects = np.random.randint(ra.min_defects, ra.max_defects + 1)
+    if da.crystal_bumpmap_dim > 0:
+        n_defects = np.random.randint(da.min_defects, da.max_defects + 1)
         crystal.bumpmap.data = generate_bumpmap(
             crystal=crystal,
             n_defects=n_defects,
-            defect_min_width=ra.defect_min_width,
-            defect_max_width=ra.defect_max_width,
-            defect_max_z=ra.defect_max_z,
+            defect_min_width=da.defect_min_width,
+            defect_max_width=da.defect_max_width,
+            defect_max_z=da.defect_max_z,
         )
 
     return crystal
@@ -91,7 +83,6 @@ def _render_batch(
         batch_idx: int,
         n_batches: int,
         dataset_args: DatasetSyntheticArgs,
-        renderer_args: RendererArgs,
         root_dir: Path,
         output_dir: Optional[Path] = None,
         lock: Optional[Lock] = None,
@@ -100,7 +91,6 @@ def _render_batch(
     Render a batch of crystals to images.
     """
     da = dataset_args
-    ra = renderer_args
     seed = SEED + batch_idx
 
     # Sort directories
@@ -109,7 +99,7 @@ def _render_batch(
     bumpmaps_dir = root_dir / 'bumpmaps'
     clean_images_dir = root_dir / 'images_clean'
     images_dir.mkdir(exist_ok=True)
-    if ra.crystal_bumpmap_dim > 0:
+    if da.crystal_bumpmap_dim > 0:
         bumpmaps_dir.mkdir(exist_ok=True)
     if da.generate_clean:
         clean_images_dir.mkdir(exist_ok=True)
@@ -129,23 +119,23 @@ def _render_batch(
             # Initialise the crystal
             crystal_params_i = crystal_params.copy()
             crystal_params_i['distances'] = list(params['distances'].values())
-            crystal = _initialise_crystal(crystal_params_i, da, ra, scale_init)
+            crystal = _initialise_crystal(crystal_params_i, da, scale_init)
 
             # Create the bubbles
-            if ra.max_bubbles > 0:
+            if da.max_bubbles > 0:
                 bubbles = make_bubbles(
-                    n_bubbles=np.random.randint(ra.min_bubbles, ra.max_bubbles + 1),
-                    min_roughness=ra.bubbles_min_roughness,
-                    max_roughness=ra.bubbles_max_roughness,
-                    min_ior=ra.bubbles_min_ior,
-                    max_ior=ra.bubbles_max_ior,
+                    n_bubbles=np.random.randint(da.min_bubbles, da.max_bubbles + 1),
+                    min_roughness=da.bubbles_min_roughness,
+                    max_roughness=da.bubbles_max_roughness,
+                    min_ior=da.bubbles_min_ior,
+                    max_ior=da.bubbles_max_ior,
                     device=device,
                 )
             else:
                 bubbles = []
 
             # Sample the light radiance
-            light_radiance = np.random.uniform(ra.light_radiance_min, ra.light_radiance_max)
+            light_radiance = np.random.uniform(da.light_radiance_min, da.light_radiance_max)
 
             # Create and render the scene
             scene = Scene(
@@ -153,24 +143,24 @@ def _render_batch(
                 bubbles=bubbles,
                 res=da.image_size,
                 light_radiance=light_radiance,
-                **ra.to_dict(),
+                **da.to_dict(),
             )
             scene.place_crystal(
                 min_area=da.min_area,
                 max_area=da.max_area,
                 centre_crystal=da.centre_crystals,
-                min_x=ra.crystal_min_x,
-                max_x=ra.crystal_max_x,
-                min_y=ra.crystal_min_y,
-                max_y=ra.crystal_max_y,
+                min_x=da.crystal_min_x,
+                max_x=da.crystal_max_x,
+                min_y=da.crystal_min_y,
+                max_y=da.crystal_max_y,
             )
             scene.place_bubbles(
-                min_x=ra.bubbles_min_x,
-                max_x=ra.bubbles_max_x,
-                min_y=ra.bubbles_min_y,
-                max_y=ra.bubbles_max_y,
-                min_scale=ra.bubbles_min_scale,
-                max_scale=ra.bubbles_max_scale,
+                min_x=da.bubbles_min_x,
+                max_x=da.bubbles_max_x,
+                min_y=da.bubbles_min_y,
+                max_y=da.bubbles_max_y,
+                min_scale=da.bubbles_min_scale,
+                max_scale=da.bubbles_max_scale,
             )
             scale_init = scene.crystal.scale.item()
             img = scene.render(seed=seed + idx)
@@ -187,7 +177,7 @@ def _render_batch(
             segmentations[params['image']] = scene.get_crystal_image_coords().tolist()
 
             # Save the defect bumpmap
-            if ra.crystal_bumpmap_dim > -1:
+            if da.crystal_bumpmap_dim > -1:
                 bumpmap_path = output_dir / f'{params["image"][:-4]}.npz'
                 np.savez_compressed(bumpmap_path, data=to_numpy(crystal.bumpmap))
 
@@ -238,11 +228,9 @@ class CrystalRenderer:
             self,
             param_path: Path,
             dataset_args: DatasetSyntheticArgs,
-            renderer_args: RendererArgs,
             quiet_render: bool = False
     ):
         self.dataset_args = dataset_args
-        self.renderer_args = renderer_args
         self.quiet_render = quiet_render
         if N_WORKERS > 0:
             self.n_workers = N_WORKERS
@@ -355,7 +343,6 @@ class CrystalRenderer:
                 'point_group_symbol': self.point_group_symbol,
             },
             'dataset_args': self.dataset_args,
-            'renderer_args': self.renderer_args,
             'root_dir': self.root_dir,
             'n_batches': len(batches),
         }
@@ -398,7 +385,7 @@ class CrystalRenderer:
             rotation=params['crystal']['rotation'],
             material_roughness=params['crystal']['material_roughness'],
             material_ior=params['crystal']['material_ior'],
-            bumpmap_dim=self.renderer_args.crystal_bumpmap_dim
+            bumpmap_dim=self.dataset_args.crystal_bumpmap_dim
         )
 
         # Create the bubbles
@@ -427,7 +414,7 @@ class CrystalRenderer:
             bubbles=bubbles,
             res=self.dataset_args.image_size,
             light_radiance=params['light_radiance'],
-            **self.renderer_args.to_dict(),
+            **self.dataset_args.to_dict(),
         )
         img = scene.render(seed=params['seed'])
         img = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)  # todo: do we need this?

@@ -8,6 +8,12 @@ import torch
 from crystalsizer3d.crystal import Crystal
 
 
+class RenderError(RuntimeError):
+    def __init__(self, message: str, idx: int = None):
+        super().__init__(message)
+        self.idx = idx
+
+
 def build_crystal_mesh(
         crystal: Crystal,
         material_bsdf: dict,

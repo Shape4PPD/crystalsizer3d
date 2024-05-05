@@ -12,7 +12,7 @@ from crystalsizer3d import USE_CUDA
 from crystalsizer3d.args.dataset_synthetic_args import ROTATION_MODE_AXISANGLE
 from crystalsizer3d.crystal import Crystal
 from crystalsizer3d.scene_components.bubble import Bubble
-from crystalsizer3d.scene_components.utils import build_crystal_mesh, project_to_image
+from crystalsizer3d.scene_components.utils import RenderError, build_crystal_mesh, project_to_image
 from crystalsizer3d.util.utils import normalise, to_numpy
 
 if USE_CUDA:
@@ -279,7 +279,7 @@ class Scene:
         # Keep trying to place the crystal until the projected area is close to the target
         is_placed = False
         n_placement_attempts = 0
-        while not is_placed and n_placement_attempts < 100:
+        while not is_placed and n_placement_attempts < 1000:
             n_placement_attempts += 1
 
             # Sample a target area for how much of the image should be covered by the crystal
@@ -290,8 +290,8 @@ class Scene:
                 self.crystal.origin.data.zero_()
             else:
                 self.crystal.origin.data = torch.tensor([
-                    min_x + torch.rand() * (max_x - min_x),
-                    min_y + torch.rand() * (max_y - min_y),
+                    min_x + torch.rand(1, device=device) * (max_x - min_x),
+                    min_y + torch.rand(1, device=device) * (max_y - min_y),
                     0
                 ], device=device)
 
@@ -306,7 +306,7 @@ class Scene:
             projected_area = 0
             n_scale_attempts = 0
             oob = False
-            while abs(projected_area - target_area) > target_area * 0.1 and n_scale_attempts < 100:
+            while abs(projected_area - target_area) > target_area * 0.1 and n_scale_attempts < 1000:
                 if n_scale_attempts != 0:
                     if projected_area > target_area:
                         self.crystal.scale.data *= 0.9

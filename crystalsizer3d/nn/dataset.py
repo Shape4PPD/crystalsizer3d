@@ -13,9 +13,8 @@ from trimesh import Trimesh
 from trimesh.exchange.obj import load_obj
 
 from crystalsizer3d import logger
-from crystalsizer3d.args.dataset_synthetic_args import DatasetSyntheticArgs
 from crystalsizer3d.args.dataset_training_args import DatasetTrainingArgs
-from crystalsizer3d.args.renderer_args import RendererArgs
+from crystalsizer3d.args.dataset_synthetic_args import DatasetSyntheticArgs
 from crystalsizer3d.crystal import ROTATION_MODE_AXISANGLE, ROTATION_MODE_QUATERNION
 from crystalsizer3d.util.utils import axisangle_to_euler, euler_to_axisangle, euler_to_quaternion, from_preangles, \
     quaternion_to_euler, to_numpy
@@ -113,7 +112,7 @@ class Dataset:
             labels += self.labels_material
         if self.ds_args.train_light:
             labels += self.labels_light
-            if not self.renderer_args.transmission_mode:
+            if not self.dataset_args.transmission_mode:
                 labels += self.labels_light_location
                 if self.ds_args.rotation_mode == ROTATION_MODE_QUATERNION:
                     labels += self.labels_light_quaternion
@@ -163,7 +162,6 @@ class Dataset:
             args = yaml.load(f, Loader=yaml.FullLoader)
             self.created = args['created']
             self.dataset_args = DatasetSyntheticArgs.from_args(args['dataset_args'])
-            self.renderer_args = RendererArgs.from_args(args['renderer_args'])
 
         # Load vcw settings
         self.vcw_settings = CrystalWellSettings()
@@ -220,7 +218,7 @@ class Dataset:
                 self.labels_transformation + self.labels_transformation_sincos +
                 self.labels_transformation_quaternion + self.labels_transformation_axisangle +
                 self.labels_material + self.labels_light)
-        if not self.renderer_args.transmission_mode:
+        if not self.dataset_args.transmission_mode:
             keys += self.labels_light_location + self.labels_light_sincos + self.labels_light_quaternion + self.labels_light_axisangle
 
         if path.exists():
@@ -470,7 +468,7 @@ class Dataset:
             # Standardise the energy
             energy = z_transform(r_params['light']['energy'], 'e')
 
-            if not self.renderer_args.transmission_mode:
+            if not self.dataset_args.transmission_mode:
                 # Normalise the location coordinates to [-1, 1], but scale together
                 location = np.array(r_params['light']['location'])
                 l_max = np.array([self.ds_stats[xyz]['max'] for xyz in ['lx', 'ly', 'lz']])
@@ -652,7 +650,7 @@ class Dataset:
             if light.ndim == 2:
                 light = light[idx]
 
-            if self.renderer_args.transmission_mode:
+            if self.dataset_args.transmission_mode:
                 l_params = {
                     'location': [0, 0, 0],
                     'energy': inverse_z_transform(light[0].item(), 'e'),
@@ -689,7 +687,7 @@ class Dataset:
         elif default_rendering_params is not None:
             logger.warning('Missing light parameters and no defaults provided.')
             l_params = default_rendering_params['light']
-            if self.renderer_args.transmission_mode:
+            if self.dataset_args.transmission_mode:
                 l_params['location'] = [0, 0, 0]
                 l_params['rotation'] = [0, 0, 0]
                 l_params['angle'] = 0

@@ -653,7 +653,7 @@ def _plot_light(
         bar_width = 0.7
         ax.bar(locs, l_pred, bar_width, color=args.plot_colour_pred, label='Predicted')
     ax.axhline(0, color='grey', linestyle='--', linewidth=1)
-    if not manager.ds.renderer_args.transmission_mode:
+    if not manager.ds.dataset_args.transmission_mode:
         k = 3 / 4 * bar_width
         ax.axvspan(locs[0] - k, locs[2] + k, alpha=0.1, color='green')
         ax.axvspan(locs[3] - k, locs[3] + k, alpha=0.1, color='red')

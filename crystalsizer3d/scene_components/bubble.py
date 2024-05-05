@@ -8,7 +8,6 @@ from pytorch3d.utils import ico_sphere
 from torch import nn
 
 from crystalsizer3d import USE_CUDA
-from crystalsizer3d.args.renderer_args import RendererArgs
 
 if USE_CUDA:
     if 'cuda_ad_rgb' not in mi.variants():
