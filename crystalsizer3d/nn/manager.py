@@ -14,8 +14,6 @@ import torch.nn.functional as F
 from kornia.geometry import axis_angle_to_rotation_matrix
 from matplotlib import pyplot as plt
 from matplotlib.figure import Figure
-from matplotlib.gridspec import GridSpec
-from scipy.spatial.transform import Rotation
 from timm.optim import create_optimizer_v2
 from timm.scheduler import create_scheduler_v2
 from timm.scheduler.scheduler import Scheduler
@@ -26,14 +24,14 @@ from torch.utils.data import DataLoader
 from torch.utils.tensorboard import SummaryWriter
 
 from crystalsizer3d import LOGS_PATH, START_TIMESTAMP, logger
-from crystalsizer3d.args.dataset_training_args import DatasetTrainingArgs, ROTATION_MODE_AXISANGLE, \
-    ROTATION_MODE_QUATERNION, ROTATION_MODE_SINCOS
+from crystalsizer3d.args.dataset_training_args import DatasetTrainingArgs
 from crystalsizer3d.args.generator_args import GeneratorArgs
 from crystalsizer3d.args.network_args import NetworkArgs
 from crystalsizer3d.args.optimiser_args import OptimiserArgs
 from crystalsizer3d.args.runtime_args import RuntimeArgs
 from crystalsizer3d.args.transcoder_args import TranscoderArgs
-from crystalsizer3d.crystal_renderer import render_from_parameters
+from crystalsizer3d.crystal import ROTATION_MODE_AXISANGLE, ROTATION_MODE_QUATERNION
+from crystalsizer3d.crystal_renderer import CrystalRenderer
 from crystalsizer3d.nn.checkpoint import Checkpoint
 from crystalsizer3d.nn.data_loader import get_data_loader
 from crystalsizer3d.nn.dataset import Dataset
@@ -53,7 +51,9 @@ from crystalsizer3d.nn.models.transcoder_vae import TranscoderVAE
 from crystalsizer3d.nn.models.vit_pretrained import ViTPretrainedNet
 from crystalsizer3d.nn.models.vitvae import ViTVAE
 from crystalsizer3d.util.ema import EMA
-from crystalsizer3d.util.utils import equal_aspect_ratio, geodesic_distance, is_bad, to_numpy
+from crystalsizer3d.util.geometry import geodesic_distance
+from crystalsizer3d.util.plots import plot_training_samples
+from crystalsizer3d.util.utils import is_bad
 
 try:
     from ccdc.morphology import VisualHabitMorphology
@@ -100,8 +100,9 @@ class Manager:
         self.ds = Dataset(self.dataset_args)
         self.train_loader, self.test_loader = self._init_data_loaders()
 
-        # Crystal generator
+        # Crystal generator and renderer
         self.crystal_generator = self._init_crystal_generator()
+        self.crystal_renderer = self._init_crystal_renderer()
 
         # Networks
         self.predictor = self._init_predictor()
@@ -190,6 +191,7 @@ class Manager:
             dsa = self.ds.dataset_args
             generator = CrystalGenerator(
                 crystal_id=dsa.crystal_id,
+                miller_indices=dsa.miller_indices,
                 ratio_means=dsa.ratio_means,
                 ratio_stds=dsa.ratio_stds,
                 zingg_bbox=dsa.zingg_bbox,
@@ -198,6 +200,18 @@ class Manager:
         else:
             generator = None
         return generator
+
+    def _init_crystal_renderer(self) -> CrystalRenderer:
+        """
+        Initialise the crystal renderer.
+        """
+        dsa = self.ds.dataset_args
+        renderer = CrystalRenderer(
+            param_path=self.ds.path / 'parameters.csv',
+            dataset_args=self.ds.dataset_args,
+            quiet_render=True
+        )
+        return renderer
 
     def _init_data_loaders(self) -> Tuple[DataLoader, DataLoader]:
         """
@@ -1345,13 +1359,11 @@ class Manager:
 
         if self.dataset_args.train_transformation:
             n_params = len(self.ds.labels_transformation)
-            if self.dataset_args.rotation_mode == ROTATION_MODE_SINCOS:
-                n_params += len(self.ds.labels_transformation_sincos)
-            elif self.dataset_args.rotation_mode == ROTATION_MODE_QUATERNION:
-                n_params += len(self.ds.labels_transformation_quaternion)
+            if self.dataset_args.rotation_mode == ROTATION_MODE_QUATERNION:
+                n_params += len(self.ds.labels_rotation_quaternion)
             else:
                 assert self.dataset_args.rotation_mode == ROTATION_MODE_AXISANGLE
-                n_params += len(self.ds.labels_transformation_axisangle)
+                n_params += len(self.ds.labels_rotation_axisangle)
             output['transformation'] = Y[:, idx:idx + n_params]
             idx += n_params
 
@@ -1535,13 +1547,7 @@ class Manager:
         location_loss = ((t_pred[:, :3] - t_target[:, :3])**2).mean()
         scale_loss = ((t_pred[:, 3] - t_target[:, 3])**2).mean()
 
-        if self.dataset_args.rotation_mode == ROTATION_MODE_SINCOS:
-            preangles_pred = t_pred[:, 4:].reshape(-1, 3, 2)
-            preangles_target = t_target[:, 4:].reshape(-1, 3, 2)
-            v_norms = preangles_pred.norm(dim=-1, keepdim=True)
-            preangles_pred = preangles_pred / v_norms
-            rotation_loss = ((preangles_pred - preangles_target)**2).mean()
-        elif self.dataset_args.rotation_mode == ROTATION_MODE_QUATERNION:
+        if self.dataset_args.rotation_mode == ROTATION_MODE_QUATERNION:
             q_pred = t_pred[:, 4:]
             v_norms = q_pred.norm(dim=-1, keepdim=True)
             q_pred = q_pred / v_norms
@@ -1646,52 +1652,13 @@ class Manager:
         """
         Calculate the light properties losses.
         """
-        if self.ds.dataset_args.transmission_mode:
-            assert l_pred.shape[-1] == 1
-            energy_loss = ((l_pred - l_target)**2).mean()
-            loss = energy_loss
-            stats = {
-                'light/l_energy': energy_loss.item(),
-                'losses/light': loss.item()
-            }
-
-        else:
-            location_loss = ((l_pred[:, :3] - l_target[:, :3])**2).mean()
-            energy_loss = ((l_pred[:, 3] - l_target[:, 3])**2).mean()
-
-            if self.dataset_args.rotation_mode == ROTATION_MODE_SINCOS:
-                preangles_pred = l_pred[:, 4:].reshape(-1, 2, 2)
-                preangles_target = l_target[:, 4:].reshape(-1, 2, 2)
-                v_norms = preangles_pred.norm(dim=-1, keepdim=True)
-                preangles_pred = preangles_pred / v_norms
-                rotation_loss = ((preangles_pred - preangles_target)**2).mean()
-            elif self.ds_args.rotation_mode == ROTATION_MODE_QUATERNION:
-                q_pred = l_pred[:, 4:]
-                q_target = l_target[:, 4:]
-                v_norms = q_pred.norm(dim=-1, keepdim=True)
-                q_pred = q_pred / v_norms
-                rotation_loss = ((q_pred - q_target)**2).mean()
-            else:
-                assert self.dataset_args.rotation_mode == ROTATION_MODE_AXISANGLE
-                R_pred = axis_angle_to_rotation_matrix(l_pred[:, 4:])
-                R_target = axis_angle_to_rotation_matrix(l_target[:, 4:])
-                rotation_loss = geodesic_distance(R_pred, R_target).mean()
-
-            loss = location_loss + energy_loss + rotation_loss
-            if self.dataset_args.rotation_mode != ROTATION_MODE_AXISANGLE:
-                preangles_loss = ((v_norms - 1)**2).mean()
-                loss = loss + preangles_loss
-
-            stats = {
-                'light/l_location': location_loss.item(),
-                'light/l_energy': energy_loss.item(),
-                'light/l_rotation': rotation_loss.item(),
-                'losses/light': loss.item()
-            }
-
-            if self.dataset_args.rotation_mode != ROTATION_MODE_AXISANGLE:
-                stats['light/l_preangles'] = preangles_loss.item()
-
+        assert l_pred.shape[-1] == 3
+        radiance_loss = ((l_pred - l_target)**2).mean()
+        loss = radiance_loss
+        stats = {
+            'light/l_radiance': radiance_loss.item(),
+            'losses/light': loss.item()
+        }
         return loss, stats
 
     def _calculate_net_teacher_losses(
@@ -2054,10 +2021,7 @@ class Manager:
             idx += 3
             groups['t/scale'] = (idx, idx + 1)
             idx += 1
-            if self.dataset_args.rotation_mode == ROTATION_MODE_SINCOS:
-                groups['t/rotation'] = (idx, idx + 6)
-                idx += 6
-            elif self.dataset_args.rotation_mode == ROTATION_MODE_QUATERNION:
+            if self.dataset_args.rotation_mode == ROTATION_MODE_QUATERNION:
                 groups['t/rotation'] = (idx, idx + 4)
                 idx += 4
             else:
@@ -2071,26 +2035,10 @@ class Manager:
                 groups[f'm/{k}'] = (idx, idx + 1)
                 idx += 1
 
-        # Lighting has three independent components - location, energy and rotation
+        # Lighting has one three component radiance property
         if self.dataset_args.train_light:
-            if self.ds.dataset_args.transmission_mode:
-                groups['l/energy'] = (idx, idx + 1)
-                idx += 1
-            else:
-                groups['l/location'] = (idx, idx + 3)
-                idx += 3
-                groups['l/energy'] = (idx, idx + 1)
-                idx += 1
-                if self.dataset_args.rotation_mode == ROTATION_MODE_SINCOS:
-                    groups['l/rotation'] = (idx, idx + 6)
-                    idx += 6
-                elif self.dataset_args.rotation_mode == ROTATION_MODE_QUATERNION:
-                    groups['l/rotation'] = (idx, idx + 4)
-                    idx += 4
-                else:
-                    assert self.dataset_args.rotation_mode == ROTATION_MODE_AXISANGLE
-                    groups['l/rotation'] = (idx, idx + 3)
-                    idx += 3
+            groups['l/radiance'] = (idx, idx + 3)
+            idx += 1
 
         # Process the batches of variations together
         for group_idxs in groups.values():
@@ -2193,617 +2141,10 @@ class Manager:
             n_examples = min(self.runtime_args.plot_n_examples, self.runtime_args.batch_size)
             idxs = np.random.choice(self.runtime_args.batch_size, n_examples, replace=False)
             if self.dataset_args.train_predictor:
-                self._plot_examples(data, outputs, train_or_test, idxs)
+                fig = plot_training_samples(self, data, outputs, train_or_test, idxs)
+                self._save_plot(fig, 'samples', train_or_test)
             if self.transcoder_args.use_transcoder:
                 self._plot_vaetc_examples(data, outputs, train_or_test, idxs)
-
-    def _plot_examples(
-            self,
-            data: Tuple[dict, torch.Tensor, torch.Tensor, Dict[str, torch.Tensor]],
-            outputs: Dict[str, Any],
-            train_or_test: str,
-            idxs: np.ndarray
-    ):
-        """
-        Plot the image and parameter comparisons.
-        """
-        n_examples = min(self.runtime_args.plot_n_examples, self.runtime_args.batch_size)
-        metas, images, images_aug, Y_target = data
-        Y_pred = outputs['Y_pred']
-        if self.dataset_args.train_generator:
-            X_pred = outputs['X_pred']
-            X_pred2 = outputs['X_pred2']
-            Y_pred2 = outputs['Y_pred2']
-        n_rows = 4 \
-                 + int(self.dataset_args.train_zingg) \
-                 + int(self.dataset_args.train_distances) \
-                 + int(self.dataset_args.train_transformation) \
-                 + int(self.dataset_args.train_material and len(self.ds.labels_material_active) > 0) \
-                 + int(self.dataset_args.train_light) \
-                 + int(self.dataset_args.train_generator) * 2
-
-        height_ratios = [1.2, 1.2, 1, 1]  # images and 3d plots
-        if self.dataset_args.train_zingg:
-            height_ratios.append(0.5)
-        if self.dataset_args.train_distances:
-            height_ratios.append(1)
-        if self.dataset_args.train_transformation:
-            height_ratios.append(0.7)
-        if self.dataset_args.train_material and len(self.ds.labels_material_active) > 0:
-            height_ratios.append(0.7)
-        if self.dataset_args.train_light:
-            height_ratios.append(0.7)
-        if self.dataset_args.train_generator:
-            height_ratios.insert(0, 1.2)
-            height_ratios.insert(0, 1.2)
-
-        fig = plt.figure(figsize=(n_examples * 2.6, n_rows * 2.4))
-        gs = GridSpec(
-            nrows=n_rows,
-            ncols=n_examples,
-            wspace=0.06,
-            hspace=0.4,
-            width_ratios=[1] * n_examples,
-            height_ratios=height_ratios,
-            top=0.97,
-            bottom=0.015,
-            left=0.04,
-            right=0.99
-        )
-
-        loss = getattr(self.checkpoint, f'loss_{train_or_test}')
-        fig.suptitle(
-            f'epoch={self.checkpoint.epoch}, '
-            f'step={self.checkpoint.step + 1}, '
-            f'loss={loss:.4E}',
-            fontweight='bold',
-            y=0.995
-        )
-
-        prop_cycle = plt.rcParams['axes.prop_cycle']
-        default_colours = prop_cycle.by_key()['color']
-        share_ax = {}
-
-        def plot_error(ax_, err_):
-            txt = ax_.text(
-                0.5, 0.5, err_,
-                horizontalalignment='center',
-                verticalalignment='center',
-                wrap=True
-            )
-            txt._get_wrap_line_width = lambda: ax_.bbox.width * 0.7
-            ax_.axis('off')
-
-        def plot_image(ax_, title_, img_):
-            ax_.set_title(title_)
-            ax_.imshow(img_, cmap='gray', vmin=0, vmax=1)
-            ax_.axis('off')
-
-        def add_discriminator_value(ax_, D_key_, idx_):
-            if D_key_ in outputs:
-                d_val = outputs[D_key_][idx_].item()
-                colour = 'red' if d_val < 0 else 'green'
-                ax_.text(
-                    0.99, -0.02, f'{d_val:.3E}',
-                    ha='right', va='top', transform=ax.transAxes,
-                    color=colour, fontsize=14
-                )
-
-        def plot_3d(ax_, title_, morph_, mesh_, colour_):
-            ax_.set_title(title_)
-            if morph_ is not None:
-                for f in morph_.facets:
-                    for edge in f.edges:
-                        coords = np.array(edge)
-                        ax_.plot(*coords.T, c=colour_)
-            ax_.plot_trisurf(
-                mesh_.vertices[:, 0],
-                mesh_.vertices[:, 1],
-                triangles=mesh_.faces,
-                Z=mesh_.vertices[:, 2],
-                color=colour_,
-                alpha=0.5
-            )
-            equal_aspect_ratio(ax_)
-
-        def plot_zingg(ax_, idx_):
-            z_pred = to_numpy(Y_pred['zingg'][idx_])
-            z_target = to_numpy(Y_target['zingg'][idx_])
-            ax_.scatter(z_target[0], z_target[1], c='r', marker='x', s=100, label='Target')
-            ax_.scatter(z_pred[0], z_pred[1], c='b', marker='o', s=100, label='Predicted')
-            ax_.set_title('Zingg')
-            ax_.set_xlabel('S/I', labelpad=-5)
-            ax_.set_xlim(0, 1)
-            ax_.set_xticks([0, 1])
-            if 'zingg' not in share_ax:
-                ax_.legend()
-                ax_.set_ylim(0, 1)
-                ax_.set_yticks([0, 1])
-                ax_.set_ylabel('I/L', labelpad=0)
-                share_ax['zingg'] = ax_
-            else:
-                ax_.sharey(share_ax['zingg'])
-                ax_.yaxis.set_tick_params(labelleft=False)
-
-        def plot_distances(ax_, idx_):
-            ax_pos = ax_.get_position()
-            ax_.set_position([ax_pos.x0, ax_pos.y0 + 0.02, ax_pos.width, ax_pos.height - 0.02])
-            d_pred = to_numpy(Y_pred['distances'][idx_])
-            d_target = to_numpy(Y_target['distances'][idx_])
-            if self.dataset_args.train_generator:
-                d_pred2 = to_numpy(Y_pred2['distances'][idx_])
-
-            # Clip predictions to -1 to avoid large negatives skewing the plots
-            d_pred = np.clip(d_pred, a_min=-1, a_max=np.inf)
-
-            locs = np.arange(len(d_target))
-            if self.dataset_args.train_generator:
-                bar_width = 0.25
-                offset = bar_width
-                ax_.bar(locs - offset, d_target, bar_width, label='Target')
-                ax_.bar(locs, d_pred, bar_width, label='Predicted')
-                ax_.bar(locs + offset, d_pred2, bar_width, label='Predicted2')
-            else:
-                bar_width = 0.35
-                offset = bar_width / 2
-                ax_.bar(locs - offset, d_target, bar_width, label='Target')
-                ax_.bar(locs + offset, d_pred, bar_width, label='Predicted')
-
-            if self.dataset_args.use_distance_switches:
-                s_pred = to_numpy(Y_pred['distance_switches'][idx_])
-                s_target = to_numpy(Y_target['distance_switches'][idx_])
-                k = 2.3
-                colours = []
-                for i, (sp, st) in enumerate(zip(s_pred, s_target)):
-                    if st > 0.5:
-                        ax_.axvspan(i - k * offset, i, alpha=0.1, color='blue')
-                    if sp > 0.5:
-                        ax_.axvspan(i, i + k * offset, alpha=0.1, color='red' if st < 0.5 else 'green')
-                    colours.append('red' if (st < 0.5 < sp) or (st > 0.5 > sp) else 'green')
-                ax_.scatter(locs + offset, s_pred, color=colours, marker='+', s=100, label='Switches')
-
-            ax_.set_title('Distances')
-            ax_.set_xticks(locs)
-            ax_.set_xticklabels(self.ds.labels_distances_active)
-            ax_.tick_params(axis='x', rotation=270)
-            if 'distances' not in share_ax:
-                ax_.legend()
-                share_ax['distances'] = ax_
-            else:
-                ax_.sharey(share_ax['distances'])
-                ax_.yaxis.set_tick_params(labelleft=False)
-                ax_.autoscale()
-
-        def plot_transformation(ax_, idx_):
-            t_pred = to_numpy(Y_pred['transformation'][idx_])
-            t_target = to_numpy(Y_target['transformation'][idx_])
-            if self.dataset_args.train_generator:
-                t_pred2 = to_numpy(Y_pred2['transformation'][idx_])
-
-            # Adjust the target rotation to the best matching symmetry group
-            if self.dataset_args.rotation_mode in [ROTATION_MODE_QUATERNION, ROTATION_MODE_AXISANGLE]:
-                sgi = self.sym_group_idxs[idx_]
-                if self.dataset_args.rotation_mode == ROTATION_MODE_QUATERNION:
-                    t_target[4:] = to_numpy(Y_target['sym_rotations'][idx_][sgi])
-                else:
-                    R = to_numpy(Y_target['sym_rotations'][idx_][sgi])
-                    t_target[4:] = Rotation.from_matrix(R).as_rotvec()
-
-            locs = np.arange(len(t_target))
-
-            if self.dataset_args.train_generator:
-                bar_width = 0.25
-                offset = bar_width
-                ax_.bar(locs - offset, t_target, bar_width, label='Target')
-                ax_.bar(locs, t_pred, bar_width, label='Predicted')
-                ax_.bar(locs + offset, t_pred2, bar_width, label='Predicted2')
-                k = 2 * offset
-            else:
-                bar_width = 0.35
-                offset = bar_width / 2
-                ax_.bar(locs - offset, t_target, bar_width, label='Target')
-                ax_.bar(locs + offset, t_pred, bar_width, label='Predicted')
-                k = 3 * offset
-            ax_.axvspan(locs[0] - k, locs[2] + k, alpha=0.1, color='green')
-            ax_.axvspan(locs[3] - k, locs[3] + k, alpha=0.1, color='red')
-            ax_.axvspan(locs[4] - k, locs[-1] + k, alpha=0.1, color='blue')
-            ax_.set_title('Transformation')
-            ax_.set_xticks(locs)
-            xlabels = self.ds.labels_transformation.copy()
-            if self.dataset_args.rotation_mode == ROTATION_MODE_SINCOS:
-                xlabels += self.ds.labels_transformation_sincos
-            elif self.dataset_args.rotation_mode == ROTATION_MODE_QUATERNION:
-                xlabels += self.ds.labels_transformation_quaternion
-            else:
-                xlabels += self.ds.labels_transformation_axisangle
-            ax_.set_xticklabels(xlabels)
-            if 'transformation' not in share_ax:
-                ax_.legend()
-                share_ax['transformation'] = ax_
-            else:
-                ax_.sharey(share_ax['transformation'])
-                ax_.yaxis.set_tick_params(labelleft=False)
-                ax_.autoscale()
-
-        def plot_material(ax_, idx_):
-            m_pred = to_numpy(Y_pred['material'][idx_])
-            m_target = to_numpy(Y_target['material'][idx_])
-            if self.dataset_args.train_generator:
-                m_pred2 = to_numpy(Y_pred2['material'][idx_])
-
-            locs = np.arange(len(m_target))
-            if self.dataset_args.train_generator:
-                bar_width = 0.25
-                offset = bar_width
-                ax_.bar(locs - offset, m_target, bar_width, label='Target')
-                ax_.bar(locs, m_pred, bar_width, label='Predicted')
-                ax_.bar(locs + offset, m_pred2, bar_width, label='Predicted2')
-            else:
-                bar_width = 0.35
-                offset = bar_width / 2
-                ax_.bar(locs - offset, m_target, bar_width, label='Target')
-                ax_.bar(locs + offset, m_pred, bar_width, label='Predicted')
-            ax_.set_title('Material')
-            ax_.set_xticks(locs)
-            for i in range(len(locs) - 1):
-                ax_.axvline(locs[i] + .5, color='black', linestyle='--', linewidth=1)
-            labels = []
-            if 'b' in self.ds.labels_material_active:
-                labels.append('Brightness')
-            if 'ior' in self.ds.labels_material_active:
-                labels.append('IOR')
-            if 'r' in self.ds.labels_material_active:
-                labels.append('Roughness')
-            ax_.set_xticklabels(labels)
-            if 'material' not in share_ax:
-                ax_.legend()
-                share_ax['material'] = ax_
-            else:
-                ax_.sharey(share_ax['material'])
-                ax_.yaxis.set_tick_params(labelleft=False)
-                ax_.autoscale()
-
-        def plot_light(ax_, idx_):
-            l_pred = to_numpy(Y_pred['light'][idx_])
-            l_target = to_numpy(Y_target['light'][idx_])
-            locs = np.arange(len(l_target))
-            bar_width = 0.35
-            offset = bar_width / 2
-            ax_.bar(locs - offset, l_target, bar_width, label='Target')
-            ax_.bar(locs + offset, l_pred, bar_width, label='Predicted')
-            ax_.set_title('Light')
-            ax_.set_xticks(locs)
-
-            if self.ds.dataset_args.transmission_mode:
-                xlabels = self.ds.labels_light.copy()
-            else:
-                xlabels = self.ds.labels_light_location.copy()
-                xlabels += self.ds.labels_light.copy()
-                if self.dataset_args.rotation_mode == ROTATION_MODE_SINCOS:
-                    xlabels += self.ds.labels_light_sincos
-                elif self.dataset_args.rotation_mode == ROTATION_MODE_QUATERNION:
-                    xlabels += self.ds.labels_light_quaternion
-                else:
-                    xlabels += self.ds.labels_light_axisangle
-
-                k = 3
-                ax_.axvspan(locs[0] - k * offset, locs[2] + k * offset, alpha=0.1, color='green')
-                ax_.axvspan(locs[3] - k * offset, locs[3] + k * offset, alpha=0.1, color='red')
-                ax_.axvspan(locs[4] - k * offset, locs[-1] + k * offset, alpha=0.1, color='blue')
-
-            ax_.set_xticklabels(xlabels)
-            if 'light' not in share_ax:
-                ax_.legend()
-                share_ax['light'] = ax_
-            else:
-                ax_.sharey(share_ax['light'])
-                ax_.yaxis.set_tick_params(labelleft=False)
-                ax_.autoscale()
-
-        def prep_distances(distance_vals_):
-            distances = np.zeros(len(self.ds.labels_distances))
-            pos_active = [self.ds.labels_distances.index(k) for k in self.ds.labels_distances_active]
-            for i, pos in enumerate(pos_active):
-                distances[pos] = distance_vals_[i]
-            if self.crystal_generator.constraints is not None:
-                largest_hkl = ''.join([str(hkl) for hkl in self.crystal_generator.constraints[0]])
-                largest_pos = [d[-3:] for d in self.ds.labels_distances].index(largest_hkl)
-                distances[largest_pos] = 1
-            return distances
-
-        for i, idx in enumerate(idxs):
-            meta = metas[idx]
-            row_idx = 0
-
-            # Plot the (possibly augmented) input image
-            img = to_numpy(images_aug[idx]).squeeze()
-            ax = fig.add_subplot(gs[row_idx, i])
-            plot_image(ax, meta['image'].name, img)
-            add_discriminator_value(ax, 'D_real', idx)
-            row_idx += 1
-
-            # Plot the generated image
-            if self.dataset_args.train_generator:
-                img = to_numpy(X_pred[idx]).squeeze()
-                ax = fig.add_subplot(gs[row_idx, i])
-                plot_image(ax, 'Generated', img)
-                add_discriminator_value(ax, 'D_fake', idx)
-                row_idx += 1
-                img = to_numpy(X_pred2[idx]).squeeze()
-                ax = fig.add_subplot(gs[row_idx, i])
-                plot_image(ax, 'Generated2', img)
-                row_idx += 1
-
-            # Rebuild the target crystal
-            if CCDC_AVAILABLE:
-                distance_vals = to_numpy(Y_target['distances'][idx]).astype(float)
-                distances = prep_distances(distance_vals)
-                growth_rates = self.crystal_generator.get_expanded_growth_rates(distances)
-                morph_target = VisualHabitMorphology.from_growth_rates(self.crystal_generator.crystal, growth_rates)
-            else:
-                morph_target = None
-
-            # Plot the 3d crystal
-            mesh_target = self.ds.load_mesh(meta['idx'])
-            plot_3d(fig.add_subplot(gs[row_idx + 1, i], projection='3d'), 'Morphology',
-                    morph_target, mesh_target, default_colours[0])
-
-            # If CCDC isn't available then we can't build the predicted crystal
-            if CCDC_AVAILABLE:
-                mesh_pred = None
-
-                # Normalise the predicted distances
-                distance_vals = to_numpy(Y_pred['distances'][idx]).astype(float)
-                if self.dataset_args.use_distance_switches:
-                    switches = to_numpy(Y_pred['distance_switches'][idx])
-                    distance_vals = np.where(switches < .5, 0, distance_vals)
-                distance_vals[distance_vals < 0] = 0
-                distances = prep_distances(distance_vals)
-                if distances.max() > 1e-8:
-                    # Build the crystal and plot the mesh
-                    distances /= distances.max()
-                    try:
-                        growth_rates = self.crystal_generator.get_expanded_growth_rates(distances)
-                        morph_pred = VisualHabitMorphology.from_growth_rates(self.crystal_generator.crystal,
-                                                                             growth_rates)
-                        _, _, mesh_pred = self.crystal_generator.generate_crystal(rel_distances=distances,
-                                                                                  validate=False)
-                        plot_3d(fig.add_subplot(gs[row_idx + 2, i], projection='3d'), 'Predicted',
-                                morph_pred, mesh_pred, default_colours[1])
-                    except Exception as e:
-                        plot_error(fig.add_subplot(gs[row_idx + 2, i]), f'Failed to build crystal:\n{e}')
-                else:
-                    plot_error(fig.add_subplot(gs[row_idx + 2, i]), 'Failed to build crystal:\nno positive distances.')
-
-                # Render the crystal
-                if mesh_pred is not None:
-                    try:
-                        img = render_from_parameters(
-                            mesh=mesh_pred,
-                            settings_path=self.ds.path / 'vcw_settings.json',
-                            r_params=self.ds.denormalise_rendering_params(Y_pred, idx,
-                                                                          metas[idx]['rendering_parameters']),
-                            attempts=1
-                        )
-                        plot_image(fig.add_subplot(gs[row_idx, i]), 'Render', img)
-                    except Exception as e:
-                        plot_error(fig.add_subplot(gs[row_idx, i]), f'Rendering failed:\n{e}')
-                else:
-                    plot_error(fig.add_subplot(gs[row_idx, i]), 'No crystal to render.')
-            else:
-                plot_error(fig.add_subplot(gs[row_idx, i]), 'CCDC unavailable.')
-                plot_error(fig.add_subplot(gs[row_idx + 2, i]), 'CCDC unavailable')
-
-            row_idx += 3
-            if self.dataset_args.train_zingg:
-                plot_zingg(fig.add_subplot(gs[row_idx, i]), idx)
-                row_idx += 1
-            if self.dataset_args.train_distances:
-                plot_distances(fig.add_subplot(gs[row_idx, i]), idx)
-                row_idx += 1
-            if self.dataset_args.train_transformation:
-                plot_transformation(fig.add_subplot(gs[row_idx, i]), idx)
-                row_idx += 1
-            if self.dataset_args.train_material and len(self.ds.labels_material_active) > 0:
-                plot_material(fig.add_subplot(gs[row_idx, i]), idx)
-                row_idx += 1
-            if self.dataset_args.train_light:
-                plot_light(fig.add_subplot(gs[row_idx, i]), idx)
-
-        self._save_plot(fig, 'samples', train_or_test)
-
-    def _plot_vaetc_examples(
-            self,
-            data: Tuple[dict, torch.Tensor, torch.Tensor, Dict[str, torch.Tensor]],
-            outputs: Dict[str, Any],
-            train_or_test: str,
-            idxs: np.ndarray
-    ):
-        """
-        Plot some VAE transcoder examples.
-        """
-        n_examples = min(self.runtime_args.plot_n_examples, self.runtime_args.batch_size)
-        metas, images, images_aug, params = data
-        Yr_noisy = outputs['Yr_mu']
-        Yr_clean = outputs['Yr_mu_clean']
-        prop_cycle = plt.rcParams['axes.prop_cycle']
-        default_colours = prop_cycle.by_key()['color']
-        n_rows = int(self.dataset_args.train_zingg) \
-                 + int(self.dataset_args.train_distances) \
-                 + int(self.dataset_args.train_transformation) \
-                 + int(self.dataset_args.train_material and len(self.ds.labels_material_active) > 0) \
-                 + int(self.dataset_args.train_light)
-
-        # Plot properties
-        bar_width = 0.3
-        sep = 0.05
-
-        height_ratios = []
-        if self.dataset_args.train_zingg:
-            height_ratios.append(0.5)
-        if self.dataset_args.train_distances:
-            height_ratios.append(1)
-        if self.dataset_args.train_transformation:
-            height_ratios.append(0.8)
-        if self.dataset_args.train_material and len(self.ds.labels_material_active) > 0:
-            height_ratios.append(0.7)
-        if self.dataset_args.train_light:
-            height_ratios.append(0.8)
-
-        fig = plt.figure(figsize=(n_examples * 2.6, n_rows * 2.3))
-        gs = GridSpec(
-            nrows=n_rows,
-            ncols=n_examples,
-            wspace=0.06,
-            hspace=0.4,
-            width_ratios=[1] * n_examples,
-            height_ratios=height_ratios,
-            top=0.95,
-            bottom=0.04,
-            left=0.05,
-            right=0.99
-        )
-
-        loss = getattr(self.checkpoint, f'loss_{train_or_test}')
-        fig.suptitle(
-            f'epoch={self.checkpoint.epoch}, '
-            f'step={self.checkpoint.step + 1}, '
-            f'loss={loss:.4E}',
-            fontweight='bold',
-            y=0.995
-        )
-        share_ax = {}
-
-        def plot_zingg(ax_, idx_):
-            z_noisy = to_numpy(Yr_noisy['zingg'][idx_])
-            z_clean = to_numpy(Yr_clean['zingg'][idx_])
-            z_target = to_numpy(params['zingg'][idx_])
-            ax_.scatter(z_target[0], z_target[1], c=default_colours[0], marker='o', s=100, label='Target')
-            ax_.scatter(z_noisy[0], z_noisy[1], c=default_colours[1], marker='+', s=100, label='Sample')
-            ax_.scatter(z_noisy[0], z_clean[1], c=default_colours[2], marker='x', s=100, label='Clean')
-            ax_.set_title('Zingg')
-            ax_.set_xlabel('S/I', labelpad=-5)
-            ax_.set_xlim(0, 1)
-            ax_.set_xticks([0, 1])
-            if 'zingg' not in share_ax:
-                ax_.legend()
-                ax_.set_ylim(0, 1)
-                ax_.set_yticks([0, 1])
-                ax_.set_ylabel('I/L', labelpad=0)
-                share_ax['zingg'] = ax_
-            else:
-                ax_.sharey(share_ax['zingg'])
-                ax_.yaxis.set_tick_params(labelleft=False)
-
-        def _plot_bar_chart(key_, idx_, ax_, labels_, title_):
-            noisy_ = to_numpy(Yr_noisy[key_][idx_])
-            clean_ = to_numpy(Yr_clean[key_][idx_])
-            target_ = to_numpy(params[key_][idx_])
-            locs = np.arange(len(target_))
-            ax_.bar(locs - bar_width, target_, bar_width - sep / 2, label='Target')
-            ax_.bar(locs, noisy_, bar_width - sep / 2, label='Noisy')
-            ax_.bar(locs + bar_width, clean_, bar_width - sep / 2, label='Clean')
-            ax_.set_title(title_)
-            ax_.set_xticks(locs)
-            ax_.set_xticklabels(labels_)
-            if key_ not in share_ax:
-                ax_.legend()
-                share_ax[key_] = ax_
-            else:
-                ax_.sharey(share_ax[key_])
-                ax_.yaxis.set_tick_params(labelleft=False)
-                ax_.autoscale()
-            return locs
-
-        def plot_distances(ax_, idx_):
-            ax_pos = ax_.get_position()
-            ax_.set_position([ax_pos.x0, ax_pos.y0 + 0.02, ax_pos.width, ax_pos.height - 0.02])
-            _plot_bar_chart('distances', idx_, ax_, self.ds.labels_distances_active, 'Distances')
-            ax_.tick_params(axis='x', rotation=270)
-
-            if self.dataset_args.use_distance_switches:
-                s_noisy = to_numpy(Yr_noisy['distance_switches'][idx_])
-                s_clean = to_numpy(Yr_clean['distance_switches'][idx_])
-                s_target = to_numpy(params['distance_switches'][idx_])
-                locs = np.arange(len(s_target))
-                colours = []
-                for i, (sn, sc, st) in enumerate(zip(s_noisy, s_clean, s_target)):
-                    if st > 0.5:
-                        ax_.axvspan(i - 3 / 2 * bar_width, i - 1 / 2 * bar_width, alpha=0.1, color='blue')
-                    if sn > 0.5:
-                        ax_.axvspan(i - 1 / 2 * bar_width, i + 1 / 2 * bar_width, alpha=0.1,
-                                    color='red' if sn < 0.5 else 'green')
-                    if sc > 0.5:
-                        ax_.axvspan(i + 1 / 2 * bar_width, i + 3 / 2 * bar_width, alpha=0.1,
-                                    color='red' if st < 0.5 else 'green')
-                    colours.append('red' if (st < 0.5 < sc) or (st > 0.5 > sc) else 'green')
-                ax_.scatter(locs, s_noisy, color=colours, marker='+', s=30, label='Switches')
-                ax_.scatter(locs + bar_width, s_clean, color=colours, marker='+', s=30)
-
-        def plot_transformation(ax_, idx_):
-            xlabels = self.ds.labels_transformation.copy()
-            if self.dataset_args.rotation_mode == ROTATION_MODE_SINCOS:
-                xlabels += self.ds.labels_transformation_sincos
-            elif self.dataset_args.rotation_mode == ROTATION_MODE_QUATERNION:
-                xlabels += self.ds.labels_transformation_quaternion
-            else:
-                xlabels += self.ds.labels_transformation_axisangle
-            _plot_bar_chart('transformation', idx_, ax_, xlabels, 'Transformation')
-            locs = np.arange(len(xlabels))
-            offset = 1.6 * bar_width
-            ax_.axvspan(locs[0] - offset, locs[2] + offset, alpha=0.1, color='green')
-            ax_.axvspan(locs[3] - offset, locs[3] + offset, alpha=0.1, color='red')
-            ax_.axvspan(locs[4] - offset, locs[-1] + offset, alpha=0.1, color='blue')
-
-        def plot_material(ax_, idx_):
-            labels = []
-            if 'b' in self.ds.labels_material_active:
-                labels.append('Brightness')
-            if 'ior' in self.ds.labels_material_active:
-                labels.append('IOR')
-            if 'r' in self.ds.labels_material_active:
-                labels.append('Roughness')
-            locs = _plot_bar_chart('material', idx_, ax_, labels, 'Material')
-            for i in range(len(locs) - 1):
-                ax_.axvline(locs[i] + .5, color='black', linestyle='--', linewidth=1)
-
-        def plot_light(ax_, idx_):
-            if self.ds.dataset_args.transmission_mode:
-                xlabels = self.ds.labels_light.copy()
-            else:
-                xlabels = self.ds.labels_light_location.copy()
-                xlabels += self.ds.labels_light
-                if self.dataset_args.rotation_mode == ROTATION_MODE_SINCOS:
-                    xlabels += self.ds.labels_light_sincos
-                elif self.dataset_args.rotation_mode == ROTATION_MODE_QUATERNION:
-                    xlabels += self.ds.labels_light_quaternion
-                else:
-                    xlabels += self.ds.labels_light_axisangle
-            locs = _plot_bar_chart('light', idx_, ax_, xlabels, 'Light')
-            if not self.ds.dataset_args.transmission_mode:
-                offset = 1.6 * bar_width
-                ax_.axvspan(locs[0] - offset, locs[2] + offset, alpha=0.1, color='green')
-                ax_.axvspan(locs[3] - offset, locs[3] + offset, alpha=0.1, color='red')
-                ax_.axvspan(locs[4] - offset, locs[-1] + offset, alpha=0.1, color='blue')
-
-        for i, idx in enumerate(idxs):
-            row_idx = 0
-            if self.dataset_args.train_zingg:
-                plot_zingg(fig.add_subplot(gs[row_idx, i]), idx)
-                row_idx += 1
-            if self.dataset_args.train_distances:
-                plot_distances(fig.add_subplot(gs[row_idx, i]), idx)
-                row_idx += 1
-            if self.dataset_args.train_transformation:
-                plot_transformation(fig.add_subplot(gs[row_idx, i]), idx)
-                row_idx += 1
-            if self.dataset_args.train_material and len(self.ds.labels_material_active) > 0:
-                plot_material(fig.add_subplot(gs[row_idx, i]), idx)
-                row_idx += 1
-            if self.dataset_args.train_light:
-                plot_light(fig.add_subplot(gs[row_idx, i]), idx)
-
-        self._save_plot(fig, 'vaetc', train_or_test)
 
     def _save_plot(self, fig: Figure, plot_type: str, train_or_test: str = None):
         """

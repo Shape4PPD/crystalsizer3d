@@ -18,14 +18,12 @@ from ccdc.io import EntryReader
 from crystalsizer3d import N_WORKERS, USE_CUDA, logger
 from crystalsizer3d.args.dataset_synthetic_args import DatasetSyntheticArgs
 from crystalsizer3d.crystal import Crystal
+from crystalsizer3d.csd_proxy import CSDProxy
 from crystalsizer3d.scene_components.bubble import Bubble, make_bubbles
 from crystalsizer3d.scene_components.bumpmap import generate_bumpmap
 from crystalsizer3d.scene_components.scene import Scene
 from crystalsizer3d.scene_components.utils import RenderError
 from crystalsizer3d.util.utils import SEED, append_json, to_numpy
-
-# Ensure that CUDA will work in subprocesses
-mp.set_start_method('spawn', force=True)
 
 if USE_CUDA:
     if 'cuda_ad_rgb' not in mi.variants():
@@ -247,11 +245,11 @@ class CrystalRenderer:
         """
         Initialise the crystal settings.
         """
-        reader = EntryReader()
-        crystal = reader.crystal(self.dataset_args.crystal_id)
-        self.lattice_unit_cell = [crystal.cell_lengths[0], crystal.cell_lengths[1], crystal.cell_lengths[2]]
-        self.lattice_angles = [crystal.cell_angles[0], crystal.cell_angles[1], crystal.cell_angles[2]]
-        self.point_group_symbol = '222'  # crystal.spacegroup_symbol
+        csd = CSDProxy()
+        cs = csd.load(self.dataset_args.crystal_id)
+        self.lattice_unit_cell = cs.lattice_unit_cell
+        self.lattice_angles = cs.lattice_angles
+        self.point_group_symbol = cs.point_group_symbol
 
         # Parse the constraint string to get the miller indices
         constraints_parts = self.dataset_args.distance_constraints.split('>')
@@ -350,6 +348,9 @@ class CrystalRenderer:
         if self.n_workers > 1:
             logger.info(f'Rendering crystals in parallel, worker pool size: {self.n_workers}')
 
+            # Ensure that CUDA will work in subprocesses
+            mp.set_start_method('spawn', force=True)
+
             # Create a temporary output directory
             output_dir = self.root_dir / 'tmp_output'
             output_dir.mkdir(exist_ok=True)
@@ -404,9 +405,16 @@ class CrystalRenderer:
 
         # Add bumpmap to the crystal
         if crystal.use_bumpmap:
-            assert 'bumpmap' in params, 'Bumpmap path not provided!'
-            assert params['bumpmap'].exists(), f'Bumpmap file does not exist! ({params["bumpmap"]})'
-            crystal.bumpmap.data = torch.from_numpy(np.load(params['bumpmap'])['data']).to(device)
+            assert 'bumpmap' in params, 'Bumpmap not provided!'
+            if isinstance(params['bumpmap'], Path):
+                assert params['bumpmap'].exists(), f'Bumpmap file does not exist! ({params["bumpmap"]})'
+                crystal.bumpmap.data = torch.from_numpy(np.load(params['bumpmap'])['data']).to(device)
+            elif isinstance(params['bumpmap'], np.ndarray):
+                crystal.bumpmap.data = torch.from_numpy(params['bumpmap']).to(device)
+            elif isinstance(params['bumpmap'], torch.Tensor):
+                crystal.bumpmap.data = params['bumpmap'].clone().detach().to(device)
+            else:
+                crystal.bumpmap.data.zero_()
 
         # Create and render the scene
         scene = Scene(
@@ -416,7 +424,7 @@ class CrystalRenderer:
             light_radiance=params['light_radiance'],
             **self.dataset_args.to_dict(),
         )
-        img = scene.render(seed=params['seed'])
+        img = scene.render(seed=params['seed'] if 'seed' in params else SEED)
         img = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)  # todo: do we need this?
 
         return img

@@ -4,7 +4,7 @@ import torch
 import torch.nn as nn
 from torch.nn import Parameter
 
-from crystalsizer3d.args.dataset_training_args import ROTATION_MODE_AXISANGLE, ROTATION_MODE_QUATERNION, ROTATION_MODE_SINCOS
+from crystalsizer3d.crystal import ROTATION_MODE_AXISANGLE, ROTATION_MODE_QUATERNION
 from crystalsizer3d.nn.dataset import Dataset
 from crystalsizer3d.nn.models.transcoder import Transcoder
 
@@ -68,27 +68,18 @@ class TranscoderMaskInv(Transcoder):
 
         if self.ds.ds_args.train_transformation:
             n_trans_params = len(self.ds.labels_transformation)
-            if self.ds.ds_args.rotation_mode == ROTATION_MODE_SINCOS:
-                n_trans_params += len(self.ds.labels_transformation_sincos)
-            elif self.ds.ds_args.rotation_mode == ROTATION_MODE_QUATERNION:
-                n_trans_params += len(self.ds.labels_transformation_quaternion)
+            if self.dataset_args.rotation_mode == ROTATION_MODE_QUATERNION:
+                n_trans_params += len(self.ds.labels_rotation_quaternion)
             else:
-                assert self.ds.ds_args.rotation_mode == ROTATION_MODE_AXISANGLE
-                n_trans_params += len(self.ds.labels_transformation_axisangle)
+                assert self.dataset_args.rotation_mode == ROTATION_MODE_AXISANGLE
+                n_trans_params += len(self.ds.labels_rotation_axisangle)
             update_mask(n_trans_params)
 
         if self.ds.ds_args.train_material:
             update_mask(len(self.ds.labels_material))
 
         if self.ds.ds_args.train_light:
-            n_light_params = len(self.ds.labels_transformation)
-            if self.ds.ds_args.rotation_mode == ROTATION_MODE_SINCOS:
-                n_light_params += len(self.ds.labels_light_sincos)
-            elif self.ds.ds_args.rotation_mode == ROTATION_MODE_QUATERNION:
-                n_light_params += len(self.ds.labels_light_quaternion)
-            else:
-                assert self.ds.ds_args.rotation_mode == ROTATION_MODE_AXISANGLE
-                n_light_params += len(self.ds.labels_light_axisangle)
+            n_light_params = len(self.ds.labels_light_active)
             update_mask(n_light_params)
 
         self.mask = mask

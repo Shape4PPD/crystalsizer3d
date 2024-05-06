@@ -13,7 +13,8 @@ from crystalsizer3d.args.dataset_synthetic_args import ROTATION_MODE_AXISANGLE
 from crystalsizer3d.crystal import Crystal
 from crystalsizer3d.scene_components.bubble import Bubble
 from crystalsizer3d.scene_components.utils import RenderError, build_crystal_mesh, project_to_image
-from crystalsizer3d.util.utils import normalise, to_numpy
+from crystalsizer3d.util.geometry import normalise
+from crystalsizer3d.util.utils import to_numpy
 
 if USE_CUDA:
     if 'cuda_ad_rgb' not in mi.variants():

@@ -3,6 +3,7 @@ from pathlib import Path
 from typing import Union
 
 from crystalsizer3d.args.base_args import BaseArgs
+from crystalsizer3d.crystal import ROTATION_MODES, ROTATION_MODE_AXISANGLE
 from crystalsizer3d.util.utils import str2bool
 
 
@@ -21,6 +22,7 @@ class DatasetTrainingArgs(BaseArgs):
             train_predictor: bool = True,
             train_generator: bool = True,
             train_combined: bool = False,
+            rotation_mode: str = 'axisangle',
             use_distance_switches: bool = True,
             add_coord_grid: bool = False,
             check_symmetries: int = 0,
@@ -45,6 +47,8 @@ class DatasetTrainingArgs(BaseArgs):
             assert train_predictor and train_generator, \
                 'train_predictor and train_generator must be True when train_combined is True.'
         self.train_combined = train_combined
+        assert rotation_mode in ROTATION_MODES, f'Invalid rotation mode {rotation_mode}, must be one of {ROTATION_MODES}'
+        self.rotation_mode = rotation_mode
         self.use_distance_switches = use_distance_switches
         self.add_coord_grid = add_coord_grid
         self.check_symmetries = check_symmetries
@@ -80,6 +84,8 @@ class DatasetTrainingArgs(BaseArgs):
                            help='Train generator network.')
         group.add_argument('--train-combined', type=str2bool, default=False,
                            help='Train the full predictor and generator networks together as a visual autoencoder.')
+        group.add_argument('--rotation-mode', type=str, default=ROTATION_MODE_AXISANGLE, choices=ROTATION_MODES,
+                           help='Rotation mode (axisangle or quaternion).')
         group.add_argument('--use-distance-switches', type=str2bool, default=True,
                            help='Use distance switches.')
         group.add_argument('--add-coord-grid', type=str2bool, default=False,

@@ -37,6 +37,10 @@ PYTORCH_JIT = os.getenv('PYTORCH_JIT', 1)
 # Use CUDA?
 USE_CUDA = bool(os.getenv('USE_CUDA', '1').lower() in ['1', 'true', 'yes', 'y'])
 
+# CSD proxy
+CSD_PROXY_PATH = _load_env_path('CSD_PROXY_PATH', ROOT_PATH / 'data' / 'csd_proxy.json')
+
+
 # || -------------------------------- LOGS --------------------------------- ||
 
 cwd = Path.cwd()

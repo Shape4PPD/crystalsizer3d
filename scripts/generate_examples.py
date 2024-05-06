@@ -219,13 +219,11 @@ def _plot_transformation(
     ax.set_title('Transformation')
     ax.set_xticks(locs)
     xlabels = manager.ds.labels_transformation.copy()
-    if manager.dataset_args.rotation_mode == ROTATION_MODE_SINCOS:
-        xlabels += manager.ds.labels_transformation_sincos
-    elif manager.dataset_args.rotation_mode == ROTATION_MODE_QUATERNION:
-        xlabels += manager.ds.labels_transformation_quaternion
+    if manager.dataset_args.rotation_mode == ROTATION_MODE_QUATERNION:
+        xlabels += manager.ds.labels_rotation_quaternion
     else:
         assert manager.dataset_args.rotation_mode == ROTATION_MODE_AXISANGLE
-        xlabels += manager.ds.labels_transformation_axisangle
+        xlabels += manager.ds.labels_rotation_axisangle
     ax.set_xticklabels(xlabels)
     if 'transformation' not in share_ax:
         # ax_.legend()
@@ -279,13 +277,6 @@ def _plot_light(
     ax.set_title('Light')
     ax.set_xticks(locs)
     xlabels = manager.ds.labels_light.copy()
-    if manager.dataset_args.rotation_mode == ROTATION_MODE_SINCOS:
-        xlabels += manager.ds.labels_light_sincos
-    elif manager.dataset_args.rotation_mode == ROTATION_MODE_QUATERNION:
-        xlabels += manager.ds.labels_light_quaternion
-    else:
-        assert manager.dataset_args.rotation_mode == ROTATION_MODE_AXISANGLE
-        xlabels += manager.ds.labels_light_axisangle
     ax.set_xticklabels(xlabels)
     if 'light' not in share_ax:
         # ax_.legend()
@@ -446,7 +437,7 @@ def _make_parameter_vector(
             'Only quaternion or axis-angle pre-angles are supported.'
         if ds_args.rotation_mode == ROTATION_MODE_QUATERNION:
             q = Y[idx:idx + 4]
-            for i, k in enumerate(ds.labels_transformation_quaternion):
+            for i, k in enumerate(ds.labels_rotation_quaternion):
                 if k in item:
                     if k != 'rw':
                         assert -1 <= item[k] <= 1, f'Rotation parameter {k} must be in [-1, 1]. {item[k]} received.'
@@ -455,7 +446,7 @@ def _make_parameter_vector(
             idx += 4
         else:
             v = Y[idx:idx + 3]
-            for i, k in enumerate(ds.labels_transformation_axisangle):
+            for i, k in enumerate(ds.labels_rotation_axisangle):
                 v[i] = item[k]
             Y[idx:idx + 3] = v
             idx += 3
@@ -498,7 +489,7 @@ def _make_parameter_vector(
             idx += 4
         else:
             v = Y[idx:idx + 3]
-            for i, k in enumerate(ds.labels_transformation_axisangle):
+            for i, k in enumerate(ds.labels_rotation_axisangle):
                 v[i] = item[k]
             Y[idx:idx + 3] = v
             idx += 3

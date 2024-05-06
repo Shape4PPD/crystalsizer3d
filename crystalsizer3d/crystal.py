@@ -1,5 +1,5 @@
 from itertools import combinations
-from typing import Any, Dict, List, Optional, Tuple, Union
+from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 import torch
@@ -9,7 +9,9 @@ from pymatgen.symmetry.groups import PointGroup
 from torch import nn
 
 from crystalsizer3d import logger
-from crystalsizer3d.util.utils import normalise_pt as normalise
+from crystalsizer3d.util.geometry import align_points_to_xy_plane, calculate_relative_angles, merge_vertices, normalise, \
+    rotate_2d_points_to_square
+from crystalsizer3d.util.utils import init_tensor
 
 ROTATION_MODE_QUATERNION = 'quaternion'
 ROTATION_MODE_AXISANGLE = 'axisangle'
@@ -17,136 +19,6 @@ ROTATION_MODES = [
     ROTATION_MODE_QUATERNION,
     ROTATION_MODE_AXISANGLE
 ]
-
-
-def init_tensor(tensor: Union[torch.Tensor, np.ndarray, List[float], float, int], dtype=torch.float32) -> torch.Tensor:
-    """
-    Create a clone of a tensor or numpy array.
-    """
-    if isinstance(tensor, np.ndarray):
-        tensor = torch.from_numpy(tensor)
-    if isinstance(tensor, list) or isinstance(tensor, float) or isinstance(tensor, int):
-        tensor = torch.tensor(tensor)
-    return tensor.to(dtype).detach().clone()
-
-
-def align_points_to_xy_plane(
-        points: torch.Tensor,
-        centroid: Optional[torch.Tensor] = None,
-        cross_idx: int = 1,
-        tol: float = 1e-3
-) -> torch.Tensor:
-    """
-    Align a set of 3D points to the xy plane.
-    """
-    # Step 1: Calculate centroid
-    if centroid is None:
-        centroid = torch.mean(points, dim=0)
-
-    # Step 2: Translate points to centroid
-    translated_points = points - centroid
-
-    # Check if the points are too close together
-    if points.norm(dim=-1, p=2).amax() < tol:
-        raise ValueError('Points are too close together')
-
-    # Step 3: Compute normal vector of the plane
-    normal_vector = torch.cross(translated_points[0], translated_points[cross_idx], dim=0)
-    normal_vector = normalise(normal_vector)
-    z_axis = torch.tensor([0.0, 0.0, 1.0], dtype=centroid.dtype, device=centroid.device)
-
-    # If the normal vector is already aligned with the z-axis, return the points
-    if torch.allclose(normal_vector, z_axis):
-        return translated_points
-
-    # If the normal vector is aligned with the negative z-axis, rotate around the x-axis
-    if torch.allclose(normal_vector, -z_axis):
-        rotated_points = translated_points
-        rotated_points[:, 0] = -rotated_points[:, 0]
-        return rotated_points
-
-    # Step 4: Compute rotation matrix
-    rotation_axis = normalise(torch.cross(normal_vector, z_axis, dim=0))
-    rotation_angle = torch.acos(torch.dot(normal_vector, z_axis))
-    rotvec = rotation_axis * rotation_angle
-    R = axis_angle_to_rotation_matrix(rotvec[None, :]).squeeze(0)
-
-    # Step 5: Apply rotation to points
-    rotated_points = (R @ translated_points.T).T
-
-    # Step 6: Verify that the points are aligned to the xy plane, if not try calculating the normal vector with a different point
-    if rotated_points[:, 2].abs().amax() > torch.norm(rotated_points, dim=-1).max() * tol:
-        if cross_idx < len(points) - 1:
-            return align_points_to_xy_plane(points, centroid, cross_idx + 1)
-        raise ValueError('Points are not aligned to the xy plane')
-
-    return rotated_points
-
-
-# @torch.jit.script
-def rotate_2d_points_to_square(
-        points: torch.Tensor,
-        max_adjustments: int = 20,
-        tol: float = 5 * (np.pi / 180)
-) -> torch.Tensor:
-    """
-    Rotate a set of 2D points to a square.
-    """
-    points = points - torch.mean(points, dim=0)
-    n_adjustments = 0
-    while n_adjustments < max_adjustments:
-        ptp = points.amax(dim=0) - points.amin(dim=0)
-        angle = torch.atan(ptp[1] / ptp[0]) - torch.pi / 4
-        if angle.abs() < tol:
-            break
-        s, c = torch.sin(angle), torch.cos(angle)
-        points = points @ torch.tensor([[c, -s], [s, c]], device=points.device)
-        n_adjustments += 1
-    return points
-
-
-# @torch.jit.script
-def calculate_relative_angles(vertices: torch.Tensor, centroid: torch.Tensor, tol: float = 1e-3) -> torch.Tensor:
-    """
-    Calculate the angles of a set of vertices relative to the centroid.
-    """
-    vertices = align_points_to_xy_plane(vertices, centroid, tol=tol)
-    angles = torch.atan2(vertices[:, 1], vertices[:, 0])
-    return angles
-
-
-@torch.jit.script
-def merge_vertices(vertices: torch.Tensor, epsilon: float = 1e-3) -> Tuple[torch.Tensor, torch.Tensor]:
-    """
-    Cluster a set of vertices based on spatial quantisation.
-    """
-    # Subtract the mean
-    vertices_og = vertices
-    vertices = vertices - vertices.mean(dim=0)
-
-    # Compute hash key for each point based on spatial quantisation
-    hash_keys = torch.round(vertices / epsilon)
-
-    # Use hash_keys to create a unique identifier for each cluster
-    unique_clusters, cluster_indices = torch.unique(hash_keys, dim=0, return_inverse=True)
-    if len(unique_clusters) == len(vertices):
-        return vertices_og, torch.arange(len(vertices))
-
-    # Calculate mean of points within each cluster
-    clustered_vertices = torch.zeros_like(unique_clusters, dtype=vertices.dtype)
-    counts = torch.zeros(len(unique_clusters), dtype=torch.int64, device=vertices.device)
-
-    # Accumulate points and counts for each cluster
-    clustered_vertices.scatter_add_(0, cluster_indices.unsqueeze(1).expand_as(vertices), vertices_og)
-    counts.scatter_add_(0, cluster_indices, torch.ones_like(cluster_indices))
-
-    # Avoid division by zero
-    counts[counts == 0] = 1
-
-    # Calculate mean for each cluster
-    cluster_centroids = clustered_vertices / counts.unsqueeze(1).expand_as(clustered_vertices)
-
-    return cluster_centroids, cluster_indices
 
 
 class Crystal(nn.Module):
@@ -375,17 +247,6 @@ class Crystal(nn.Module):
             a * b * np.sin(gamma)
         ], dtype=torch.float32))
 
-    def update_distances(self, distances: Union[torch.Tensor, Any]):
-        """
-        Update the distances of the crystal habit.
-        """
-        raise DeprecationWarning('This method is not being used.')
-        if not isinstance(distances, torch.Tensor):
-            distances = init_tensor(distances)
-        with torch.no_grad():
-            self.distances.data = distances
-        self.build_mesh()
-
     def build_mesh(
             self,
             scale: Optional[torch.Tensor] = None,
@@ -560,10 +421,19 @@ class Crystal(nn.Module):
             face = f[f[:, 0] == c_idx]
             fv_idxs = face.flatten().unique()
             faces[i] = fv_idxs
-            v2 = align_points_to_xy_plane(v[fv_idxs[1:]])[:, :2]
-            v2 = torch.cat([torch.zeros((1, 2), device=device), v2])  # Add the centroid back in
-            v2 = rotate_2d_points_to_square(v2)  # Rotate so the bounding box is square
-            v2 = v2 - v2.amin(dim=0)  # Put close to the origin, but keep positive
+            try:
+                v2 = align_points_to_xy_plane(v[fv_idxs[1:]])[:, :2]
+                v2 = rotate_2d_points_to_square(v2)  # Rotate so the bounding box is square
+            except Exception:
+                # Align vertices in a circle around the centroid
+                theta = torch.linspace(0, 2 * torch.pi, steps=len(fv_idxs), device=device)[:-1]
+                v2 = torch.stack([torch.sin(theta), torch.cos(theta)], dim=-1)
+
+            # Add the centroid back in
+            v2 = torch.cat([torch.zeros((1, 2), device=device), v2])
+
+            # Put close to the origin, but keep positive
+            v2 = v2 - v2.amin(dim=0)
 
             # Add the planar coordinates to the grid and update the row heights and column widths
             cell_pos = (positions == i).nonzero()[0]

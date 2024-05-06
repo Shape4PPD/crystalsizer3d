@@ -98,8 +98,11 @@ class CrystalGenerator:
             point_group_symbol=self.point_group_symbol
         )
 
-    def generate_crystals(self, num: int = 1, max_attempts: int = 10000) -> List[
-        Tuple[np.ndarray, np.ndarray, Trimesh]]:
+    def generate_crystals(
+            self,
+            num: int = 1,
+            max_attempts: int = 10000
+    ) -> List[Tuple[np.ndarray, np.ndarray, Trimesh]]:
         """
         Generate a list of randomised crystals.
         """

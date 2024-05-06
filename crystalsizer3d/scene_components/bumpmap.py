@@ -3,7 +3,8 @@ import numpy as np
 import torch
 
 from crystalsizer3d.crystal import Crystal
-from crystalsizer3d.util.utils import line_equation_coefficients, line_intersection, normalise, to_numpy
+from crystalsizer3d.util.geometry import line_equation_coefficients, line_intersection, normalise
+from crystalsizer3d.util.utils import to_numpy
 
 
 def generate_bumpmap(
