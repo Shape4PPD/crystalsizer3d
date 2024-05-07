@@ -1,4 +1,6 @@
+import json
 from itertools import combinations
+from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 import numpy as np
@@ -146,6 +148,26 @@ class Crystal(nn.Module):
         # Initialise the crystal
         with torch.no_grad():
             self._init()
+
+    @classmethod
+    def from_json(cls, path: Path):
+        """
+        Instantiate a crystal from a JSON file.
+        """
+        assert path.exists(), f'JSON file not found at {path}'
+        with open(path, 'r') as f:
+            data = json.load(f)
+        req_fields = ['lattice_unit_cell', 'lattice_angles', 'miller_indices', 'point_group_symbol', 'distances']
+        for req_field in req_fields:
+            assert req_field in data, f'{req_field} not found in JSON file'
+        args = {k: data[k] for k in req_fields}
+
+        if 'material_ior' in data:
+            args['material_ior'] = data['material_ior']
+        elif 'refrcIdx' in data:
+            args['material_ior'] = data['refrcIdx']
+
+        return cls(**args)
 
     def to(self, *args, **kwargs):
         """

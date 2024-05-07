@@ -4,12 +4,13 @@ from pathlib import Path
 from typing import List
 
 import cv2
+import mitsuba as mi
 import numpy as np
 import torch
 import yaml
+from PIL import Image
 from ccdc.io import EntryReader
 from mayavi import mlab
-import mitsuba as mi
 
 from crystalsizer3d import LOGS_PATH, START_TIMESTAMP, USE_CUDA, logger
 from crystalsizer3d.crystal import Crystal
@@ -43,21 +44,24 @@ def get_args() -> Namespace:
     parser = ArgumentParser(description='CrystalSizer3D script to generate a video of a digital crystal growing.')
 
     # Crystal
+    parser.add_argument('--crystal-path', type=Path, help='Path to a crystal json file.')
+    parser.add_argument('--miller-indices', type=lambda s: [tuple(map(int, item.split(','))) for item in s.split(';')],
+                        default='1,1,1;0,1,2;0,0,2', help='Miller indices of the crystal faces.')
     parser.add_argument('--distances', type=lambda s: [float(item) for item in s.split(',')],
                         default='10,3,1.3', help='Crystal face distances.')
 
     # Images
-    parser.add_argument('--res', type=int, default=100, help='Width and height of images in pixels.')
+    parser.add_argument('--res', type=int, default=1000, help='Width and height of images in pixels.')
     parser.add_argument('--spp', type=int, default=16, help='Samples per pixel.')
 
     # 3D plot
-    parser.add_argument('--azim', type=float, default=150,
+    parser.add_argument('--azim', type=float, default=-30,
                         help='Azimuthal angle of the camera.')
-    parser.add_argument('--elev', type=float, default=160,
+    parser.add_argument('--elev', type=float, default=165,
                         help='Elevation angle of the camera.')
-    parser.add_argument('--roll', type=float, default=0,
+    parser.add_argument('--roll', type=float, default=75,
                         help='Roll angle of the camera.')
-    parser.add_argument('--distance', type=float, default=55,
+    parser.add_argument('--distance', type=float, default=6,
                         help='Camera distance.')
     parser.add_argument('--surface-colour', type=str, default='skyblue',
                         help='Mesh surface colour.')
@@ -212,11 +216,11 @@ def _plot_digital_crystal(
     # # Useful for getting the view parameters when recording from the gui:
     # mlab.show()
     # scene = mlab.get_engine().scenes[0]
-    # scene.scene.camera.position = [-1.0976718374293786, 0.5730634321110751, -4.126732879628852]
-    # scene.scene.camera.focal_point = [0.0, 0.0, -1.862645149230957e-09]
+    # scene.scene.camera.position = [1.3763545093352523, -0.7546275653319254, -5.842831976214458]
+    # scene.scene.camera.focal_point = [0.0, 0.0, 0.0]
     # scene.scene.camera.view_angle = 30.0
-    # scene.scene.camera.view_up = [0.47541220253052663, -0.8452964994640355, -0.24383819569321213]
-    # scene.scene.camera.clipping_range = [3.460626768194046, 5.386199822951965]
+    # scene.scene.camera.view_up = [-0.9297293909126958, 0.26709182520570524, -0.253505851177823]
+    # scene.scene.camera.clipping_range = [4.685894945101291, 7.845739989907185]
     # scene.scene.camera.compute_view_plane_normal()
     # scene.scene.render()
     # print(mlab.view())  # (azimuth, elevation, distance, focalpoint)
@@ -227,10 +231,10 @@ def _plot_digital_crystal(
     # exit()
 
     # fig.scene.render()
-    frame = mlab.screenshot(mode='rgb', antialiased=True, figure=fig)
+    frame = mlab.screenshot(mode='rgba', antialiased=True, figure=fig)
     frame = cv2.resize(frame, None, fx=0.5, fy=0.5, interpolation=cv2.INTER_AREA)
-    frame = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
-    cv2.imwrite(str(output_dir / 'digital.png'), frame)
+    img = Image.fromarray((frame * 255).astype(np.uint8), 'RGBA')
+    img.save(output_dir / 'digital.png')
 
 
 def _plot_perspectives(
@@ -271,7 +275,10 @@ def plot_views():
         yaml.dump(spec, f)
 
     # Make crystal
-    crystal = _generate_crystal(args.distances)
+    if args.crystal_path is not None and args.crystal_path.exists():
+        crystal = Crystal.from_json(args.crystal_path)
+    else:
+        crystal = _generate_crystal(args.distances)
 
     # Make digital plot
     _plot_digital_crystal(crystal, args, output_dir)
