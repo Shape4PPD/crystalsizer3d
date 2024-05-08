@@ -275,7 +275,8 @@ class Crystal(nn.Module):
             distances: Optional[torch.Tensor] = None,
             origin: Optional[torch.Tensor] = None,
             rotation: Optional[torch.Tensor] = None,
-            tol: float = 1e-3
+            tol: float = 1e-3,
+            update_uv_map: bool = True
     ):
         """
         Take the face normals and distances and calculate where the vertices and edges lie.
@@ -393,7 +394,8 @@ class Crystal(nn.Module):
         self.mesh_faces = mesh_faces
 
         # Step 8: Construct the UV map
-        self._build_uv_map()
+        if update_uv_map:
+            self._build_uv_map()
 
         return self.mesh_vertices.clone(), self.mesh_faces.clone()
 

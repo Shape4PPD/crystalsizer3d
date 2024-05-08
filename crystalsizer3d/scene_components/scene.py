@@ -239,7 +239,7 @@ class Scene:
 
         # Add bubbles
         for bubble in self.bubbles:
-            scene_dict[bubble.SHAPE_NAME] = bubble.build_mesh()
+            scene_dict[bubble.SHAPE_NAME] = bubble.build_mitsuba_mesh()
 
         self.mi_scene_dict = scene_dict
         self.mi_scene: mi.Scene = mi.load_dict(scene_dict)
@@ -257,7 +257,6 @@ class Scene:
         Get the coordinates of the crystal vertices in the image.
         """
         assert self.crystal is not None, 'No crystal object provided.'
-        self.crystal.build_mesh()
         uv_points = project_to_image(self.mi_scene, self.crystal.vertices)
         return uv_points
 
@@ -270,17 +269,19 @@ class Scene:
             max_x: float = 50.,
             min_y: float = -50.,
             max_y: float = 50.,
+            max_placement_attempts: int = 1000,
     ):
         """
         Place the crystal in the scene.
         """
         assert self.crystal is not None, 'No crystal object provided.'
-        device = self.crystal.origin.device
+        device_og = self.crystal.origin.device
+        self.crystal.to(torch.device('cpu'))
 
         # Keep trying to place the crystal until the projected area is close to the target
         is_placed = False
         n_placement_attempts = 0
-        while not is_placed and n_placement_attempts < 1000:
+        while not is_placed and n_placement_attempts < max_placement_attempts:
             n_placement_attempts += 1
 
             # Sample a target area for how much of the image should be covered by the crystal
@@ -291,17 +292,16 @@ class Scene:
                 self.crystal.origin.data.zero_()
             else:
                 self.crystal.origin.data = torch.tensor([
-                    min_x + torch.rand(1, device=device) * (max_x - min_x),
-                    min_y + torch.rand(1, device=device) * (max_y - min_y),
+                    min_x + torch.rand(1) * (max_x - min_x),
+                    min_y + torch.rand(1) * (max_y - min_y),
                     0
-                ], device=device)
+                ])
 
             # Apply random rotation
             if self.crystal.rotation_mode == ROTATION_MODE_AXISANGLE:
-                self.crystal.rotation.data = (normalise(torch.rand(3, device=device))
-                                              * torch.rand(1, device=device) * 2 * math.pi)
+                self.crystal.rotation.data = normalise(torch.rand(3)) * torch.rand(1) * 2 * math.pi
             else:
-                self.crystal.rotation.data = normalise(torch.rand(4, device=device) * 2 * math.pi)
+                self.crystal.rotation.data = normalise(torch.rand(4) * 2 * math.pi)
 
             # Adjust scaling until the projected area is close to the target
             projected_area = 0
@@ -315,10 +315,11 @@ class Scene:
                         self.crystal.scale.data *= 1.1
 
                 # Adjust the position so the bottom of the crystal is on the growth cell surface
-                v, f = self.crystal.build_mesh()
+                v, f = self.crystal.build_mesh(update_uv_map=False)
                 self.crystal.origin.data[2] -= v[:, 2].min() - self.cell_z_positions[1]
 
                 # Project the crystal vertices onto the image plane
+                self.crystal.build_mesh(update_uv_map=False)
                 uv_points = self.get_crystal_image_coords()
                 v = self.crystal.vertices
 
@@ -348,9 +349,23 @@ class Scene:
             is_placed = True
 
         if not is_placed:
+            # Try again with a slightly smaller target area
+            if min_area > 0.01:
+                return self.place_crystal(
+                    min_area=min_area - 0.01,
+                    max_area=max_area - 0.01,
+                    centre_crystal=centre_crystal,
+                    min_x=min_x,
+                    max_x=max_x,
+                    min_y=min_y,
+                    max_y=max_y,
+                    max_placement_attempts=max_placement_attempts,
+                )
             raise RenderError('Failed to place crystal!')
 
         # Rebuild the scene with the new crystal position
+        self.crystal.build_mesh()
+        self.crystal.to(device_og)
         self._build_mi_scene()
 
     def place_bubbles(
@@ -367,7 +382,7 @@ class Scene:
         """
         if len(self.bubbles) == 0:
             return
-        device = self.bubbles[0].origin.device
+        device_og = self.bubbles[0].origin.device
 
         # Get the channels where the bubbles may appear
         z_pos = self.cell_z_positions
@@ -377,26 +392,43 @@ class Scene:
 
         for bubble in self.bubbles:
             # Keep trying to place the bubble until it appears in the image and doesn't intersect with anything else in the scene
+            bubble = bubble.to(torch.device('cpu'))
             is_placed = False
             n_placement_attempts = 0
             while not is_placed and n_placement_attempts < 100:
                 n_placement_attempts += 1
 
+                # Sample the bubble scale
+                bubble.scale.data = min_scale + torch.rand(1) * (max_scale - min_scale)
+
                 # Pick whether to place the bubble above or below of the cell
                 if np.random.uniform() < h_below / (h_below + h_above):
                     channel = 'bottom'
-                    z = z_pos[0] + torch.rand(1, device=device) * (z_pos[1] - z_pos[0])
+                    lim_lower = z_pos[0]
+                    lim_upper = z_pos[1]
+                    min_x_c = min_x
+                    max_x_c = max_x
+                    min_y_c = min_y
+                    max_y_c = max_y
                 else:
                     channel = 'top'
-                    z = z_pos[2] + torch.rand(1, device=device) * (z_pos[3] - z_pos[2])
+                    lim_lower = z_pos[2]
+                    lim_upper = z_pos[3]
+                    min_x_c = min_x / 2
+                    max_x_c = max_x / 2
+                    min_y_c = min_y / 2
+                    max_y_c = max_y / 2
+
+                lim_lower += bubble.scale.item()
+                lim_upper -= bubble.scale.item()
+                z = lim_lower + torch.rand(1) * (lim_upper - lim_lower)
 
                 # Place and scale the bubble
                 bubble.origin.data = torch.tensor([
-                    min_x + torch.rand(1, device=device) * (max_x - min_x),
-                    min_y + torch.rand(1, device=device) * (max_y - min_y),
+                    min_x_c + torch.rand(1) * (max_x_c - min_x_c),
+                    min_y_c + torch.rand(1) * (max_y_c - min_y_c),
                     z
-                ], device=device)
-                bubble.scale.data = min_scale + torch.rand(1, device=device) * (max_scale - min_scale)
+                ])
                 bubble.build_mesh()
 
                 # Check for intersections with the surfaces
@@ -406,24 +438,26 @@ class Scene:
                         and (bubble.vertices[:, 2].min() < z_pos[2] or bubble.vertices[:, 2].max() > z_pos[3])):
                     continue
 
-                # Check for intersections with the other bubbles
-                mesh = Trimesh(vertices=to_numpy(bubble.vertices), faces=to_numpy(bubble.faces))
-                cm = collision_managers[channel]
-                if cm.in_collision_single(mesh):
-                    continue
-
                 # Check that some of the bubble appears in the image
                 uv_points = project_to_image(self.mi_scene, bubble.vertices)
                 if uv_points[:, 0].max() < 0 or uv_points[:, 0].min() > self.res or \
                         uv_points[:, 1].max() < 0 or uv_points[:, 1].min() > self.res:
                     continue
 
+                # Check for intersections with the other bubbles
+                bounding_box = Trimesh(vertices=to_numpy(bubble.vertices), faces=to_numpy(bubble.faces)).bounding_box
+                cm = collision_managers[channel]
+                if cm.in_collision_single(bounding_box):
+                    continue
+
                 # Placed successfully!
                 is_placed = True
-                cm.add_object(bubble.SHAPE_NAME, mesh)
+                cm.add_object(bubble.SHAPE_NAME, bounding_box)
 
             if not is_placed:
                 raise RenderError('Failed to place bubble!')
+
+            bubble.to(device_og)
 
         # Rebuild the scene with the new bubble positions
         self._build_mi_scene()

@@ -29,6 +29,7 @@ class Bubble(nn.Module):
             colour: List[float] = [1, 1, 1],
             roughness: float = 0.05,
             ior: float = 1.5,
+            resolution_level: int = 4,
     ):
         """
         Create a sphere with the given scale, origin, and rotation.
@@ -39,6 +40,9 @@ class Bubble(nn.Module):
         self.colour = nn.Parameter(torch.tensor(colour, dtype=torch.float32), requires_grad=True)
         self.roughness = nn.Parameter(torch.tensor(roughness, dtype=torch.float32), requires_grad=True)
         self.ior = nn.Parameter(torch.tensor(ior, dtype=torch.float32), requires_grad=True)
+        self.resolution_level = resolution_level
+
+        # Buffers for the vertices and faces
         self.register_buffer('vertices', torch.empty(0))
         self.register_buffer('faces', torch.empty(0))
 
@@ -49,12 +53,15 @@ class Bubble(nn.Module):
         self.BSDF_KEY = self.SHAPE_NAME + '.bsdf'
         self.COLOUR_KEY = self.BSDF_KEY + '.reflectance.value'
 
-    def build_mesh(self) -> mi.Mesh:
+        # Build the mesh
+        self.build_mesh()
+
+    def build_mesh(self):
         """
         Create a sphere mesh with the given origin and radius.
         """
         # Build basic sphere
-        sphere = ico_sphere(level=5, device=self.origin.device)
+        sphere = ico_sphere(level=self.resolution_level, device=self.origin.device)
         vertices = sphere.verts_packed()
         faces = sphere.faces_packed()
 
@@ -68,10 +75,13 @@ class Bubble(nn.Module):
         self.vertices = vertices.clone()
         self.faces = faces.clone()
 
-        # Convert to a mitsuba mesh
-        nv, nf = len(vertices), len(faces)
-        vertices = mi.TensorXf(vertices)
-        faces = mi.TensorXi64(faces)
+    def build_mitsuba_mesh(self) -> mi.Mesh:
+        """
+        Convert the Bubble object into a Mitsuba mesh.
+        """
+        nv, nf = len(self.vertices), len(self.faces)
+        vertices = mi.TensorXf(self.vertices)
+        faces = mi.TensorXi64(self.faces)
 
         # Set up the material properties
         bsdf = {
