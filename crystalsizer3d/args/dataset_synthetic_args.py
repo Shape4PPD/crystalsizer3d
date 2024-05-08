@@ -148,10 +148,10 @@ class DatasetSyntheticArgs(BaseArgs):
         # Crystal layout parameters
         self.centre_crystals = centre_crystals
         assert crystal_area_min > 0.01, f'Minimum area must be greater than 0.01. {crystal_area_min} received.'
-        self.min_area = crystal_area_min
+        self.crystal_area_min = crystal_area_min
         assert crystal_area_max > crystal_area_min, f'Maximum area must be greater than minimum area. {crystal_area_max} received.'
         assert crystal_area_max < 1, f'Maximum area must be less than 1. {crystal_area_max} received.'
-        self.max_area = crystal_area_max
+        self.crystal_area_max = crystal_area_max
         self.crystal_min_x = crystal_min_x
         self.crystal_max_x = crystal_max_x
         self.crystal_min_y = crystal_min_y
@@ -260,12 +260,12 @@ class DatasetSyntheticArgs(BaseArgs):
                             help='Which angles representation to use, "axisangle" or "quaternion".')
 
         # Crystal layout and rendering parameters
-        parser.add_argument('--min-area', type=float, default=0.05,
-                            help='Minimum area of the image covered by the crystal.')
-        parser.add_argument('--max-area', type=float, default=0.3,
-                            help='Maximum area of the image covered by the crystal.')
         parser.add_argument('--centre-crystals', type=str2bool, default=False,
                             help='Centre the crystals in the image.')
+        parser.add_argument('--crystal-area-min', type=float, default=0.05,
+                            help='Minimum area of the image covered by the crystal.')
+        parser.add_argument('--crystal-area-max', type=float, default=0.3,
+                            help='Maximum area of the image covered by the crystal.')
         group.add_argument('--crystal-min-x', type=float, default=-10.0,
                            help='Minimum x-coordinate of the crystal origin.')
         group.add_argument('--crystal-max-x', type=float, default=10.0,

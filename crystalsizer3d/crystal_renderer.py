@@ -143,8 +143,8 @@ def _render_batch(
                 **da.to_dict(),
             )
             scene.place_crystal(
-                min_area=da.min_area,
-                max_area=da.max_area,
+                min_area=da.crystal_area_min,
+                max_area=da.crystal_area_max,
                 centre_crystal=da.centre_crystals,
                 min_x=da.crystal_min_x,
                 max_x=da.crystal_max_x,
