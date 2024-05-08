@@ -13,7 +13,6 @@ import mitsuba as mi
 import numpy as np
 import torch
 from PIL import Image
-from ccdc.io import EntryReader
 
 from crystalsizer3d import N_WORKERS, USE_CUDA, logger
 from crystalsizer3d.args.dataset_synthetic_args import DatasetSyntheticArgs
