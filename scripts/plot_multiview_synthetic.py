@@ -4,12 +4,12 @@ from pathlib import Path
 from typing import List
 
 import cv2
-import mitsuba as mi
 import numpy as np
 import torch
 import yaml
 from PIL import Image
 from mayavi import mlab
+import mitsuba as mi
 
 from crystalsizer3d import LOGS_PATH, START_TIMESTAMP, USE_CUDA, logger
 from crystalsizer3d.crystal import Crystal

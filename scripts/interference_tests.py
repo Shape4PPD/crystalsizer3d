@@ -1,7 +1,6 @@
 from typing import List
 
 import matplotlib.pyplot as plt
-import mitsuba as mi
 import numpy as np
 import torch
 
@@ -14,12 +13,8 @@ from crystalsizer3d.scene_components.bumpmap import generate_bumpmap
 from crystalsizer3d.util.utils import to_numpy
 
 if USE_CUDA:
-    if 'cuda_ad_rgb' not in mi.variants():
-        raise RuntimeError('No CUDA variant found.')
-    mi.set_variant('cuda_ad_rgb')
     device = torch.device('cuda')
 else:
-    mi.set_variant('llvm_ad_rgb')
     device = torch.device('cpu')
 
 save_plots = True
