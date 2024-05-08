@@ -4,11 +4,11 @@ import matplotlib.pyplot as plt
 import mitsuba as mi
 import numpy as np
 import torch
-from ccdc.io import EntryReader
 
 from crystalsizer3d import LOGS_PATH, START_TIMESTAMP, USE_CUDA
 from crystalsizer3d.crystal import Crystal, ROTATION_MODE_AXISANGLE
 from crystalsizer3d.crystal_renderer import Scene
+from crystalsizer3d.csd_proxy import CSDProxy
 from crystalsizer3d.scene_components.bubble import make_bubbles
 from crystalsizer3d.scene_components.bumpmap import generate_bumpmap
 from crystalsizer3d.util.utils import to_numpy
@@ -35,18 +35,15 @@ def _generate_crystal(
     """
     Generate a beta-form LGA crystal.
     """
-    reader = EntryReader()
-    crystal = reader.crystal('LGLUAC11')
+    csd_proxy = CSDProxy()
+    cs = csd_proxy.load('LGLUAC11')
     miller_indices = [(1, 0, 1), (0, 2, 1), (0, 1, 0)]
-    lattice_unit_cell = [crystal.cell_lengths[0], crystal.cell_lengths[1], crystal.cell_lengths[2]]
-    lattice_angles = [crystal.cell_angles[0], crystal.cell_angles[1], crystal.cell_angles[2]]
-    point_group_symbol = '222'  # crystal.spacegroup_symbol
 
     crystal = Crystal(
-        lattice_unit_cell=lattice_unit_cell,
-        lattice_angles=lattice_angles,
+        lattice_unit_cell=cs.lattice_unit_cell,
+        lattice_angles=cs.lattice_angles,
         miller_indices=miller_indices,
-        point_group_symbol=point_group_symbol,
+        point_group_symbol=cs.point_group_symbol,
         distances=torch.tensor(distances) * scale,
         origin=origin,
         rotation=rotvec,
