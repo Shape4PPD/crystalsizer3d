@@ -2,14 +2,12 @@ from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 import torch
-from ccdc.crystal import Crystal as CCDC_Crystal
-from ccdc.io import EntryReader
-from ccdc.morphology import VisualHabitMorphology
 from numpy.random import default_rng
 from trimesh import Trimesh
 
 from crystalsizer3d.args.dataset_synthetic_args import CRYSTAL_IDS
 from crystalsizer3d.crystal import Crystal
+from crystalsizer3d.csd_proxy import CSDProxy
 from crystalsizer3d.util.utils import SEED, to_numpy
 
 
@@ -82,13 +80,11 @@ class CrystalGenerator:
         Initialise a crystal.
         """
         # Load the crystal template from the CSD database
-        reader = EntryReader()
-        self.ccdc_crystal: CCDC_Crystal = reader.crystal(self.crystal_id)
-        self.lattice_unit_cell = [self.ccdc_crystal.cell_lengths[0], self.ccdc_crystal.cell_lengths[1],
-                                  self.ccdc_crystal.cell_lengths[2]]
-        self.lattice_angles = [self.ccdc_crystal.cell_angles[0], self.ccdc_crystal.cell_angles[1],
-                               self.ccdc_crystal.cell_angles[2]]
-        self.point_group_symbol = '222'  # crystal.spacegroup_symbol
+        csd = CSDProxy()
+        cs = csd.load(self.crystal_id)
+        self.lattice_unit_cell = cs.lattice_unit_cell
+        self.lattice_angles = cs.lattice_angles
+        self.point_group_symbol = cs.point_group_symbol
 
         # Instantiate the crystal
         self.crystal = Crystal(
@@ -180,37 +176,6 @@ class CrystalGenerator:
         rel_rates = np.abs(rel_rates) / np.abs(rel_rates).max()
 
         return rel_rates
-
-    def get_distances(self, morph: VisualHabitMorphology, insert_missing: bool = False) -> Dict[Tuple[int, ...], float]:
-        """
-        Get the perpendicular distances of the symmetric faces.
-        """
-        distances = {}
-        for facet in morph.facets:
-            idx = facet.miller_indices.hkl
-            idx_canonical = tuple(np.abs(i) for i in idx)
-            pd = np.abs(facet.perpendicular_distance)
-            if idx_canonical not in distances.keys():
-                distances[idx_canonical] = pd
-            else:
-                assert np.allclose(distances[idx_canonical], pd, atol=1e-6), \
-                    (f'Face {idx} has different distance to the symmetric face {idx_canonical} '
-                     f'({pd} vs {distances[idx_canonical]}).')
-
-        # Rebuild the dictionary with the canonical indices if available
-        if hasattr(self, 'distances'):
-            distances_sorted = {}
-            for k in self.distances.keys():
-                if k in distances.keys():
-                    distances_sorted[k] = distances[k]
-                elif insert_missing:
-                    distances_sorted[k] = 0
-            if len(distances) > len(distances_sorted):
-                raise ValueError(f'The morphology has distances that did not appear in the canonical morphology.')
-        else:
-            distances_sorted = distances
-
-        return distances_sorted
 
 
 if __name__ == '__main__':
