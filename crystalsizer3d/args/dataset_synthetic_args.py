@@ -32,7 +32,7 @@ class DatasetSyntheticArgs(BaseArgs):
             sampler_type: str = 'stratified',
 
             # Light parameters
-            light_z_position: float = -10.,
+            light_z_position: float = -10.1,
             light_scale: float = 50.,
             light_radiance_min: Tuple[float, float, float] = (0.5, 0.5, 0.5),
             light_radiance_max: Tuple[float, float, float] = (0.5, 0.5, 0.5),
@@ -227,7 +227,7 @@ class DatasetSyntheticArgs(BaseArgs):
                            help='Sampler type.')
 
         # Light parameters
-        group.add_argument('--light-z-position', type=float, default=-10.,
+        group.add_argument('--light-z-position', type=float, default=-10.1,
                            help='Light z-position.')
         group.add_argument('--light-scale', type=float, default=50.,
                            help='Light scale.')
