@@ -9,11 +9,11 @@ import numpy as np
 import torch
 import yaml
 from PIL import Image
-from ccdc.io import EntryReader
 from mayavi import mlab
 
 from crystalsizer3d import LOGS_PATH, START_TIMESTAMP, USE_CUDA, logger
 from crystalsizer3d.crystal import Crystal
+from crystalsizer3d.csd_proxy import CSDProxy
 from crystalsizer3d.util.utils import print_args, to_dict, to_numpy, to_rgb
 
 if USE_CUDA:
@@ -69,7 +69,7 @@ def get_args() -> Namespace:
                         help='Mesh wireframe colour.')
 
     # Perspective renderings
-    parser.add_argument('--n-rotations-per-axis', type=int, default=6,
+    parser.add_argument('--n-rotations-per-axis', type=int, default=3,
                         help='Number of rotations to make per axis.')
 
     args = parser.parse_args()
@@ -85,18 +85,15 @@ def _generate_crystal(
     """
     Generate a beta-form LGA crystal.
     """
-    reader = EntryReader()
-    crystal = reader.crystal('LGLUAC01')
-    miller_indices = [(1, 1, 1), (0, 1, 2), (0, 0, 2)]
-    lattice_unit_cell = [crystal.cell_lengths[0], crystal.cell_lengths[1], crystal.cell_lengths[2]]
-    lattice_angles = [crystal.cell_angles[0], crystal.cell_angles[1], crystal.cell_angles[2]]
-    point_group_symbol = '222'  # crystal.spacegroup_symbol
+    csd_proxy = CSDProxy()
+    cs = csd_proxy.load('LGLUAC11')
+    miller_indices = [(1, 0, 1), (0, 2, 1), (0, 1, 0)]
 
     crystal = Crystal(
-        lattice_unit_cell=lattice_unit_cell,
-        lattice_angles=lattice_angles,
+        lattice_unit_cell=cs.lattice_unit_cell,
+        lattice_angles=cs.lattice_angles,
         miller_indices=miller_indices,
-        point_group_symbol=point_group_symbol,
+        point_group_symbol=cs.point_group_symbol,
         distances=distances,
         origin=origin,
         rotation=rotvec
@@ -277,6 +274,7 @@ def plot_views():
     # Make crystal
     if args.crystal_path is not None and args.crystal_path.exists():
         crystal = Crystal.from_json(args.crystal_path)
+        crystal.to(device)
     else:
         crystal = _generate_crystal(args.distances)
 
