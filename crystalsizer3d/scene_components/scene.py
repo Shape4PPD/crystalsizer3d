@@ -50,7 +50,7 @@ class Scene:
             aperture_radius: float = 0.5,
             sampler_type: str = 'stratified',
 
-            light_z_position: float = -10.,
+            light_z_position: float = -10.1,
             light_scale: float = 50.,
             light_radiance: Tuple[float, float, float] = (0.5, 0.5, 0.5),
 
