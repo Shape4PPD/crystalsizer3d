@@ -62,8 +62,6 @@ class DatasetSyntheticArgs(BaseArgs):
             # Crystal material properties
             min_ior: float = 1.1,
             max_ior: float = 1.6,
-            min_brightness: float = 0.75,
-            max_brightness: float = 0.9,
             min_roughness: float = 0.0,
             max_roughness: float = 0.4,
 
@@ -78,12 +76,12 @@ class DatasetSyntheticArgs(BaseArgs):
             # Bubble properties
             min_bubbles: int = 0,
             max_bubbles: int = 0,
-            bubbles_min_x: float = -10.,
-            bubbles_max_x: float = 10.,
-            bubbles_min_y: float = -10.,
-            bubbles_max_y: float = 10.,
-            bubbles_min_scale: float = 0.001,
-            bubbles_max_scale: float = 1,
+            bubbles_min_x: float = -25.,
+            bubbles_max_x: float = 25.,
+            bubbles_min_y: float = -25.,
+            bubbles_max_y: float = 25.,
+            bubbles_min_scale: float = 0.01,
+            bubbles_max_scale: float = 0.4,
             bubbles_min_roughness: float = 0.05,
             bubbles_max_roughness: float = 0.2,
             bubbles_min_ior: float = 1.1,
@@ -162,8 +160,6 @@ class DatasetSyntheticArgs(BaseArgs):
         # Crystal material properties
         self.min_ior = min_ior
         self.max_ior = max_ior
-        self.min_brightness = min_brightness
-        self.max_brightness = max_brightness
         self.min_roughness = min_roughness
         self.max_roughness = max_roughness
 
@@ -284,10 +280,6 @@ class DatasetSyntheticArgs(BaseArgs):
                            help='Minimum index of refraction.')
         group.add_argument('--max-ior', type=float, default=2.5,
                            help='Maximum index of refraction.')
-        group.add_argument('--min-brightness', type=float, default=0.8,
-                           help='Minimum brightness.')
-        group.add_argument('--max-brightness', type=float, default=1.3,
-                           help='Maximum brightness.')
         group.add_argument('--min-roughness', type=float, default=0.0,
                            help='Minimum roughness.')
         group.add_argument('--max-roughness', type=float, default=0.4,
@@ -308,21 +300,21 @@ class DatasetSyntheticArgs(BaseArgs):
                            help='Maximum defect z-coordinate.')
 
         # Bubbles
-        group.add_argument('--min-bubbles', type=int, default=50,
+        group.add_argument('--min-bubbles', type=int, default=100,
                            help='Minimum number of bubbles.')
-        group.add_argument('--max-bubbles', type=int, default=50,
+        group.add_argument('--max-bubbles', type=int, default=100,
                            help='Maximum number of bubbles.')
-        group.add_argument('--bubbles-min-x', type=float, default=-10.,
+        group.add_argument('--bubbles-min-x', type=float, default=-25.,
                            help='Minimum x-coordinate of the bubble origin.')
-        group.add_argument('--bubbles-max-x', type=float, default=10.,
+        group.add_argument('--bubbles-max-x', type=float, default=25.,
                            help='Maximum x-coordinate of the bubble origin.')
-        group.add_argument('--bubbles-min-y', type=float, default=-10.,
+        group.add_argument('--bubbles-min-y', type=float, default=-25.,
                            help='Minimum y-coordinate of the bubble origin.')
-        group.add_argument('--bubbles-max-y', type=float, default=10.,
+        group.add_argument('--bubbles-max-y', type=float, default=25.,
                            help='Maximum y-coordinate of the bubble origin.')
-        group.add_argument('--bubbles-min-scale', type=float, default=0.001,
+        group.add_argument('--bubbles-min-scale', type=float, default=0.01,
                            help='Minimum scale of the bubble.')
-        group.add_argument('--bubbles-max-scale', type=float, default=1,
+        group.add_argument('--bubbles-max-scale', type=float, default=0.4,
                            help='Maximum scale of the bubble.')
         group.add_argument('--bubbles-min-roughness', type=float, default=0.05,
                            help='Minimum roughness of the bubble.')
