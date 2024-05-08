@@ -6,7 +6,7 @@ import numpy as np
 import torch
 from ccdc.io import EntryReader
 
-from crystalsizer3d import USE_CUDA
+from crystalsizer3d import LOGS_PATH, START_TIMESTAMP, USE_CUDA
 from crystalsizer3d.crystal import Crystal, ROTATION_MODE_AXISANGLE
 from crystalsizer3d.crystal_renderer import Scene
 from crystalsizer3d.scene_components.bubble import make_bubbles
@@ -21,6 +21,9 @@ if USE_CUDA:
 else:
     mi.set_variant('llvm_ad_rgb')
     device = torch.device('cpu')
+
+save_plots = True
+show_plots = True
 
 
 def _generate_crystal(
@@ -144,10 +147,15 @@ def plot_scene():
     fig, axes = plt.subplots(1, 2, figsize=(10, 5))
     axes[0].imshow(image)
     axes[0].axis('off')
-    axes[1].imshow(to_numpy(crystal.bumpmap), cmap='gray')
+    axes[1].imshow(to_numpy(crystal.bumpmap - crystal.uv_mask.to(torch.float32)), cmap='gray')
     axes[1].axis('off')
     fig.tight_layout()
-    plt.show()
+
+    if save_plots:
+        LOGS_PATH.mkdir(parents=True, exist_ok=True)
+        plt.savefig(LOGS_PATH / f'{START_TIMESTAMP}_bubbles={n_bubbles}_defects={n_defects}_spp={spp}.png')
+    if show_plots:
+        plt.show()
 
 
 if __name__ == '__main__':
