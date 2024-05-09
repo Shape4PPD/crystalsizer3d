@@ -155,14 +155,17 @@ def plot_3d(
     surf_col = 'orange' if target_or_pred == 'target' else 'skyblue'
     wire_col = 'red' if target_or_pred == 'target' else 'darkblue'
 
-    image = make_3d_digital_crystal_image(
-        crystal,
-        res=int(max(get_ax_size(ax)) * 2),
-        surface_colour=surf_col,
-        wireframe_colour=wire_col
-    )
-    ax.imshow(image)
-    ax.axis('off')
+    try:
+        image = make_3d_digital_crystal_image(
+            crystal,
+            res=int(max(get_ax_size(ax)) * 2),
+            surface_colour=surf_col,
+            wireframe_colour=wire_col
+        )
+        ax.imshow(image)
+        ax.axis('off')
+    except Exception:
+        plot_error(ax, '3D plot failed')
 
 
 def plot_zingg(
@@ -512,7 +515,6 @@ def plot_training_samples(
         row_idx += 1
 
         # Plot the parameters
-        # row_idx += 3
         shared_args = dict(
             Y_pred=Y_pred,
             Y_target=Y_target,
