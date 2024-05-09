@@ -197,8 +197,11 @@ class Dataset:
         """
         path = self.path / 'ds_stats.yml'
         keys = (self.labels_zingg + self.labels_distances +
-                self.labels_transformation + self.labels_rotation_quaternion + self.labels_rotation_axisangle +
-                self.labels_material + self.labels_light)
+                self.labels_transformation + self.labels_material + self.labels_light)
+        if self.dataset_args.rotation_mode == ROTATION_MODE_AXISANGLE:
+            keys += self.labels_rotation_axisangle
+        else:
+            keys += self.labels_rotation_quaternion
 
         if path.exists():
             # Load normalisation parameters
