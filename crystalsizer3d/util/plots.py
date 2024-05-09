@@ -12,8 +12,9 @@ from matplotlib.gridspec import GridSpec
 from mayavi import mlab
 from scipy.spatial.transform import Rotation
 
+from crystalsizer3d import USE_MLAB
 from crystalsizer3d.crystal import Crystal, ROTATION_MODE_QUATERNION
-from crystalsizer3d.util.utils import to_numpy, to_rgb
+from crystalsizer3d.util.utils import equal_aspect_ratio, to_numpy, to_rgb
 
 if TYPE_CHECKING:
     from crystalsizer3d.nn.manager import Manager
@@ -145,7 +146,7 @@ def plot_3d(
         ax: Axes,
         title: str,
         crystal: Crystal,
-        target_or_pred: str,
+        target_or_pred: str
 ):
     """
     Plot a 3d mesh on the axis.
@@ -155,7 +156,7 @@ def plot_3d(
     surf_col = 'orange' if target_or_pred == 'target' else 'skyblue'
     wire_col = 'red' if target_or_pred == 'target' else 'darkblue'
 
-    try:
+    if USE_MLAB:
         image = make_3d_digital_crystal_image(
             crystal,
             res=int(max(get_ax_size(ax)) * 2),
@@ -164,8 +165,25 @@ def plot_3d(
         )
         ax.imshow(image)
         ax.axis('off')
-    except Exception:
-        plot_error(ax, '3D plot failed')
+    else:
+        origin = crystal.origin.clone()
+        crystal.origin.data = torch.zeros_like(origin)
+        v, f = crystal.build_mesh()
+        v, f = to_numpy(v), to_numpy(f)
+        ax.plot_trisurf(
+            v[:, 0],
+            v[:, 1],
+            triangles=f,
+            Z=v[:, 2],
+            color=surf_col,
+            alpha=0.5
+        )
+        for fv_idxs in crystal.faces.values():
+            fv = to_numpy(crystal.vertices[fv_idxs])
+            fv = np.vstack([fv, fv[0]])  # Close the loop
+            ax.plot(*fv.T, c=wire_col)
+        crystal.origin.data = origin
+        equal_aspect_ratio(ax)
 
 
 def plot_zingg(
@@ -507,10 +525,11 @@ def plot_training_samples(
             row_idx += 1
 
         # Plot the 3d digital crystals
-        plot_3d(fig.add_subplot(gs[row_idx, i]), 'Morphology',
+        projection_kwargs = {} if USE_MLAB else {'projection': '3d'}
+        plot_3d(fig.add_subplot(gs[row_idx, i], **projection_kwargs), 'Morphology',
                 crystal_target, 'target')
         row_idx += 1
-        plot_3d(fig.add_subplot(gs[row_idx, i]), 'Predicted',
+        plot_3d(fig.add_subplot(gs[row_idx, i], **projection_kwargs), 'Predicted',
                 crystal_pred, 'predicted')
         row_idx += 1
 
