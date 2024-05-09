@@ -1,4 +1,4 @@
-from typing import Optional
+from typing import Optional, Tuple
 
 import drjit as dr
 import mitsuba as mi
@@ -72,26 +72,41 @@ def project_to_image(mi_scene: mi.Scene, points: torch.Tensor) -> torch.Tensor:
     Project 3D points to the image plane.
     """
     device = points.device
-    params = mi.traverse(mi_scene)
-    sensor = mi_scene.sensors()[0]
-    film = sensor.film()
-
-    # Create the projection matrix
-    prj = mi.perspective_projection(film.size(), film.crop_size(), film.crop_offset(), params['sensor.x_fov'],
-                                    sensor.near_clip(), sensor.far_clip())
-
-    # Get the inverse camera world transform
-    wti = sensor.world_transform().inverse()
-
-    # Project the points
+    projection_matrix, crop_size = get_projection_components(mi_scene)
+    projection_matrix = projection_matrix.to(device)
     if points.ndim == 1:
         points = points[None, :]
     points_homogeneous = torch.cat([points, torch.ones(len(points), 1, device=device)], dim=1)
-    hpp = points_homogeneous @ torch.tensor((prj @ wti).matrix, device=device)[0].T
+    hpp = points_homogeneous @ projection_matrix.T
     pp = hpp[:, :3] / hpp[:, 3][:, None]
-    dim = torch.tensor(film.crop_size(), device=device)[None, :]
+    dim = torch.tensor(crop_size, device=device)[None, :]
     uv = pp[:, :2] * dim
     return uv
+
+
+projection_components_cache = {}
+
+
+def get_projection_components(mi_scene: mi.Scene) -> Tuple[torch.Tensor, int]:
+    """
+    Get the projection matrix.
+    """
+    if mi_scene.ptr not in projection_components_cache:
+        params = mi.traverse(mi_scene)
+        sensor = mi_scene.sensors()[0]
+        film = sensor.film()
+
+        # Create the projection matrix
+        prj = mi.perspective_projection(film.size(), film.crop_size(), film.crop_offset(), params['sensor.x_fov'],
+                                        sensor.near_clip(), sensor.far_clip())
+
+        # Get the inverse camera world transform
+        wti = sensor.world_transform().inverse()
+
+        # Combine to get the final projection matrix
+        projection_components_cache[mi_scene.ptr] = (torch.tensor((prj @ wti).matrix)[0], film.crop_size())
+
+    return projection_components_cache[mi_scene.ptr]
 
 
 def render_crystal_scene(

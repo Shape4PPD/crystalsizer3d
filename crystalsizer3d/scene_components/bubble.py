@@ -4,6 +4,8 @@ import drjit as dr
 import mitsuba as mi
 import numpy as np
 import torch
+from pytorch3d.ops import SubdivideMeshes
+from pytorch3d.structures import Meshes
 from pytorch3d.utils import ico_sphere
 from torch import nn
 
@@ -15,6 +17,17 @@ if USE_CUDA:
     mi.set_variant('cuda_ad_rgb')
 else:
     mi.set_variant('llvm_ad_rgb')
+
+ico_sphere_cache = {}
+
+
+def load_ico_sphere(level: int = 0):
+    """
+    Load an icosphere from the cache, generating it if necessary.
+    """
+    if level not in ico_sphere_cache:
+        ico_sphere_cache[level] = ico_sphere(level=level)
+    return ico_sphere_cache[level].clone()
 
 
 class Bubble(nn.Module):
@@ -61,7 +74,7 @@ class Bubble(nn.Module):
         Create a sphere mesh with the given origin and radius.
         """
         # Build basic sphere
-        sphere = ico_sphere(level=self.resolution_level, device=self.origin.device)
+        sphere = load_ico_sphere(level=self.resolution_level).to(self.origin.device)
         vertices = sphere.verts_packed()
         faces = sphere.faces_packed()
 

@@ -4,9 +4,8 @@ from typing import List, Optional, Tuple
 import mitsuba as mi
 import numpy as np
 import torch
+from scipy.optimize import minimize
 from scipy.spatial import ConvexHull
-from trimesh import Trimesh
-from trimesh.collision import CollisionManager
 
 from crystalsizer3d import USE_CUDA
 from crystalsizer3d.args.dataset_synthetic_args import ROTATION_MODE_AXISANGLE
@@ -303,50 +302,8 @@ class Scene:
             else:
                 self.crystal.rotation.data = normalise(torch.rand(4) * 2 * math.pi)
 
-            # Adjust scaling until the projected area is close to the target
-            projected_area = 0
-            n_scale_attempts = 0
-            oob = False
-            while abs(projected_area - target_area) > target_area * 0.1 and n_scale_attempts < 1000:
-                if n_scale_attempts != 0:
-                    if projected_area > target_area:
-                        self.crystal.scale.data *= 0.9
-                    else:
-                        self.crystal.scale.data *= 1.1
-
-                # Adjust the position so the bottom of the crystal is on the growth cell surface
-                v, f = self.crystal.build_mesh(update_uv_map=False)
-                self.crystal.origin.data[2] -= v[:, 2].min() - self.cell_z_positions[1]
-
-                # Project the crystal vertices onto the image plane
-                self.crystal.build_mesh(update_uv_map=False)
-                uv_points = self.get_crystal_image_coords()
-                v = self.crystal.vertices
-
-                # Check that the crystal is within the image bounds and the growth cell
-                if (uv_points[:, 0].min() < 0 or uv_points[:, 0].max() > self.res or
-                        uv_points[:, 1].min() < 0 or uv_points[:, 1].max() > self.res or
-                        v[:, 2].min() < self.cell_z_positions[1] or v[:, 2].max() > self.cell_z_positions[2]
-                ):
-                    if n_scale_attempts < 5:
-                        self.crystal.scale.data /= 2
-                        n_scale_attempts += 1
-                        continue
-                    else:
-                        oob = True
-                        break
-
-                # Check the area of the convex hull of the projected points
-                ch = ConvexHull(to_numpy(uv_points))
-                projected_area = ch.volume / self.res**2  # Note - volume not area (area is perimeter)
-
-                n_scale_attempts += 1
-            if projected_area < min_area or projected_area > max_area or oob:
-                # Failed to scale crystal to meet the target area so try a new orientation
-                continue
-
-            # Placed successfully!
-            is_placed = True
+            # Optimise the crystal placement
+            is_placed = self._optimise_crystal_placement(target_area)
 
         # Put crystal back on the original device
         self.crystal.to(device_og)
@@ -370,6 +327,79 @@ class Scene:
         self.crystal.build_mesh()
         self._build_mi_scene()
 
+    def _optimise_crystal_placement(
+            self,
+            target_area: float
+    ):
+        """
+        Optimise the crystal placement.
+        """
+        cell_height = self.cell_z_positions[2] - self.cell_z_positions[1]
+
+        def _update_mesh():
+            self.crystal.build_mesh(update_uv_map=False)
+            z_adj = self.crystal.vertices[:, 2].min() + self.cell_z_positions[1]
+            self.crystal.vertices[:, 2] -= z_adj
+            self.crystal.origin.data[2] -= z_adj
+
+        def _in_bounds(img_points):
+            z_min, z_max = self.crystal.vertices[:, 2].min(), self.crystal.vertices[:, 2].max()
+            return not (img_points[:, 0].min() < 0 or img_points[:, 0].max() > self.res or
+                        img_points[:, 1].min() < 0 or img_points[:, 1].max() > self.res or
+                        z_max - z_min > cell_height)
+
+        def _projected_area(img_points):
+            # Check the area of the convex hull of the projected points
+            ch = ConvexHull(to_numpy(img_points))
+            return ch.volume / self.res**2  # Note - volume not area (area is perimeter)
+
+        # Ensure the initial guess falls in the bounds by scaling and translating it until it must
+        oob = True
+        n_fails = 0
+        while oob:
+            _update_mesh()
+            uv_points = self.get_crystal_image_coords()
+            if _in_bounds(uv_points):
+                oob = False
+            else:
+                self.crystal.scale.data *= 0.9
+                self.crystal.origin.data[:2] *= 0.8
+                n_fails += 1
+                if n_fails > 100:
+                    return False
+        assert _in_bounds(uv_points)
+
+        # Set up parameters and bounds
+        x0 = np.array([self.crystal.scale.item(), *self.crystal.origin[:2]])
+        bounds = [[0, 100], ] + [[-100, 100]] * 2
+
+        def _loss(x):
+            self.crystal.scale.data = torch.tensor(x[0], dtype=self.crystal.scale.dtype)
+            self.crystal.origin.data[:2] = torch.tensor([x[1], x[2]], dtype=self.crystal.origin.dtype)
+            _update_mesh()
+            uv_points = self.get_crystal_image_coords()
+            projected_area = _projected_area(uv_points)
+            loss_area = (projected_area - target_area)**2
+            if not _in_bounds(uv_points):
+                loss_area += 100
+            return loss_area
+
+        # Find optimal placement
+        res = minimize(
+            _loss,
+            x0=x0,
+            bounds=bounds,
+            method='COBYLA',
+            options={
+                'maxiter': 1000,
+                'tol': 1e-3,
+            }
+        )
+
+        if res.success and res.fun < 1e-3:
+            return True
+        return False
+
     def place_bubbles(
             self,
             min_x: float,
@@ -390,8 +420,8 @@ class Scene:
         z_pos = self.cell_z_positions
         h_below = z_pos[1] - z_pos[0]
         h_above = z_pos[3] - z_pos[2]
-        collision_managers = {'bottom': CollisionManager(), 'top': CollisionManager()}
 
+        placed_bubbles = []
         for bubble in self.bubbles:
             # Keep trying to place the bubble until it appears in the image and doesn't intersect with anything else in the scene
             bubble = bubble.to(torch.device('cpu'))
@@ -400,36 +430,34 @@ class Scene:
             while not is_placed and n_placement_attempts < 100:
                 n_placement_attempts += 1
 
-                # Sample the bubble scale
-                bubble.scale.data = min_scale + torch.rand(1) * (max_scale - min_scale)
-
                 # Pick whether to place the bubble above or below of the cell
                 if np.random.uniform() < h_below / (h_below + h_above):
                     channel = 'bottom'
-                    lim_lower = z_pos[0]
-                    lim_upper = z_pos[1]
                     min_x_c = min_x
                     max_x_c = max_x
                     min_y_c = min_y
                     max_y_c = max_y
+                    min_z_c = z_pos[0]
+                    max_z_c = z_pos[1]
                 else:
                     channel = 'top'
-                    lim_lower = z_pos[2]
-                    lim_upper = z_pos[3]
                     min_x_c = min_x / 2
                     max_x_c = max_x / 2
                     min_y_c = min_y / 2
                     max_y_c = max_y / 2
+                    min_z_c = z_pos[2]
+                    max_z_c = z_pos[3]
 
-                lim_lower += bubble.scale.item()
-                lim_upper -= bubble.scale.item()
-                z = lim_lower + torch.rand(1) * (lim_upper - lim_lower)
+                # Sample the bubble scale and update the z limits
+                bubble.scale.data = min_scale + torch.rand(1) * (max_scale - min_scale)
+                min_z_c += bubble.scale.item()
+                max_z_c -= bubble.scale.item()
 
                 # Place and scale the bubble
                 bubble.origin.data = torch.tensor([
                     min_x_c + torch.rand(1) * (max_x_c - min_x_c),
                     min_y_c + torch.rand(1) * (max_y_c - min_y_c),
-                    z
+                    min_z_c + torch.rand(1) * (max_z_c - min_z_c)
                 ])
                 bubble.build_mesh()
 
@@ -447,18 +475,20 @@ class Scene:
                     continue
 
                 # Check for intersections with the other bubbles
-                bounding_box = Trimesh(vertices=to_numpy(bubble.vertices), faces=to_numpy(bubble.faces)).bounding_box
-                cm = collision_managers[channel]
-                if cm.in_collision_single(bounding_box):
-                    continue
+                for placed_bubble in placed_bubbles:
+                    origin_dist = (placed_bubble['origin'] - bubble.origin).norm()
+                    if origin_dist < placed_bubble['scale'] + bubble.scale:
+                        continue
 
                 # Placed successfully!
                 is_placed = True
-                cm.add_object(bubble.SHAPE_NAME, bounding_box)
+                placed_bubbles.append({
+                    'origin': bubble.origin.clone(),
+                    'scale': bubble.scale.clone(),
+                })
 
             if not is_placed:
                 raise RenderError('Failed to place bubble!')
-
             bubble.to(device_og)
 
         # Rebuild the scene with the new bubble positions

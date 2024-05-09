@@ -142,23 +142,24 @@ def _render_batch(
                 light_radiance=light_radiance,
                 **da.to_dict(),
             )
-            scene.place_crystal(
-                min_area=da.crystal_area_min,
-                max_area=da.crystal_area_max,
-                centre_crystal=da.centre_crystals,
-                min_x=da.crystal_min_x,
-                max_x=da.crystal_max_x,
-                min_y=da.crystal_min_y,
-                max_y=da.crystal_max_y,
-            )
-            scene.place_bubbles(
-                min_x=da.bubbles_min_x,
-                max_x=da.bubbles_max_x,
-                min_y=da.bubbles_min_y,
-                max_y=da.bubbles_max_y,
-                min_scale=da.bubbles_min_scale,
-                max_scale=da.bubbles_max_scale,
-            )
+            with torch.no_grad():
+                scene.place_crystal(
+                    min_area=da.crystal_area_min,
+                    max_area=da.crystal_area_max,
+                    centre_crystal=da.centre_crystals,
+                    min_x=da.crystal_min_x,
+                    max_x=da.crystal_max_x,
+                    min_y=da.crystal_min_y,
+                    max_y=da.crystal_max_y,
+                )
+                scene.place_bubbles(
+                    min_x=da.bubbles_min_x,
+                    max_x=da.bubbles_max_x,
+                    min_y=da.bubbles_min_y,
+                    max_y=da.bubbles_max_y,
+                    min_scale=da.bubbles_min_scale,
+                    max_scale=da.bubbles_max_scale,
+                )
             scale_init = scene.crystal.scale.item()
             img = scene.render(seed=seed + idx)
             img = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)  # todo: do we need this?
