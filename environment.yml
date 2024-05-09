@@ -23,11 +23,14 @@ dependencies:
   - trimesh = 4.1
   - pip
   - pip:
-    - csd-python-api = 3.0
     - cholespy = 1.0
+    - csd-python-api = 3.0
     - gigagan-pytorch = 0.2
+    - gpytoolbox = 0.2
     - manifold3d = 2.4
     - mitsuba = 3.5
     - parti-pytorch = 0.2
+    - pymatgen = 2024.5
     - python-fcl = 0.7
     - pytorch-minimize = 0.0.2
+    - pytorch3d = 0.7
