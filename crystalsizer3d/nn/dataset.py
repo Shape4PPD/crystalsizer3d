@@ -113,7 +113,7 @@ class Dataset:
         for k in labels:
             if k[:2] == 'ds':
                 continue
-            if self.ds_stats[k]['var'] == 0:
+            if k not in self.labels_transformation and self.ds_stats[k]['var'] == 0:
                 logger.warning(f'Removing key {k} from parameters as it has 0 variance.')
                 fixed_parameters[k] = self.ds_stats[k]['mean']
                 if k in self.labels_distances and self.ds_args.use_distance_switches:
