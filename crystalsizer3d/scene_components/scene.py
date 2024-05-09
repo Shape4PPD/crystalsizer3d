@@ -348,6 +348,9 @@ class Scene:
             # Placed successfully!
             is_placed = True
 
+        # Put crystal back on the original device
+        self.crystal.to(device_og)
+
         if not is_placed:
             # Try again with a slightly smaller target area
             if min_area > 0.01:
@@ -365,7 +368,6 @@ class Scene:
 
         # Rebuild the scene with the new crystal position
         self.crystal.build_mesh()
-        self.crystal.to(device_og)
         self._build_mi_scene()
 
     def place_bubbles(
