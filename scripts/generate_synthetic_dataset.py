@@ -26,7 +26,7 @@ PARAMETER_HEADERS = [
 ]
 
 
-def parse_args(printout: bool = True) -> Tuple[DatasetSyntheticArgs, str]:
+def parse_args(printout: bool = True) -> Tuple[DatasetSyntheticArgs, str, int]:
     """
     Parse command line arguments and build parameter holders.
     """
@@ -34,6 +34,8 @@ def parse_args(printout: bool = True) -> Tuple[DatasetSyntheticArgs, str]:
     DatasetSyntheticArgs.add_args(parser)
     parser.add_argument('--ds-name', type=str,
                         help='Set a dataset name to use for setting multiple workers on the same dataset.')
+    parser.add_argument('--seed', type=int, default=1,
+                        help='Set the random seed for the dataset generation.')
 
     # Do the parsing
     args = parser.parse_args()
@@ -44,7 +46,7 @@ def parse_args(printout: bool = True) -> Tuple[DatasetSyntheticArgs, str]:
     dataset_args = DatasetSyntheticArgs.from_args(args)
     ds_name = args.ds_name if args.ds_name is not None else START_TIMESTAMP
 
-    return dataset_args, ds_name
+    return dataset_args, ds_name, seed
 
 
 def validate(
@@ -207,7 +209,8 @@ def generate_dataset():
     """
     Generate a dataset of synthetic crystal images.
     """
-    dataset_args, ds_name = parse_args()
+    dataset_args, ds_name, seed = parse_args()
+    set_seed(seed)
     save_dir = LOGS_PATH / ds_name
     if save_dir.exists():
         return resume(save_dir)
@@ -428,7 +431,6 @@ def resume(
 
 
 if __name__ == '__main__':
-    set_seed(1)
     generate_dataset()
 
     # -- Use to re-validate a directory --
