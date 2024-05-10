@@ -1,5 +1,4 @@
 import csv
-import fcntl
 import json
 import multiprocessing as mp
 import os
@@ -16,6 +15,7 @@ import mitsuba as mi
 import numpy as np
 import torch
 from PIL import Image
+from filelock import FileLock
 
 from crystalsizer3d import N_WORKERS, USE_CUDA, logger
 from crystalsizer3d.args.dataset_synthetic_args import DatasetSyntheticArgs
@@ -99,35 +99,36 @@ def _render_batch(
     # Check that no other script is processing the same idxs
     timestamp = time.time()
     comlog_path = root_dir / 'comlog.json'
+    comlog_lock_path = comlog_path.with_suffix('.lock')
+    comlog_lock = FileLock(comlog_lock_path, timeout=30)
     comlog_key = f'{worker_id}_{batch_idx:06d}'
-    if not comlog_path.exists():
-        with open(comlog_path, 'w') as f:
-            json.dump({'workers': {}, 'completed_idxs': []}, f)
-    with open(comlog_path, 'r+') as f:
-        fcntl.flock(f.fileno(), fcntl.LOCK_EX)
-        comlog = json.load(f)
-        if len(comlog['workers']) > 0:
-            # Prune any workers that have not been active recently
-            for k, worker in list(comlog['workers'].items()):
-                if timestamp - worker['last_active'] > stale_worker_timeout:
-                    logger.warning(f'Worker {k} has timed out. Removing from log.')
-                    del comlog[k]
+    with comlog_lock:
+        if not comlog_path.exists():
+            with open(comlog_path, 'w') as f:
+                json.dump({'workers': {}, 'completed_idxs': []}, f)
+        with open(comlog_path, 'r+') as f:
+            comlog = json.load(f)
+            if len(comlog['workers']) > 0:
+                # Prune any workers that have not been active recently
+                for k, worker in list(comlog['workers'].items()):
+                    if timestamp - worker['last_active'] > stale_worker_timeout:
+                        logger.warning(f'Worker {k} has timed out. Removing from log.')
+                        del comlog[k]
 
-        # Filter out the idxs that have already been processed
-        param_batch = {idx: params for idx, params in param_batch.items() if idx not in comlog['completed_idxs']}
+            # Filter out the idxs that have already been processed
+            param_batch = {idx: params for idx, params in param_batch.items() if idx not in comlog['completed_idxs']}
 
-        # Filter out the idxs that are currently being processed
-        if len(comlog['workers']) > 0:
-            running_idxs = np.concatenate([worker['idxs'] for worker in comlog['workers'].values()])
-            param_batch = {idx: params for idx, params in param_batch.items() if idx not in running_idxs}
+            # Filter out the idxs that are currently being processed
+            if len(comlog['workers']) > 0:
+                running_idxs = np.concatenate([worker['idxs'] for worker in comlog['workers'].values()])
+                param_batch = {idx: params for idx, params in param_batch.items() if idx not in running_idxs}
 
-        # Add the worker to the comlog
-        if len(param_batch) > 0:
-            comlog['workers'].update({comlog_key: {'last_active': timestamp, 'idxs': list(param_batch.keys())}})
-            f.seek(0)
-            json.dump(comlog, f, indent=4)
-            f.truncate()
-        fcntl.flock(f.fileno(), fcntl.LOCK_UN)
+            # Add the worker to the comlog
+            if len(param_batch) > 0:
+                comlog['workers'].update({comlog_key: {'last_active': timestamp, 'idxs': list(param_batch.keys())}})
+                f.seek(0)
+                json.dump(comlog, f, indent=4)
+                f.truncate()
     if len(param_batch) == 0:
         logger.info(f'Batch {batch_idx + 1}/{n_batches}: No crystals to render.')
         return
@@ -238,14 +239,13 @@ def _render_batch(
             raise e
 
         # Update the comlog to show that the worker is still active
-        with open(comlog_path, 'r+') as f:
-            fcntl.flock(f.fileno(), fcntl.LOCK_EX)
-            comlog = json.load(f)
-            comlog['workers'][comlog_key]['last_active'] = time.time()
-            f.seek(0)
-            json.dump(comlog, f, indent=4)
-            f.truncate()
-            fcntl.flock(f.fileno(), fcntl.LOCK_UN)
+        with comlog_lock:
+            with open(comlog_path, 'r+') as f:
+                comlog = json.load(f)
+                comlog['workers'][comlog_key]['last_active'] = time.time()
+                f.seek(0)
+                json.dump(comlog, f, indent=4)
+                f.truncate()
 
     logger.info(f'Batch {batch_idx + 1}/{n_batches}: Collating results.')
 
@@ -269,15 +269,14 @@ def _render_batch(
     append_json(root_dir / 'rendering_parameters.json', rendering_params)
 
     # Update the comlog
-    with open(comlog_path, 'r+') as f:
-        fcntl.flock(f.fileno(), fcntl.LOCK_EX)
-        comlog = json.load(f)
-        comlog['completed_idxs'].extend(list(param_batch.keys()))
-        del comlog['workers'][comlog_key]
-        f.seek(0)
-        json.dump(comlog, f, indent=4)
-        f.truncate()
-        fcntl.flock(f.fileno(), fcntl.LOCK_UN)
+    with comlog_lock:
+        with open(comlog_path, 'r+') as f:
+            comlog = json.load(f)
+            comlog['completed_idxs'].extend(list(param_batch.keys()))
+            del comlog['workers'][comlog_key]
+            f.seek(0)
+            json.dump(comlog, f, indent=4)
+            f.truncate()
 
     # Clean up
     shutil.rmtree(output_dir)
