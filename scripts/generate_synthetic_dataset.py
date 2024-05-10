@@ -46,7 +46,7 @@ def parse_args(printout: bool = True) -> Tuple[DatasetSyntheticArgs, str, int]:
     dataset_args = DatasetSyntheticArgs.from_args(args)
     ds_name = args.ds_name if args.ds_name is not None else START_TIMESTAMP
 
-    return dataset_args, ds_name, seed
+    return dataset_args, ds_name, args.seed
 
 
 def validate(
