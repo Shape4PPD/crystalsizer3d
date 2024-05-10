@@ -4,6 +4,7 @@ import shutil
 import time
 from argparse import ArgumentParser
 from pathlib import Path
+from typing import Tuple
 
 import cv2
 import numpy as np
@@ -25,12 +26,14 @@ PARAMETER_HEADERS = [
 ]
 
 
-def parse_args(printout: bool = True) -> DatasetSyntheticArgs:
+def parse_args(printout: bool = True) -> Tuple[DatasetSyntheticArgs, str]:
     """
     Parse command line arguments and build parameter holders.
     """
     parser = ArgumentParser(description='Generate a dataset of segmented objects found in videos.')
     DatasetSyntheticArgs.add_args(parser)
+    parser.add_argument('--ds-name', type=str,
+                        help='Set a dataset name to use for setting multiple workers on the same dataset.')
 
     # Do the parsing
     args = parser.parse_args()
@@ -39,8 +42,9 @@ def parse_args(printout: bool = True) -> DatasetSyntheticArgs:
 
     # Instantiate the parameter holder
     dataset_args = DatasetSyntheticArgs.from_args(args)
+    ds_name = args.ds_name if args.ds_name is not None else START_TIMESTAMP
 
-    return dataset_args
+    return dataset_args, ds_name
 
 
 def validate(
@@ -203,13 +207,15 @@ def generate_dataset():
     """
     Generate a dataset of synthetic crystal images.
     """
-    dataset_args = parse_args()
+    dataset_args, ds_name = parse_args()
+    save_dir = LOGS_PATH / ds_name
+    if save_dir.exists():
+        return resume(save_dir)
 
     # Set a timer going to record how long this takes
     start_time = time.time()
 
     # Create a directory to save dataset and logs
-    save_dir = LOGS_PATH / START_TIMESTAMP
     param_path = save_dir / 'parameters.csv'
     images_dir = save_dir / 'images'
     images_dir.mkdir(parents=True, exist_ok=True)
@@ -295,26 +301,38 @@ def generate_dataset():
 
 def resume(
         save_dir: Path,
-        revalidate: bool = True
+        revalidate: bool = True,
+        attempt: int = 1,
+        max_attempts: int = 10,
+        sleep_time: int = 60
 ):
     """
     Re-render any missing images in a dataset.
     Useful for fixing a broken run.
     """
-    # Load arguments
-    assert (save_dir / 'options.yml').exists(), f'Options file does not exist: {save_dir / "options.yml"}'
-    with open(save_dir / 'options.yml', 'r') as f:
-        args = yaml.load(f, Loader=yaml.FullLoader)
-        dataset_args = DatasetSyntheticArgs.from_args(args['dataset_args'])
+    try:
+        # Load arguments
+        assert (save_dir / 'options.yml').exists(), f'Options file does not exist: {save_dir / "options.yml"}'
+        with open(save_dir / 'options.yml', 'r') as f:
+            args = yaml.load(f, Loader=yaml.FullLoader)
+            dataset_args = DatasetSyntheticArgs.from_args(args['dataset_args'])
+
+        # Check parameters and images dir exists
+        param_path = save_dir / 'parameters.csv'
+        assert param_path.exists(), f'Parameters file does not exist: {param_path}'
+        images_dir = save_dir / 'images'
+        assert images_dir.exists(), f'Images directory does not exist: {images_dir}'
+    except Exception as e:
+        if attempt < max_attempts:
+            logger.warning(f'Dataset does not appear ready to be resumed. '
+                           f'Sleeping for {sleep_time}s ({attempt}/{max_attempts}). '
+                           f'Error: {e}')
+            time.sleep(sleep_time)
+            return resume(save_dir, revalidate, attempt + 1, max_attempts, sleep_time)
+        raise RuntimeError(f'Failed to resume dataset: {e}')
 
     # Set a timer going to record how long this takes
     start_time = time.time()
-
-    # Check parameters and images dir exists
-    param_path = save_dir / 'parameters.csv'
-    assert param_path.exists(), f'Parameters file does not exist: {param_path}'
-    images_dir = save_dir / 'images'
-    assert images_dir.exists(), f'Images directory does not exist: {images_dir}'
 
     # Check for any errored renders as we need to create new crystals shapes for these
     if (save_dir / 'errored.json').exists():
@@ -416,9 +434,4 @@ if __name__ == '__main__':
     # -- Use to re-validate a directory --
     # validate(
     #     output_dir=LOGS_PATH / '20231130_1608',
-    # )
-
-    # -- Use to fix a broken run --
-    # resume(
-    #     save_dir=LOGS_PATH / '20240510_1152',
     # )

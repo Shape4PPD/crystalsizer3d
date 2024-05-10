@@ -193,16 +193,16 @@ class DatasetSyntheticArgs(BaseArgs):
         group = parser.add_argument_group('Renderer Args')
 
         # Dataset generation parameters
-        parser.add_argument('--n-samples', type=int, default=100,
-                            help='Number of samples to generate.')
-        parser.add_argument('--generate-clean', type=str2bool, default=True,
-                            help='Generate clean images in addition to interference images.')
-        parser.add_argument('--image-size', type=int, default=200,
-                            help='Image size.')
-        parser.add_argument('--batch-size', type=int, default=100,
-                            help='Number of crystals to render per batch.')
-        parser.add_argument('--validate-n-samples', type=int, default=10,
-                            help='Number of samples to re-generate for validation.')
+        group.add_argument('--n-samples', type=int, default=100,
+                           help='Number of samples to generate.')
+        group.add_argument('--generate-clean', type=str2bool, default=True,
+                           help='Generate clean images in addition to interference images.')
+        group.add_argument('--image-size', type=int, default=200,
+                           help='Image size.')
+        group.add_argument('--batch-size', type=int, default=100,
+                           help='Number of crystals to render per batch.')
+        group.add_argument('--validate-n-samples', type=int, default=10,
+                           help='Number of samples to re-generate for validation.')
 
         # Rendering settings
         group.add_argument('--spp', type=int, default=256,
@@ -243,29 +243,29 @@ class DatasetSyntheticArgs(BaseArgs):
                            help='Cell surface scale.')
 
         # Crystal parameters
-        parser.add_argument('--crystal-id', type=str, default='LGLUAC01',
-                            help='Crystal ID to generate images for.')
-        parser.add_argument('--miller-indices', type=lambda s: [tuple(int(i) for i in item) for item in s.split(',')],
-                            default='101,021,010', help='Miller indices of the canonical distances.')
-        parser.add_argument('--ratio-means', type=lambda s: [float(item) for item in s.split(',')],
-                            default='1,1,1,1,1,1', help='Means of the ratios of growth rates.')
-        parser.add_argument('--ratio-stds', type=lambda s: [float(item) for item in s.split(',')],
-                            default='0.5,0.5,0.5,0.5,0.5,0.5', help='Standard deviations of the growth rates.')
-        parser.add_argument('--zingg-bbox', type=lambda s: [float(item) for item in s.split(',')],
-                            default='0.01,1.0,0.01,1.0',
-                            help='Bounding box of the Zingg diagram to restrict shapes to (min_x,max_x,min_y,max_y).')
-        parser.add_argument('--distance-constraints', type=str, default=None,
-                            help='Constraints to apply to the crystal face distances. Must be in the format "111>012>0".')
-        parser.add_argument('--rotation-mode', type=str, default=ROTATION_MODE_AXISANGLE, choices=ROTATION_MODES,
-                            help='Which angles representation to use, "axisangle" or "quaternion".')
+        group.add_argument('--crystal-id', type=str, default='LGLUAC01',
+                           help='Crystal ID to generate images for.')
+        group.add_argument('--miller-indices', type=lambda s: [tuple(int(i) for i in item) for item in s.split(',')],
+                           default='101,021,010', help='Miller indices of the canonical distances.')
+        group.add_argument('--ratio-means', type=lambda s: [float(item) for item in s.split(',')],
+                           default='1,1,1,1,1,1', help='Means of the ratios of growth rates.')
+        group.add_argument('--ratio-stds', type=lambda s: [float(item) for item in s.split(',')],
+                           default='0.5,0.5,0.5,0.5,0.5,0.5', help='Standard deviations of the growth rates.')
+        group.add_argument('--zingg-bbox', type=lambda s: [float(item) for item in s.split(',')],
+                           default='0.01,1.0,0.01,1.0',
+                           help='Bounding box of the Zingg diagram to restrict shapes to (min_x,max_x,min_y,max_y).')
+        group.add_argument('--distance-constraints', type=str, default=None,
+                           help='Constraints to apply to the crystal face distances. Must be in the format "111>012>0".')
+        group.add_argument('--rotation-mode', type=str, default=ROTATION_MODE_AXISANGLE, choices=ROTATION_MODES,
+                           help='Which angles representation to use, "axisangle" or "quaternion".')
 
         # Crystal layout and rendering parameters
-        parser.add_argument('--centre-crystals', type=str2bool, default=False,
-                            help='Centre the crystals in the image.')
-        parser.add_argument('--crystal-area-min', type=float, default=0.05,
-                            help='Minimum area of the image covered by the crystal.')
-        parser.add_argument('--crystal-area-max', type=float, default=0.3,
-                            help='Maximum area of the image covered by the crystal.')
+        group.add_argument('--centre-crystals', type=str2bool, default=False,
+                           help='Centre the crystals in the image.')
+        group.add_argument('--crystal-area-min', type=float, default=0.05,
+                           help='Minimum area of the image covered by the crystal.')
+        group.add_argument('--crystal-area-max', type=float, default=0.3,
+                           help='Maximum area of the image covered by the crystal.')
         group.add_argument('--crystal-min-x', type=float, default=-10.0,
                            help='Minimum x-coordinate of the crystal origin.')
         group.add_argument('--crystal-max-x', type=float, default=10.0,
