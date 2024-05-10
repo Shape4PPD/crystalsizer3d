@@ -1,9 +1,12 @@
 import csv
+import fcntl
 import json
 import multiprocessing as mp
 import os
 import shutil
-from multiprocessing import Lock, Manager, Pool
+import time
+from datetime import datetime
+from multiprocessing import Pool
 from pathlib import Path
 from typing import List, Optional, Tuple
 
@@ -37,7 +40,8 @@ else:
 def _initialise_crystal(
         params: dict,
         dataset_args: DatasetSyntheticArgs,
-        scale_init: float = 1
+        scale_init: float = 1,
+        device: torch.device = torch.device('cpu'),
 ) -> Crystal:
     """
     Initialise a crystal object from the parameters.
@@ -82,16 +86,48 @@ def _render_batch(
         dataset_args: DatasetSyntheticArgs,
         root_dir: Path,
         output_dir: Optional[Path] = None,
-        lock: Optional[Lock] = None,
+        worker_id: Optional[str] = None,
+        stale_worker_timeout: int = 600,
 ):
     """
     Render a batch of crystals to images.
     """
     da = dataset_args
     seed = SEED + batch_idx
+    assert root_dir.exists(), f'Root dir does not exist! ({root_dir})'
+
+    # Check that no other script is processing the same idxs
+    timestamp = time.time()
+    comlog_path = root_dir / 'comlog.json'
+    comlog_key = f'{worker_id}_{batch_idx:06d}'
+    if not comlog_path.exists():
+        with open(comlog_path, 'w') as f:
+            json.dump({}, f)
+    with open(comlog_path, 'r+') as f:
+        fcntl.flock(f.fileno(), fcntl.LOCK_EX)
+        comlog = json.load(f)
+        if len(comlog) > 0:
+            # Prune any workers that have not been active recently
+            for k, worker in list(comlog.items()):
+                if timestamp - worker['last_active'] > stale_worker_timeout:
+                    logger.warning(f'Worker {k} has timed out. Removing from log.')
+                    del comlog[k]
+
+            # Filter out the idxs that are currently being processed
+            if len(comlog) > 0:
+                running_idxs = np.concatenate([worker['idxs'] for worker in comlog.values()])
+                param_batch = {idx: params for idx, params in param_batch.items() if idx not in running_idxs}
+        if len(param_batch) > 0:
+            comlog.update({comlog_key: {'last_active': timestamp, 'idxs': list(param_batch.keys())}})
+            f.seek(0)
+            json.dump(comlog, f, indent=4)
+            f.truncate()
+        fcntl.flock(f.fileno(), fcntl.LOCK_UN)
+    if len(param_batch) == 0:
+        logger.info(f'Batch {batch_idx + 1}/{n_batches}: No crystals to render.')
+        return
 
     # Sort directories
-    assert root_dir.exists(), f'Root dir does not exist! ({root_dir})'
     images_dir = root_dir / 'images'
     bumpmaps_dir = root_dir / 'bumpmaps'
     clean_images_dir = root_dir / 'images_clean'
@@ -101,10 +137,15 @@ def _render_batch(
     if da.generate_clean:
         clean_images_dir.mkdir(exist_ok=True)
     if output_dir is None:
-        output_dir = root_dir / 'tmp_output'
+        dirname = f'tmp_output_{worker_id}' if worker_id is not None else 'tmp_output'
+        output_dir = root_dir / dirname
     else:
-        output_dir = output_dir / f'tmp_{batch_idx:010d}'
+        dirname = f'tmp_{worker_id}_{batch_idx:010d}' if worker_id is not None else f'tmp_{batch_idx:010d}'
+        output_dir = output_dir / dirname
     output_dir.mkdir(parents=True, exist_ok=True)
+
+    # Set up the scene
+    scene = Scene(res=da.image_size, **da.to_dict())
 
     # Render
     logger.info(f'Batch {batch_idx + 1}/{n_batches}: Rendering {len(param_batch)} crystals to {output_dir}.')
@@ -116,32 +157,25 @@ def _render_batch(
             # Initialise the crystal
             crystal_params_i = crystal_params.copy()
             crystal_params_i['distances'] = list(params['distances'].values())
-            crystal = _initialise_crystal(crystal_params_i, da, scale_init)
+            scene.crystal = _initialise_crystal(crystal_params_i, da, scale_init, device=torch.device('cpu'))
 
             # Create the bubbles
             if da.max_bubbles > 0:
-                bubbles = make_bubbles(
+                scene.bubbles = make_bubbles(
                     n_bubbles=np.random.randint(da.min_bubbles, da.max_bubbles + 1),
                     min_roughness=da.bubbles_min_roughness,
                     max_roughness=da.bubbles_max_roughness,
                     min_ior=da.bubbles_min_ior,
                     max_ior=da.bubbles_max_ior,
-                    device=device,
+                    device=torch.device('cpu'),
                 )
             else:
-                bubbles = []
+                scene.bubbles = []
 
             # Sample the light radiance
-            light_radiance = np.random.uniform(da.light_radiance_min, da.light_radiance_max)
+            scene.light_radiance = np.random.uniform(da.light_radiance_min, da.light_radiance_max)
 
             # Create and render the scene
-            scene = Scene(
-                crystal=crystal,
-                bubbles=bubbles,
-                res=da.image_size,
-                light_radiance=light_radiance,
-                **da.to_dict(),
-            )
             with torch.no_grad():
                 scene.place_crystal(
                     min_area=da.crystal_area_min,
@@ -151,6 +185,7 @@ def _render_batch(
                     max_x=da.crystal_max_x,
                     min_y=da.crystal_min_y,
                     max_y=da.crystal_max_y,
+                    rebuild_scene=False,
                 )
                 scene.place_bubbles(
                     min_x=da.bubbles_min_x,
@@ -159,8 +194,13 @@ def _render_batch(
                     max_y=da.bubbles_max_y,
                     min_scale=da.bubbles_min_scale,
                     max_scale=da.bubbles_max_scale,
+                    rebuild_scene=False,
                 )
             scale_init = scene.crystal.scale.item()
+            scene.crystal.to(device)
+            for bubble in scene.bubbles:
+                bubble.to(device)
+            scene.build_mi_scene()
             img = scene.render(seed=seed + idx)
             img = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)  # todo: do we need this?
             cv2.imwrite(str(output_dir / params['image']), img)
@@ -177,7 +217,7 @@ def _render_batch(
             # Save the defect bumpmap
             if da.crystal_bumpmap_dim > -1:
                 bumpmap_path = output_dir / f'{params["image"][:-4]}.npz'
-                np.savez_compressed(bumpmap_path, data=to_numpy(crystal.bumpmap))
+                np.savez_compressed(bumpmap_path, data=to_numpy(scene.crystal.bumpmap))
 
             # Save a clean version of the image without bubbles and no bumpmap if required
             if da.generate_clean:
@@ -189,8 +229,18 @@ def _render_batch(
         except RenderError as e:
             logger.warning(f'Rendering failed! {e}')
             logger.info(f'Adding idx={params["image"]} details to {str(output_dir.parent / "errored.json")}')
-            append_json(root_dir / 'errored.json', {params['image']: str(e)}, lock)
+            append_json(root_dir / 'errored.json', {params['image']: str(e)})
             raise e
+
+        # Update the comlog to show that the worker is still active
+        with open(comlog_path, 'r+') as f:
+            fcntl.flock(f.fileno(), fcntl.LOCK_EX)
+            comlog = json.load(f)
+            comlog[comlog_key]['last_active'] = time.time()
+            f.seek(0)
+            json.dump(comlog, f, indent=4)
+            f.truncate()
+            fcntl.flock(f.fileno(), fcntl.LOCK_UN)
 
     logger.info(f'Batch {batch_idx + 1}/{n_batches}: Collating results.')
 
@@ -210,8 +260,18 @@ def _render_batch(
         img.rename(clean_images_dir / (img.stem + '.png'))
 
     # Write the combined segmentations and parameters to json files
-    append_json(root_dir / 'segmentations.json', segmentations, lock)
-    append_json(root_dir / 'rendering_parameters.json', rendering_params, lock)
+    append_json(root_dir / 'segmentations.json', segmentations)
+    append_json(root_dir / 'rendering_parameters.json', rendering_params)
+
+    # Update the comlog
+    with open(comlog_path, 'r+') as f:
+        fcntl.flock(f.fileno(), fcntl.LOCK_EX)
+        comlog = json.load(f)
+        del comlog[comlog_key]
+        f.seek(0)
+        json.dump(comlog, f, indent=4)
+        f.truncate()
+        fcntl.flock(f.fileno(), fcntl.LOCK_UN)
 
     # Clean up
     shutil.rmtree(output_dir)
@@ -329,6 +389,7 @@ class CrystalRenderer:
 
         # Make batches of entries that need rendering
         idxs = [idx for idx in self.data.keys() if not self.data[idx]['rendered']]
+        np.random.shuffle(idxs)
         batches = []
         for i in range(0, len(idxs), bs):
             batches.append({idx: self.data[idx] for idx in idxs[i:i + bs]})
@@ -343,6 +404,7 @@ class CrystalRenderer:
             'dataset_args': self.dataset_args,
             'root_dir': self.root_dir,
             'n_batches': len(batches),
+            'worker_id': datetime.now().strftime('%f'),
         }
 
         if self.n_workers > 1:
@@ -356,9 +418,7 @@ class CrystalRenderer:
             output_dir.mkdir(exist_ok=True)
 
             # Create process arguments
-            manager = Manager()
-            lock = manager.Lock()
-            shared_args = {**shared_args, 'output_dir': output_dir, 'lock': lock}
+            shared_args = {**shared_args, 'output_dir': output_dir}
             args = []
             for i, param_batch in enumerate(batches):
                 args.append({'param_batch': param_batch, 'batch_idx': i, **shared_args})
@@ -449,3 +509,15 @@ class CrystalRenderer:
         fig.tight_layout()
         plt.savefig(self.images_dir.parent / f'segmentation_example_{img0_path.stem}.png')
         plt.close(fig)
+
+    def is_active(self):
+        """
+        Check if there are any workers still actively processing this dataset.
+        """
+        comlog_path = self.root_dir / 'comlog.json'
+        if comlog_path.exists():
+            with open(comlog_path, 'r') as f:
+                comlog = json.load(f)
+            if len(comlog) > 0:
+                return True
+        return False

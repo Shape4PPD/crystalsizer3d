@@ -90,7 +90,7 @@ class Scene:
         self.cell_z_positions = cell_z_positions
         self.cell_surface_scale = cell_surface_scale
 
-        self._build_mi_scene()
+        self.build_mi_scene()
 
     def to_dict(self) -> dict:
         """
@@ -215,7 +215,7 @@ class Scene:
             }
         return cell
 
-    def _build_mi_scene(self):
+    def build_mi_scene(self):
         """
         Build the Mitsuba scene.
         """
@@ -269,6 +269,7 @@ class Scene:
             min_y: float = -50.,
             max_y: float = 50.,
             max_placement_attempts: int = 1000,
+            rebuild_scene: bool = True,
     ):
         """
         Place the crystal in the scene.
@@ -325,7 +326,8 @@ class Scene:
 
         # Rebuild the scene with the new crystal position
         self.crystal.build_mesh()
-        self._build_mi_scene()
+        if rebuild_scene:
+            self.build_mi_scene()
 
     def _optimise_crystal_placement(
             self,
@@ -408,6 +410,7 @@ class Scene:
             max_y: float,
             min_scale: float,
             max_scale: float,
+            rebuild_scene: bool = True,
     ):
         """
         Place the bubbles in the scene.
@@ -492,7 +495,8 @@ class Scene:
             bubble.to(device_og)
 
         # Rebuild the scene with the new bubble positions
-        self._build_mi_scene()
+        if rebuild_scene:
+            self.build_mi_scene()
 
     def clear_bubbles_and_bumpmap(self):
         """
@@ -502,4 +506,4 @@ class Scene:
         if self.crystal is not None:
             self.crystal.use_bumpmap = False
             self.crystal.bumpmap = None
-        self._build_mi_scene()
+        self.build_mi_scene()

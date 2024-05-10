@@ -276,6 +276,11 @@ def generate_dataset():
     )
     renderer.render()
 
+    # Check if there are any other workers still active
+    if renderer.is_active():
+        logger.warning('Found other workers still active. Skipping validation and annotation.')
+        exit()
+
     # Annotate a single image for reference
     if hasattr(renderer, 'annotate_image'):
         renderer.annotate_image()
@@ -387,6 +392,11 @@ def resume(
             return
     renderer.render()
 
+    # Check if there are any other workers still active
+    if renderer.is_active():
+        logger.warning('Found other workers still active. Skipping validation and annotation.')
+        exit()
+
     # Annotate a single image for reference
     renderer.annotate_image()
 
@@ -410,5 +420,5 @@ if __name__ == '__main__':
 
     # -- Use to fix a broken run --
     # resume(
-    #     save_dir=LOGS_PATH / '20240502_1355',
+    #     save_dir=LOGS_PATH / '20240510_1152',
     # )

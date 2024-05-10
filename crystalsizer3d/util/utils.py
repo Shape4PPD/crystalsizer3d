@@ -1,4 +1,5 @@
 import distutils.util
+import fcntl
 import hashlib
 import json
 import os
@@ -6,7 +7,6 @@ import random
 from argparse import Namespace
 from json import JSONEncoder
 from math import log2
-from multiprocessing import Lock
 from pathlib import Path
 from typing import List, Optional, Union
 
@@ -130,22 +130,21 @@ def to_rgb(c: Union[str, np.ndarray]):
     return c
 
 
-def append_json(file_path: Path, new_data: dict, lock: Optional[Lock] = None):
+def append_json(file_path: Path, new_data: dict):
     """
     Append new data to a JSON file.
     """
-    if lock is not None:
-        with lock:
-            append_json(file_path, new_data)
-        return
     if not file_path.exists():
-        data = {}
-    else:
-        with open(file_path, 'r') as f:
-            data = json.load(f)
-    if len(data) > 0:
-        for k in new_data.keys():
-            assert k not in data, f'Key "{k}" already exists in {file_path}'
-    data.update(new_data)
-    with open(file_path, 'w') as f:
+        with open(file_path, 'w') as f:
+            json.dump({}, f)
+    with open(file_path, 'r+') as f:
+        fcntl.flock(f, fcntl.LOCK_EX)
+        data = json.load(f)
+        if len(data) > 0:
+            for k in new_data.keys():
+                if k in data and hash_data(data[k]) != hash_data(new_data[k]):
+                    raise ValueError('Key "{k}" already exists in {file_path} and is not the same!')
+        data.update(new_data)
+        f.seek(0)
         json.dump(data, f, indent=4)
+        fcntl.flock(f.fileno(), fcntl.LOCK_UN)
