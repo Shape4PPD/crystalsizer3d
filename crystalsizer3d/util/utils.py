@@ -143,7 +143,7 @@ def append_json(file_path: Path, new_data: dict):
         if len(data) > 0:
             for k in new_data.keys():
                 if k in data and hash_data(data[k]) != hash_data(new_data[k]):
-                    raise ValueError('Key "{k}" already exists in {file_path} and is not the same!')
+                    raise ValueError(f'Key "{k}" already exists in {file_path} and is not the same!')
         data.update(new_data)
         f.seek(0)
         json.dump(data, f, indent=4)
