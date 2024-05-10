@@ -147,4 +147,5 @@ def append_json(file_path: Path, new_data: dict):
         data.update(new_data)
         f.seek(0)
         json.dump(data, f, indent=4)
+        f.truncate()
         fcntl.flock(f.fileno(), fcntl.LOCK_UN)

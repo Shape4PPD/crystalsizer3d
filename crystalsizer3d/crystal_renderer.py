@@ -524,6 +524,6 @@ class CrystalRenderer:
         if comlog_path.exists():
             with open(comlog_path, 'r') as f:
                 comlog = json.load(f)
-            if len(comlog) > 0:
+            if len(comlog['workers']) > 0:
                 return True
         return False
