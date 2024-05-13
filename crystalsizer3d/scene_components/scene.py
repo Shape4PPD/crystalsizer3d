@@ -304,7 +304,7 @@ class Scene:
                 self.crystal.rotation.data = normalise(torch.rand(4) * 2 * math.pi)
 
             # Optimise the crystal placement
-            is_placed = self._optimise_crystal_placement(target_area)
+            is_placed = self._optimise_crystal_placement(target_area, centre_crystal)
 
         # Put crystal back on the original device
         self.crystal.to(device_og)
@@ -332,7 +332,8 @@ class Scene:
 
     def _optimise_crystal_placement(
             self,
-            target_area: float
+            target_area: float,
+            centre_crystal: bool = False,
     ):
         """
         Optimise the crystal placement.
@@ -352,6 +353,8 @@ class Scene:
             z_adj = vertices_new[:, 2].min() + self.cell_z_positions[1]
             vertices_new[:, 2] -= z_adj
             origin_new[2] -= z_adj
+            if centre_crystal:
+                origin_new[:2].zero_()
 
         def _in_bounds(img_points):
             z_min, z_max = vertices_new[:, 2].min(), vertices_new[:, 2].max()
@@ -381,12 +384,17 @@ class Scene:
         assert _in_bounds(uv_points)
 
         # Set up parameters and bounds
-        x0 = np.array([scale_new, *origin_new[:2]])
-        bounds = [[1e-3, 1e2], ] + [[-100, 100]] * 2
+        if centre_crystal:
+            x0 = np.array([scale_new,])
+            bounds = [[1e-3, 1e2], ]
+        else:
+            x0 = np.array([scale_new, *origin_new[:2]])
+            bounds = [[1e-3, 1e2], ] + [[-100, 100]] * 2
 
         def _loss(x):
             scale_new.data = torch.tensor(x[0], dtype=self.crystal.scale.dtype)
-            origin_new.data[:2] = torch.tensor([x[1], x[2]], dtype=self.crystal.origin.dtype)
+            if not centre_crystal:
+                origin_new.data[:2] = torch.tensor([x[1], x[2]], dtype=self.crystal.origin.dtype)
             _update_vertices()
             uv_points = project_to_image(self.mi_scene, vertices_new)
             projected_area = _projected_area(uv_points)
