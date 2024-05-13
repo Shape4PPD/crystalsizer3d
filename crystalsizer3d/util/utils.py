@@ -130,7 +130,7 @@ def to_rgb(c: Union[str, np.ndarray]):
     return c
 
 
-def append_json(file_path: Path, new_data: dict, timeout: int = 30):
+def append_json(file_path: Path, new_data: dict, timeout: int = 60):
     """
     Append new data to a JSON file.
     """

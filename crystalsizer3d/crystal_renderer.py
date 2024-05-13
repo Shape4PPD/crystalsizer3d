@@ -99,7 +99,7 @@ def _render_batch(
     timestamp = time.time()
     comlog_path = root_dir / 'comlog.json'
     comlog_lock_path = comlog_path.with_suffix('.lock')
-    comlog_lock = FileLock(comlog_lock_path, timeout=30)
+    comlog_lock = FileLock(comlog_lock_path, timeout=60)
     comlog_key = f'{worker_id}_{batch_idx:06d}'
     comlog_lock.acquire()
     if not comlog_path.exists():
@@ -337,7 +337,7 @@ class CrystalRenderer:
         # Load rendering parameters if they exist
         if self.rendering_params_path.exists():
             lock_path = self.rendering_params_path.with_suffix('.lock')
-            lock = FileLock(lock_path, timeout=30)
+            lock = FileLock(lock_path, timeout=60)
             lock.acquire()
             with open(self.rendering_params_path, 'r') as f:
                 self.rendering_params = json.load(f)
