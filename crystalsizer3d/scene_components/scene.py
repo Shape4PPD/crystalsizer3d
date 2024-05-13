@@ -337,15 +337,23 @@ class Scene:
         Optimise the crystal placement.
         """
         cell_height = self.cell_z_positions[2] - self.cell_z_positions[1]
+        self.crystal.build_mesh(update_uv_map=False)
+        vertices_og = self.crystal.vertices.clone().detach()
+        vertices_new = vertices_og.clone()
+        origin_og = self.crystal.origin.clone().detach()
+        origin_new = origin_og.clone()
+        scale_og = self.crystal.scale.clone().detach()
+        scale_new = scale_og.clone()
 
-        def _update_mesh():
-            self.crystal.build_mesh(update_uv_map=False)
-            z_adj = self.crystal.vertices[:, 2].min() + self.cell_z_positions[1]
-            self.crystal.vertices[:, 2] -= z_adj
-            self.crystal.origin.data[2] -= z_adj
+        def _update_vertices():
+            nonlocal vertices_new, origin_new
+            vertices_new = (vertices_og - origin_og) / scale_og * scale_new + origin_new
+            z_adj = vertices_new[:, 2].min() + self.cell_z_positions[1]
+            vertices_new[:, 2] -= z_adj
+            origin_new[2] -= z_adj
 
         def _in_bounds(img_points):
-            z_min, z_max = self.crystal.vertices[:, 2].min(), self.crystal.vertices[:, 2].max()
+            z_min, z_max = vertices_new[:, 2].min(), vertices_new[:, 2].max()
             return not (img_points[:, 0].min() < 0 or img_points[:, 0].max() > self.res or
                         img_points[:, 1].min() < 0 or img_points[:, 1].max() > self.res or
                         z_max - z_min > cell_height)
@@ -359,27 +367,27 @@ class Scene:
         oob = True
         n_fails = 0
         while oob:
-            _update_mesh()
-            uv_points = self.get_crystal_image_coords()
+            _update_vertices()
+            uv_points = project_to_image(self.mi_scene, vertices_new)
             if _in_bounds(uv_points):
                 oob = False
             else:
-                self.crystal.scale.data *= 0.9
-                self.crystal.origin.data[:2] *= 0.8
+                scale_new *= 0.9
+                origin_new[:2] *= 0.8
                 n_fails += 1
                 if n_fails > 100:
                     return False
         assert _in_bounds(uv_points)
 
         # Set up parameters and bounds
-        x0 = np.array([self.crystal.scale.item(), *self.crystal.origin[:2]])
-        bounds = [[0, 100], ] + [[-100, 100]] * 2
+        x0 = np.array([scale_new, *origin_new[:2]])
+        bounds = [[1e-3, 1e2], ] + [[-100, 100]] * 2
 
         def _loss(x):
-            self.crystal.scale.data = torch.tensor(x[0], dtype=self.crystal.scale.dtype)
-            self.crystal.origin.data[:2] = torch.tensor([x[1], x[2]], dtype=self.crystal.origin.dtype)
-            _update_mesh()
-            uv_points = self.get_crystal_image_coords()
+            scale_new.data = torch.tensor(x[0], dtype=self.crystal.scale.dtype)
+            origin_new.data[:2] = torch.tensor([x[1], x[2]], dtype=self.crystal.origin.dtype)
+            _update_vertices()
+            uv_points = project_to_image(self.mi_scene, vertices_new)
             projected_area = _projected_area(uv_points)
             loss_area = (projected_area - target_area)**2
             if not _in_bounds(uv_points):
@@ -399,6 +407,8 @@ class Scene:
         )
 
         if res.success and res.fun < 1e-3:
+            self.crystal.scale.data = scale_new
+            self.crystal.origin.data = origin_new
             return True
         return False
 
