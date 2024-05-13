@@ -10,6 +10,7 @@ import cv2
 import numpy as np
 import yaml
 from PIL import Image
+from filelock import SoftFileLock as FileLock
 
 from crystalsizer3d import LOGS_PATH, N_WORKERS, START_TIMESTAMP, logger
 from crystalsizer3d.args.dataset_synthetic_args import DatasetSyntheticArgs
@@ -418,6 +419,23 @@ def resume(
         quiet_render=True,
         n_workers=runtime_args.n_renderer_workers
     )
+
+    # Check if the segmentations file needs fixing
+    logger.info('Checking segmentations.')
+    seg_path = renderer.root_dir / 'segmentations.json'
+    if seg_path.exists():
+        lock_path = renderer.root_dir / 'comlog.lock'
+        lock = FileLock(lock_path, timeout=30)
+        lock.acquire()
+        with open(seg_path, 'r') as f:
+            segmentations = json.load(f)
+        for k in segmentations.keys():
+            if k not in renderer.rendering_params:
+                logger.warning(f'Found segmentation for missing image: {k}. Removing...')
+                del segmentations[k]
+        with open(seg_path, 'w') as f:
+            json.dump(segmentations, f)
+        lock.release()
 
     # If it was originally made in parallel, make sure the fix is in parallel too
     tmp_dir = save_dir / 'tmp_output'
