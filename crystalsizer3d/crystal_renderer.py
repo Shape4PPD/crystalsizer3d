@@ -337,8 +337,12 @@ class CrystalRenderer:
 
         # Load rendering parameters if they exist
         if self.rendering_params_path.exists():
+            lock_path = self.rendering_params_path.with_suffix('.lock')
+            lock = FileLock(lock_path, timeout=30)
+            lock.acquire()
             with open(self.rendering_params_path, 'r') as f:
                 self.rendering_params = json.load(f)
+            lock.release()
         else:
             self.rendering_params = {}
 
