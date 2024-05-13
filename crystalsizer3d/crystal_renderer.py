@@ -16,7 +16,7 @@ import torch
 from PIL import Image
 from filelock import SoftFileLock as FileLock
 
-from crystalsizer3d import N_WORKERS, USE_CUDA, logger
+from crystalsizer3d import USE_CUDA, logger
 from crystalsizer3d.args.dataset_synthetic_args import DatasetSyntheticArgs
 from crystalsizer3d.crystal import Crystal
 from crystalsizer3d.csd_proxy import CSDProxy
@@ -86,7 +86,7 @@ def _render_batch(
         root_dir: Path,
         output_dir: Optional[Path] = None,
         worker_id: Optional[str] = None,
-        stale_worker_timeout: int = 600,
+        stale_worker_timeout: int = 1200,
 ):
     """
     Render a batch of crystals to images.
@@ -241,13 +241,15 @@ def _render_batch(
             raise e
 
         # Update the comlog to show that the worker is still active
-        comlog_lock.acquire()
-        with open(comlog_path, 'r') as f:
-            comlog = json.load(f)
-        comlog['workers'][comlog_key]['last_active'] = time.time()
-        with open(comlog_path, 'w') as f:
-            json.dump(comlog, f, indent=4)
-        comlog_lock.release()
+        timestamp = time.time()
+        if timestamp - comlog['workers'][comlog_key]['last_active'] > stale_worker_timeout / 2:
+            comlog_lock.acquire()
+            with open(comlog_path, 'r') as f:
+                comlog = json.load(f)
+            comlog['workers'][comlog_key]['last_active'] = timestamp
+            with open(comlog_path, 'w') as f:
+                json.dump(comlog, f, indent=4)
+            comlog_lock.release()
 
     # Collate results
     logger.info(f'Batch {batch_idx + 1}/{n_batches}: Collating results.')
