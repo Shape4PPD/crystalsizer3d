@@ -54,7 +54,13 @@ def plot_image(ax: Axes, title: str, img: np.ndarray):
     Plot an image on the axis.
     """
     ax.set_title(title)
-    ax.imshow(img, cmap='gray', vmin=0, vmax=1)
+    img = img.squeeze()
+    if img.ndim == 2:
+        ax.imshow(img, cmap='gray', vmin=0, vmax=1)
+    else:
+        if img.shape[0] == 3:
+            img = img.transpose(1, 2, 0)
+        ax.imshow(img)
     ax.axis('off')
 
 

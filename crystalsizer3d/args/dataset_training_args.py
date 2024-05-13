@@ -13,6 +13,7 @@ class DatasetTrainingArgs(BaseArgs):
             dataset_path: Union[str, Path],
             check_image_paths: bool = False,
             train_test_split: float = 0.8,
+            use_clean_images: bool = False,
             augment: bool = False,
             train_zingg: bool = True,
             train_distances: bool = True,
@@ -35,6 +36,7 @@ class DatasetTrainingArgs(BaseArgs):
         self.dataset_path = dataset_path
         self.check_image_paths = check_image_paths
         self.train_test_split = train_test_split
+        self.use_clean_images = use_clean_images
         self.augment = augment
         self.train_zingg = train_zingg
         self.train_distances = train_distances
@@ -66,6 +68,8 @@ class DatasetTrainingArgs(BaseArgs):
                            help='Check that the image paths exist for all images in dataset (slow for large datasets).')
         group.add_argument('--train-test-split', type=float, default=0.8,
                            help='Train/test split.')
+        group.add_argument('--use-clean-images', type=str2bool, default=False,
+                           help='Use clean images (no bubbles or defects).')
         group.add_argument('--augment', type=str2bool, default=False,
                            help='Apply data augmentation.')
         group.add_argument('--train-zingg', type=str2bool, default=True,

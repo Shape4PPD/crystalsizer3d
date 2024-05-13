@@ -180,6 +180,11 @@ class Dataset:
                         if self.ds_args.check_image_paths:
                             assert image_path.exists(), f'Image path does not exist: {image_path}'
                         item['image'] = image_path
+                        if self.dataset_args.generate_clean:
+                            clean_image_path = self.path / 'images_clean' / row['image']
+                            if self.ds_args.check_image_paths:
+                                assert clean_image_path.exists(), f'Clean image path does not exist: {clean_image_path}'
+                            item['image_clean'] = clean_image_path
                     elif header[0] == 'd':
                         item[header] = float(row[header])
                     elif header in ['si', 'il']:
@@ -326,7 +331,10 @@ class Dataset:
         r_params = item['rendering_parameters']
 
         # Load the image
-        img = Image.open(item['image']).convert('L')
+        if self.ds_args.use_clean_images:
+            img = Image.open(item['image_clean'])
+        else:
+            img = Image.open(item['image'])
 
         def z_transform(x, k):
             return (x - self.ds_stats[k]['mean']) / np.sqrt(self.ds_stats[k]['var'])
