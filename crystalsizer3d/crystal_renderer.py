@@ -411,7 +411,7 @@ class CrystalRenderer:
             'dataset_args': self.dataset_args,
             'root_dir': self.root_dir,
             'n_batches': len(batches),
-            'worker_id': datetime.now().strftime('%f'),
+            'worker_id': str(os.getpid()),
         }
 
         if self.n_workers > 1:
