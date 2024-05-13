@@ -271,13 +271,13 @@ def _render_batch(
 
     # Update the comlog
     comlog_lock.acquire()
-    with open(comlog_path, 'r+') as f:
+    with open(comlog_path, 'r') as f:
         comlog = json.load(f)
-        comlog['completed_idxs'].extend(list(param_batch.keys()))
-        del comlog['workers'][comlog_key]
-        f.seek(0)
+    comlog['completed_idxs'].extend(list(param_batch.keys()))
+    comlog['completed_idxs'] = sorted(comlog['completed_idxs'])
+    del comlog['workers'][comlog_key]
+    with open(comlog_path, 'w') as f:
         json.dump(comlog, f, indent=4)
-        f.truncate()
     comlog_lock.release()
 
     # Clean up
