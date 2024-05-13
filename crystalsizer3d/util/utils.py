@@ -12,7 +12,7 @@ from typing import List, Optional, Union
 import matplotlib.colors as mcolors
 import numpy as np
 import torch
-from filelock import FileLock
+from filelock import SoftFileLock as FileLock
 from matplotlib.axes import Axes
 
 from crystalsizer3d import logger

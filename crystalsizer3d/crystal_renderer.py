@@ -4,7 +4,6 @@ import multiprocessing as mp
 import os
 import shutil
 import time
-from datetime import datetime
 from multiprocessing import Pool
 from pathlib import Path
 from typing import List, Optional, Tuple
@@ -15,7 +14,7 @@ import mitsuba as mi
 import numpy as np
 import torch
 from PIL import Image
-from filelock import FileLock
+from filelock import SoftFileLock as FileLock
 
 from crystalsizer3d import N_WORKERS, USE_CUDA, logger
 from crystalsizer3d.args.dataset_synthetic_args import DatasetSyntheticArgs
@@ -104,6 +103,7 @@ def _render_batch(
     comlog_key = f'{worker_id}_{batch_idx:06d}'
     comlog_lock.acquire()
     if not comlog_path.exists():
+        logger.info(f'Making comlog file at {comlog_path}.')
         with open(comlog_path, 'w') as f:
             json.dump({'workers': {}, 'completed_idxs': []}, f)
     with open(comlog_path, 'r') as f:
@@ -126,6 +126,7 @@ def _render_batch(
 
     # Add the worker to the comlog
     if len(param_batch) > 0:
+        logger.info(f'Adding worker details to comlog with key {comlog_key}.')
         comlog['workers'].update({comlog_key: {'last_active': timestamp, 'idxs': list(param_batch.keys())}})
         with open(comlog_path, 'w') as f:
             json.dump(comlog, f, indent=4)
