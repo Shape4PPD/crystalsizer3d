@@ -2,7 +2,7 @@ import csv
 import json
 import shutil
 import time
-from argparse import ArgumentParser
+from argparse import ArgumentParser, Namespace
 from pathlib import Path
 from typing import Tuple
 
@@ -11,7 +11,7 @@ import numpy as np
 import yaml
 from PIL import Image
 
-from crystalsizer3d import LOGS_PATH, START_TIMESTAMP, logger
+from crystalsizer3d import LOGS_PATH, N_WORKERS, START_TIMESTAMP, logger
 from crystalsizer3d.args.dataset_synthetic_args import DatasetSyntheticArgs
 from crystalsizer3d.crystal_generator import CrystalGenerator
 from crystalsizer3d.crystal_renderer import CrystalRenderer
@@ -26,7 +26,7 @@ PARAMETER_HEADERS = [
 ]
 
 
-def parse_args(printout: bool = True) -> Tuple[DatasetSyntheticArgs, str, int]:
+def parse_args(printout: bool = True) -> Tuple[DatasetSyntheticArgs, Namespace]:
     """
     Parse command line arguments and build parameter holders.
     """
@@ -36,17 +36,26 @@ def parse_args(printout: bool = True) -> Tuple[DatasetSyntheticArgs, str, int]:
                         help='Set a dataset name to use for setting multiple workers on the same dataset.')
     parser.add_argument('--seed', type=int, default=1,
                         help='Set the random seed for the dataset generation.')
+    parser.add_argument('--n-generator-workers', type=int, default=N_WORKERS,
+                        help='Set the number of workers to use for generating crystals.')
+    parser.add_argument('--n-renderer-workers', type=int, default=1,
+                        help='Set the number of workers to use for rendering images.')
 
     # Do the parsing
     args = parser.parse_args()
     if printout:
         print_args(args)
 
-    # Instantiate the parameter holder
+    # Instantiate the parameter holders
     dataset_args = DatasetSyntheticArgs.from_args(args)
-    ds_name = args.ds_name if args.ds_name is not None else START_TIMESTAMP
+    runtime_args = Namespace(
+        ds_name=args.ds_name if args.ds_name is not None else START_TIMESTAMP,
+        seed=args.seed,
+        n_generator_workers=args.n_generator_workers,
+        n_renderer_workers=args.n_renderer_workers
+    )
 
-    return dataset_args, ds_name, args.seed
+    return dataset_args, runtime_args
 
 
 def validate(
@@ -209,11 +218,11 @@ def generate_dataset():
     """
     Generate a dataset of synthetic crystal images.
     """
-    dataset_args, ds_name, seed = parse_args()
-    set_seed(seed)
-    save_dir = LOGS_PATH / ds_name
+    dataset_args, runtime_args = parse_args()
+    set_seed(runtime_args.seed)
+    save_dir = LOGS_PATH / runtime_args.ds_name
     if save_dir.exists():
-        return resume(save_dir)
+        return resume(save_dir, runtime_args)
 
     # Set a timer going to record how long this takes
     start_time = time.time()
@@ -249,6 +258,7 @@ def generate_dataset():
         ratio_stds=dataset_args.ratio_stds,
         zingg_bbox=dataset_args.zingg_bbox,
         constraints=dataset_args.distance_constraints,
+        n_workers=runtime_args.n_generator_workers
     )
 
     # Generate randomised crystals
@@ -281,7 +291,8 @@ def generate_dataset():
     renderer = CrystalRenderer(
         param_path=param_path,
         dataset_args=dataset_args,
-        quiet_render=False
+        quiet_render=False,
+        n_workers=runtime_args.n_renderer_workers
     )
     renderer.render()
 
@@ -304,6 +315,7 @@ def generate_dataset():
 
 def resume(
         save_dir: Path,
+        runtime_args: Namespace,
         revalidate: bool = True,
         attempt: int = 1,
         max_attempts: int = 10,
@@ -331,7 +343,7 @@ def resume(
                            f'Sleeping for {sleep_time}s ({attempt}/{max_attempts}). '
                            f'Error: {e}')
             time.sleep(sleep_time)
-            return resume(save_dir, revalidate, attempt + 1, max_attempts, sleep_time)
+            return resume(save_dir, runtime_args, revalidate, attempt + 1, max_attempts, sleep_time)
         raise RuntimeError(f'Failed to resume dataset: {e}')
 
     # Set a timer going to record how long this takes
@@ -352,6 +364,7 @@ def resume(
             ratio_stds=dataset_args.ratio_stds,
             zingg_bbox=dataset_args.zingg_bbox,
             constraints=dataset_args.distance_constraints,
+            n_workers=runtime_args.n_generator_workers
         )
         crystals = generator.generate_crystals(num=len(errored))
         hkls = [''.join(str(i) for i in k) for k in generator.distances.keys()]
@@ -402,7 +415,8 @@ def resume(
     renderer = CrystalRenderer(
         param_path=save_dir / 'parameters.csv',
         dataset_args=dataset_args,
-        quiet_render=True
+        quiet_render=True,
+        n_workers=runtime_args.n_renderer_workers
     )
 
     # If it was originally made in parallel, make sure the fix is in parallel too

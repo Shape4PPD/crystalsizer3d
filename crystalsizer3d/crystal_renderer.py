@@ -249,6 +249,7 @@ def _render_batch(
             json.dump(comlog, f, indent=4)
         comlog_lock.release()
 
+    # Collate results
     logger.info(f'Batch {batch_idx + 1}/{n_batches}: Collating results.')
 
     # Move images into the images directory
@@ -267,11 +268,11 @@ def _render_batch(
         img.rename(clean_images_dir / (img.stem + '.png'))
 
     # Write the combined segmentations and parameters to json files
+    comlog_lock.acquire()
     append_json(root_dir / 'segmentations.json', segmentations)
     append_json(root_dir / 'rendering_parameters.json', rendering_params)
 
     # Update the comlog
-    comlog_lock.acquire()
     with open(comlog_path, 'r') as f:
         comlog = json.load(f)
     comlog['completed_idxs'].extend(list(param_batch.keys()))
@@ -294,14 +295,12 @@ class CrystalRenderer:
             self,
             param_path: Path,
             dataset_args: DatasetSyntheticArgs,
-            quiet_render: bool = False
+            quiet_render: bool = False,
+            n_workers: int = 1
     ):
         self.dataset_args = dataset_args
         self.quiet_render = quiet_render
-        if N_WORKERS > 0:
-            self.n_workers = N_WORKERS
-        else:
-            self.n_workers = len(os.sched_getaffinity(0))
+        self.n_workers = n_workers
         self.param_path = param_path
         self.root_dir = self.param_path.parent
         self.images_dir = self.root_dir / 'images'
