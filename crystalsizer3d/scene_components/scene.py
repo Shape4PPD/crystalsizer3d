@@ -321,6 +321,7 @@ class Scene:
                     min_y=min_y,
                     max_y=max_y,
                     max_placement_attempts=max_placement_attempts,
+                    rebuild_scene=rebuild_scene,
                 )
             raise RenderError('Failed to place crystal!')
 
