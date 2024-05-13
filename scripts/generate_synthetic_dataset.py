@@ -429,7 +429,8 @@ def resume(
         lock.acquire()
         with open(seg_path, 'r') as f:
             segmentations = json.load(f)
-        for k in segmentations.keys():
+        keys = list(segmentations.keys())
+        for k in keys:
             if k not in renderer.rendering_params:
                 logger.warning(f'Found segmentation for missing image: {k}. Removing...')
                 del segmentations[k]
