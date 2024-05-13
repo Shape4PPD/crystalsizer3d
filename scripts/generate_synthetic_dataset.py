@@ -167,8 +167,8 @@ def validate(
             # Build the crystal
             logger.info('Re-generating crystal.')
             ref_idxs = [''.join(str(i) for i in k) for k in generator.miller_indices]
-            rel_distances = np.array([example[f'd{i}_{k}'] for i, k in enumerate(ref_idxs)])
-            _, z, m = generator.generate_crystal(rel_distances=rel_distances)
+            distances = np.array([example[f'd{i}_{k}'] for i, k in enumerate(ref_idxs)])
+            _, z, m = generator.generate_crystal(distances=distances)
 
             # Render the crystal
             img = renderer.render_from_parameters(r_params)

@@ -205,7 +205,7 @@ def _build_crystal_csd(
     max_attempts = 10
     while True:
         try:
-            _, _, mesh = manager.crystal_generator.generate_crystal(rel_distances=distances, validate=False)
+            _, _, mesh = manager.crystal_generator.generate_crystal(distances=distances)
             break
         except AssertionError as e:
             if build_attempts < max_attempts and str(e) == 'Mesh is not watertight!':

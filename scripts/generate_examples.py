@@ -100,7 +100,7 @@ def _build_crystal(
         growth_rates = manager.crystal_generator.get_expanded_growth_rates(distances)
         morph = VisualHabitMorphology.from_growth_rates(manager.crystal_generator.crystal,
                                                         growth_rates)
-        _, _, mesh = manager.crystal_generator.generate_crystal(rel_distances=distances,
+        _, _, mesh = manager.crystal_generator.generate_crystal(distances=distances,
                                                                 validate=False)
         return morph, mesh
     except Exception as e:
@@ -401,8 +401,7 @@ def _make_parameter_vector(
         dists /= dists.max()
         try:
             rel_rates2, zingg, _ = manager.crystal_generator.generate_crystal(
-                rel_distances=to_numpy(dists).astype(float),
-                validate=False
+                distances=to_numpy(dists).astype(float),
             )
             dists = torch.from_numpy(rel_rates2)
             if ds_args.train_zingg:

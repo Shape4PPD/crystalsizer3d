@@ -211,6 +211,34 @@ class CrystalGenerator:
 
         return crystals
 
+    def generate_crystal(
+            self,
+            distances: List[float],
+    ) -> Tuple[np.ndarray, np.ndarray, Trimesh]:
+        """
+        Generate a randomised crystal.
+        """
+        crystal = Crystal(
+            lattice_unit_cell=self.lattice_unit_cell,
+            lattice_angles=self.lattice_angles,
+            miller_indices=self.miller_indices,
+            point_group_symbol=self.point_group_symbol,
+            distances=torch.from_numpy(distances).to(torch.float32)
+        )
+        v, f = to_numpy(crystal.mesh_vertices), to_numpy(crystal.mesh_faces)
+        mesh = Trimesh(vertices=v, faces=f, process=True, validate=True)
+        mesh.fix_normals()
+
+        # Calculate the position on the Zingg diagram
+        bbox_lengths = sorted(mesh.bounding_box_oriented.primitive.extents)
+        si = bbox_lengths[0] / bbox_lengths[1]  # Small/Intermediate
+        il = bbox_lengths[1] / bbox_lengths[2]  # Intermediate/Large
+
+        # Centre the mesh at the origin
+        mesh.vertices -= mesh.center_mass
+
+        return distances, np.array([si, il]), mesh
+
 
 if __name__ == '__main__':
     print('Generating...')
