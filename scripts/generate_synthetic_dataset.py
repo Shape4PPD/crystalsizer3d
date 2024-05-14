@@ -10,7 +10,6 @@ import cv2
 import numpy as np
 import yaml
 from PIL import Image
-from filelock import SoftFileLock as FileLock
 
 from crystalsizer3d import LOGS_PATH, N_WORKERS, START_TIMESTAMP, logger
 from crystalsizer3d.args.dataset_synthetic_args import DatasetSyntheticArgs
@@ -95,19 +94,9 @@ def validate(
         quiet_render=True
     )
 
-    # Load rendering parameters
-    logger.info('Loading rendering parameters.')
-    with open(output_dir / 'rendering_parameters.json', 'r') as f:
-        rendering_parameters = json.load(f)
-
-    # Load segmentations
-    logger.info('Loading segmentations.')
-    with open(output_dir / 'segmentations.json', 'r') as f:
-        segmentations = json.load(f)
-
     # Load data
     logger.info('Loading parameters.')
-    with open(output_dir / 'parameters.csv', 'r') as f:
+    with open(renderer.param_path, 'r') as f:
         reader = csv.DictReader(f)
         headers = reader.fieldnames
         data = {}
@@ -132,8 +121,8 @@ def validate(
                     item[header] = float(row[header])
 
             # Include the rendering parameters and segmentations
-            item['rendering_parameters'] = rendering_parameters[row['image']]
-            item['segmentation'] = segmentations[row['image']]
+            item['rendering_parameters'] = renderer.rendering_params[idx]
+            item['segmentation'] = renderer.segmentations[idx]
 
             # Add the bumpmap path if it exists
             if dataset_args.crystal_bumpmap_dim > -1:
@@ -419,24 +408,6 @@ def resume(
         quiet_render=True,
         n_workers=runtime_args.n_renderer_workers
     )
-
-    # Check if the segmentations file needs fixing
-    logger.info('Checking segmentations.')
-    seg_path = renderer.root_dir / 'segmentations.json'
-    if seg_path.exists():
-        lock_path = renderer.root_dir / 'comlog.lock'
-        lock = FileLock(lock_path, timeout=30)
-        lock.acquire()
-        with open(seg_path, 'r') as f:
-            segmentations = json.load(f)
-        keys = list(segmentations.keys())
-        for k in keys:
-            if k not in renderer.rendering_params:
-                logger.warning(f'Found segmentation for missing image: {k}. Removing...')
-                del segmentations[k]
-        with open(seg_path, 'w') as f:
-            json.dump(segmentations, f)
-        lock.release()
 
     # If it was originally made in parallel, make sure the fix is in parallel too
     tmp_dir = save_dir / 'tmp_output'

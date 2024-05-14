@@ -12,7 +12,6 @@ from typing import List, Optional, Union
 import matplotlib.colors as mcolors
 import numpy as np
 import torch
-from filelock import SoftFileLock as FileLock
 from matplotlib.axes import Axes
 
 from crystalsizer3d import logger
@@ -128,25 +127,3 @@ def to_rgb(c: Union[str, np.ndarray]):
     if type(c) == str:
         return mcolors.to_rgb(c)
     return c
-
-
-def append_json(file_path: Path, new_data: dict, timeout: int = 60):
-    """
-    Append new data to a JSON file.
-    """
-    if not file_path.exists():
-        with open(file_path, 'w') as f:
-            json.dump({}, f)
-    lock_path = file_path.with_suffix('.lock')
-    lock = FileLock(lock_path, timeout=timeout)
-    lock.acquire()
-    with open(file_path, 'r') as f:
-        data = json.load(f)
-    if len(data) > 0:
-        for k in new_data.keys():
-            if k in data and hash_data(data[k]) != hash_data(new_data[k]):
-                raise ValueError(f'Key "{k}" already exists in {file_path} and is not the same!')
-    data.update(new_data)
-    with open(file_path, 'w') as f:
-        json.dump(data, f, indent=4)
-    lock.release()

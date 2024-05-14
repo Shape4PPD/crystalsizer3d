@@ -300,9 +300,9 @@ class DatasetSyntheticArgs(BaseArgs):
                            help='Maximum defect z-coordinate.')
 
         # Bubbles
-        group.add_argument('--min-bubbles', type=int, default=100,
+        group.add_argument('--min-bubbles', type=int, default=0,
                            help='Minimum number of bubbles.')
-        group.add_argument('--max-bubbles', type=int, default=100,
+        group.add_argument('--max-bubbles', type=int, default=10,
                            help='Maximum number of bubbles.')
         group.add_argument('--bubbles-min-x', type=float, default=-25.,
                            help='Minimum x-coordinate of the bubble origin.')

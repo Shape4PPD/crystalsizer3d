@@ -14,7 +14,7 @@ import mitsuba as mi
 import numpy as np
 import torch
 from PIL import Image
-from filelock import SoftFileLock as FileLock
+from filelock import SoftFileLock as FileLock, Timeout
 
 from crystalsizer3d import USE_CUDA, logger
 from crystalsizer3d.args.dataset_synthetic_args import DatasetSyntheticArgs
@@ -24,7 +24,7 @@ from crystalsizer3d.scene_components.bubble import Bubble, make_bubbles
 from crystalsizer3d.scene_components.bumpmap import generate_bumpmap
 from crystalsizer3d.scene_components.scene import Scene
 from crystalsizer3d.scene_components.utils import RenderError
-from crystalsizer3d.util.utils import SEED, append_json, to_numpy
+from crystalsizer3d.util.utils import SEED, hash_data, to_numpy
 
 if USE_CUDA:
     if 'cuda_ad_rgb' not in mi.variants():
@@ -34,6 +34,83 @@ if USE_CUDA:
 else:
     mi.set_variant('llvm_ad_rgb')
     device = torch.device('cpu')
+
+
+def append_to_shared_json(file_path: Path, new_data: dict, timeout: int = 60):
+    """
+    Append new data to a shared JSON file.
+    """
+    if not file_path.exists():
+        with open(file_path, 'w') as f:
+            json.dump({}, f)
+    lock = FileLock(file_path.with_suffix('.lock'), timeout=timeout)
+    lock.acquire()
+    with open(file_path, 'r') as f:
+        data = json.load(f)
+    if len(data) > 0:
+        for k in new_data.keys():
+            if k in data and hash_data(data[k]) != hash_data(new_data[k]):
+                raise ValueError(f'Key "{k}" already exists in {file_path} and is not the same!')
+    data.update(new_data)
+    with open(file_path, 'w') as f:
+        json.dump(data, f, indent=4)
+    lock.release()
+
+
+def combine_json_files(master_path: Path, batches_dir: Path):
+    """
+    Combine JSON files in the batches directory into the master file.
+    """
+    if not batches_dir.exists():
+        logger.warning(f'No batches directory found at {batches_dir}. Skipping collation.')
+        return
+    batch_files = list(batches_dir.glob('*.json'))
+    if len(batch_files) == 0:
+        logger.warning(f'No batch files found in {batches_dir}. Skipping collation.')
+        return
+
+    # Lock the master file
+    lock = FileLock(master_path.with_suffix('.lock'), timeout=0)
+    try:
+        lock.acquire(timeout=0)
+    except Timeout:
+        logger.warning(f'Could not acquire lock for {master_path}. Skipping collation.')
+        return
+
+    # Load any existing data
+    if master_path.exists():
+        with open(master_path, 'r') as f:
+            data = json.load(f)
+        data = {int(k): v for k, v in data.items()}
+    else:
+        data = {}
+
+    # Collate the batch data
+    logger.info(f'Collating results from {len(batch_files)} batches to {master_path}.')
+    for i, batch_file in enumerate(batch_files):
+        with open(batch_file, 'r') as f:
+            data_batch = json.load(f)
+        data_batch = {int(k): v for k, v in data_batch.items()}
+        for idx, params in data_batch.items():
+            if idx in data and hash_data(params) != hash_data(data[idx]):
+                raise ValueError(f'Image "{idx}" from {batch_file} already exists '
+                                 f'in {master_path} and is not the same!')
+        data.update(data_batch)
+
+    # Rebuild the data with sorted keys and write to disk
+    data = {k: data[k] for k in sorted(list(data.keys()))}
+    with open(master_path, 'w') as f:
+        json.dump(data, f, indent=4)
+
+    # Remove the merged batch files and directory
+    for batch_file in batch_files:
+        batch_file.unlink()
+    batch_files = list(batches_dir.glob('*.json'))
+    if len(batch_files) == 0:
+        batches_dir.rmdir()
+    else:
+        logger.warning(f'Found more batch files in {batches_dir} after collating - will need re-running!')
+    lock.release()
 
 
 def _initialise_crystal(
@@ -93,14 +170,13 @@ def _render_batch(
     """
     da = dataset_args
     seed = SEED + batch_idx
+    worker_key = f'{worker_id}_{batch_idx:06d}'
     assert root_dir.exists(), f'Root dir does not exist! ({root_dir})'
 
     # Check that no other script is processing the same idxs
     timestamp = time.time()
     comlog_path = root_dir / 'comlog.json'
-    comlog_lock_path = comlog_path.with_suffix('.lock')
-    comlog_lock = FileLock(comlog_lock_path, timeout=60)
-    comlog_key = f'{worker_id}_{batch_idx:06d}'
+    comlog_lock = FileLock(comlog_path.with_suffix('.lock'), timeout=60)
     comlog_lock.acquire()
     if not comlog_path.exists():
         logger.info(f'Making comlog file at {comlog_path}.')
@@ -116,18 +192,18 @@ def _render_batch(
                 logger.warning(f'Worker {k} has timed out. Removing from log.')
                 del comlog['workers'][k]
 
-    # Filter out the idxs that have already been processed
+    # Filter out idxs that have already been processed
     param_batch = {idx: params for idx, params in param_batch.items() if idx not in comlog['completed_idxs']}
 
-    # Filter out the idxs that are currently being processed
+    # Filter out idxs that are currently being processed
     if len(comlog['workers']) > 0:
         running_idxs = np.concatenate([worker['idxs'] for worker in comlog['workers'].values()])
         param_batch = {idx: params for idx, params in param_batch.items() if idx not in running_idxs}
 
     # Add the worker to the comlog
     if len(param_batch) > 0:
-        logger.info(f'Adding worker details to comlog with key {comlog_key}.')
-        comlog['workers'].update({comlog_key: {'last_active': timestamp, 'idxs': list(param_batch.keys())}})
+        logger.info(f'Adding worker details to comlog with key {worker_key}.')
+        comlog['workers'].update({worker_key: {'last_active': timestamp, 'idxs': list(param_batch.keys())}})
         with open(comlog_path, 'w') as f:
             json.dump(comlog, f, indent=4)
     comlog_lock.release()
@@ -137,9 +213,13 @@ def _render_batch(
 
     # Sort directories
     images_dir = root_dir / 'images'
+    params_dir = root_dir / 'rendering_parameters'
+    segmentations_dir = root_dir / 'segmentations'
     bumpmaps_dir = root_dir / 'bumpmaps'
     clean_images_dir = root_dir / 'images_clean'
     images_dir.mkdir(exist_ok=True)
+    params_dir.mkdir(exist_ok=True)
+    segmentations_dir.mkdir(exist_ok=True)
     if da.crystal_bumpmap_dim > 0:
         bumpmaps_dir.mkdir(exist_ok=True)
     if da.generate_clean:
@@ -213,14 +293,14 @@ def _render_batch(
             img = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)  # todo: do we need this?
             cv2.imwrite(str(output_dir / params['image']), img)
             scene_params = scene.to_dict()
-            rendering_params[params['image']] = {
+            rendering_params[idx] = {
                 'seed': seed + idx,
                 'light_radiance': scene_params['light_radiance'].tolist(),
                 'crystal': scene_params['crystal'],
             }
             if 'bubbles' in scene_params:
-                rendering_params[params['image']]['bubbles'] = scene_params['bubbles']
-            segmentations[params['image']] = scene.get_crystal_image_coords().tolist()
+                rendering_params[idx]['bubbles'] = scene_params['bubbles']
+            segmentations[idx] = scene.get_crystal_image_coords().tolist()
 
             # Save the defect bumpmap
             if da.crystal_bumpmap_dim > -1:
@@ -237,16 +317,16 @@ def _render_batch(
         except RenderError as e:
             logger.warning(f'Rendering failed! {e}')
             logger.info(f'Adding idx={params["image"]} details to {str(output_dir.parent / "errored.json")}')
-            append_json(root_dir / 'errored.json', {params['image']: str(e)})
+            append_to_shared_json(root_dir / 'errored.json', {params['image']: str(e)})
             raise e
 
         # Update the comlog to show that the worker is still active
         timestamp = time.time()
-        if timestamp - comlog['workers'][comlog_key]['last_active'] > stale_worker_timeout / 2:
+        if timestamp - comlog['workers'][worker_key]['last_active'] > stale_worker_timeout / 2:
             comlog_lock.acquire()
             with open(comlog_path, 'r') as f:
                 comlog = json.load(f)
-            comlog['workers'][comlog_key]['last_active'] = timestamp
+            comlog['workers'][worker_key]['last_active'] = timestamp
             with open(comlog_path, 'w') as f:
                 json.dump(comlog, f, indent=4)
             comlog_lock.release()
@@ -269,17 +349,19 @@ def _render_batch(
     for img in clean_image_files:
         img.rename(clean_images_dir / (img.stem + '.png'))
 
-    # Write the combined segmentations and parameters to json files
-    comlog_lock.acquire()
-    append_json(root_dir / 'segmentations.json', segmentations)
-    append_json(root_dir / 'rendering_parameters.json', rendering_params)
+    # Write the parameters and segmentations to json files
+    with open(params_dir / f'{worker_key}.json', 'w') as f:
+        json.dump(rendering_params, f, indent=4)
+    with open(segmentations_dir / f'{worker_key}.json', 'w') as f:
+        json.dump(segmentations, f, indent=4)
 
     # Update the comlog
+    comlog_lock.acquire()
     with open(comlog_path, 'r') as f:
         comlog = json.load(f)
     comlog['completed_idxs'].extend(list(param_batch.keys()))
     comlog['completed_idxs'] = sorted(comlog['completed_idxs'])
-    del comlog['workers'][comlog_key]
+    del comlog['workers'][worker_key]
     with open(comlog_path, 'w') as f:
         json.dump(comlog, f, indent=4)
     comlog_lock.release()
@@ -305,8 +387,13 @@ class CrystalRenderer:
         self.n_workers = n_workers
         self.param_path = param_path
         self.root_dir = self.param_path.parent
+        self.comlog_path = self.root_dir / 'comlog.json'
+        self.comlog_lock = FileLock(self.comlog_path.with_suffix('.lock'))
         self.images_dir = self.root_dir / 'images'
+        self.rendering_params_dir = self.root_dir / 'rendering_parameters'
         self.rendering_params_path = self.root_dir / 'rendering_parameters.json'
+        self.segmentations_dir = self.root_dir / 'segmentations'
+        self.segmentations_path = self.root_dir / 'segmentations.json'
         self._init_crystal_settings()
         self._load_parameters()
 
@@ -336,16 +423,74 @@ class CrystalRenderer:
         assert self.param_path.exists(), f'Parameter file "{self.param_path}" does not exist.'
         logger.info(f'Loading crystal parameters from {self.param_path} and {self.rendering_params_path}.')
 
-        # Load rendering parameters if they exist
-        if self.rendering_params_path.exists():
-            lock_path = self.rendering_params_path.with_suffix('.lock')
-            lock = FileLock(lock_path, timeout=60)
+        def _load_json(file_path: Path, int_keys: bool = False):
+            if file_path.exists():
+                lock = FileLock(file_path.with_suffix('.lock'), timeout=60)
+                lock.acquire()
+                with open(file_path, 'r') as f:
+                    data = json.load(f)
+                if int_keys:
+                    data = {int(k): v for k, v in data.items()}
+                lock.release()
+            else:
+                data = {}
+            return data
+
+        def _write_json(file_path: Path, data: dict):
+            lock = FileLock(file_path.with_suffix('.lock'), timeout=60)
             lock.acquire()
-            with open(self.rendering_params_path, 'r') as f:
-                self.rendering_params = json.load(f)
+            with open(file_path, 'w') as f:
+                json.dump(data, f, indent=4)
             lock.release()
+
+        def _update_comlog_completed_idxs(new_completed_idxs: List[int]):
+            self.comlog_lock.acquire()
+            with open(self.comlog_path, 'r') as f:
+                comlog = json.load(f)
+            comlog['completed_idxs'] = new_completed_idxs
+            with open(self.comlog_path, 'w') as f:
+                json.dump(comlog, f, indent=4)
+            self.comlog_lock.release()
+
+        # Load rendering parameters and segmentations if they exist
+        self.rendering_params = _load_json(self.rendering_params_path, int_keys=True)
+        self.segmentations = _load_json(self.segmentations_path, int_keys=True)
+
+        # Load the comlog file if it exists to check for completed idxs
+        comlog = _load_json(self.comlog_path)
+        if 'completed_idxs' in comlog:
+            completed_idxs = comlog['completed_idxs']
         else:
-            self.rendering_params = {}
+            completed_idxs = []
+
+        # Check that the rendering parameters and segmentations match
+        logger.info('Checking segmentation and rendering parameters idxs.')
+        rp_idxs = set(self.rendering_params.keys())
+        seg_idxs = set(self.segmentations.keys())
+        broken_keys = rp_idxs.union(seg_idxs) - rp_idxs.intersection(seg_idxs)
+        if len(broken_keys) > 0:
+            logger.warning(f'Found {len(broken_keys)} mis-matched keys. Removing these and reloading...')
+            rp_hash_pre = hash_data(self.rendering_params)
+            seg_hash_pre = hash_data(self.segmentations)
+            completed_hash_pre = hash_data(completed_idxs)
+            for k in broken_keys:
+                if k in self.segmentations:
+                    del self.segmentations[k]
+                if k in self.rendering_params:
+                    del self.rendering_params[k]
+                if k in completed_idxs:
+                    completed_idxs.remove(k)
+            rp_hash_post = hash_data(self.rendering_params)
+            seg_hash_post = hash_data(self.segmentations)
+            completed_hash_post = hash_data(completed_idxs)
+            if rp_hash_pre != rp_hash_post:
+                _write_json(self.rendering_params_path, self.rendering_params)
+            if seg_hash_pre != seg_hash_post:
+                _write_json(self.segmentations_path, self.segmentations)
+            if completed_hash_pre != completed_hash_post:
+                comlog['completed_idxs'] = completed_idxs
+                _update_comlog_completed_idxs(completed_idxs)
+            return self._load_parameters()
 
         # Load the crystal parameters
         with open(self.param_path, 'r') as f:
@@ -360,7 +505,7 @@ class CrystalRenderer:
                 self.data[idx] = {
                     'image': row['image'],
                     'distances': {hkl: float(row[headers_distances[hkl]]) for hkl in self.miller_indices},
-                    'rendered': row['image'] in self.rendering_params,
+                    'rendered': idx in self.rendering_params or idx in completed_idxs,
                 }
 
     def _init_crystal(
@@ -406,6 +551,9 @@ class CrystalRenderer:
         batches = []
         for i in range(0, len(idxs), bs):
             batches.append({idx: self.data[idx] for idx in idxs[i:i + bs]})
+        if len(batches) == 0:
+            logger.info('All crystals have been rendered. Exiting.')
+            return
         logger.info(f'Rendering {len(idxs)} crystals in {len(batches)} batches of size {bs}.')
         shared_args = {
             'crystal_params': {
@@ -447,6 +595,16 @@ class CrystalRenderer:
             # Loop over batches
             for i, param_batch in enumerate(batches):
                 _render_batch(param_batch=param_batch, batch_idx=i, **shared_args)
+
+        # If there are other active workers then just return here
+        if self.is_active():
+            logger.info('There are still active workers processing this dataset. Leaving the final collation to them.')
+            return
+
+        # Combine the rendering parameters and segmentations
+        combine_json_files(self.rendering_params_path, self.rendering_params_dir)
+        combine_json_files(self.segmentations_path, self.segmentations_dir)
+        self._load_parameters()
 
     def render_from_parameters(self, params: dict) -> np.ndarray:
         """
@@ -510,10 +668,7 @@ class CrystalRenderer:
         imgs = sorted(imgs)
         img0_path = imgs[image_idx]
         img0 = np.array(Image.open(img0_path))
-
-        with open(self.images_dir.parent / 'segmentations.json') as f:
-            segmentations = json.load(f)
-        seg = np.array(segmentations[img0_path.name])
+        seg = np.array(self.segmentations[image_idx])
 
         # Plot the image with segmentation overlay
         fig, ax = plt.subplots(1, 1, figsize=(10, 10))
@@ -527,10 +682,10 @@ class CrystalRenderer:
         """
         Check if there are any workers still actively processing this dataset.
         """
-        comlog_path = self.root_dir / 'comlog.json'
-        if comlog_path.exists():
-            with open(comlog_path, 'r') as f:
-                comlog = json.load(f)
-            if len(comlog['workers']) > 0:
-                return True
+        if self.comlog_path.exists():
+            with self.comlog_lock.acquire(timeout=60):
+                with open(self.comlog_path, 'r') as f:
+                    comlog = json.load(f)
+                if len(comlog['workers']) > 0:
+                    return True
         return False
