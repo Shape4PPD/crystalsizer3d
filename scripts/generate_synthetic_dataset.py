@@ -408,13 +408,6 @@ def resume(
         quiet_render=True,
         n_workers=runtime_args.n_renderer_workers
     )
-
-    # If it was originally made in parallel, make sure the fix is in parallel too
-    tmp_dir = save_dir / 'tmp_output'
-    if renderer.n_workers > 1:
-        if not tmp_dir.exists():
-            logger.info('Temporary output directory does not exist. Can\'t fix/resume this.')
-            return
     renderer.render()
 
     # Check if there are any other workers still active
