@@ -37,6 +37,9 @@ PYTORCH_JIT = os.getenv('PYTORCH_JIT', 1)
 # Use CUDA?
 USE_CUDA = bool(os.getenv('USE_CUDA', '1').lower() in ['1', 'true', 'yes', 'y'])
 
+# Check for mitsuba default variants
+MI_CPU_VARIANT = os.getenv('MI_CPU_VARIANT', 'llvm_ad_rgb')
+
 # CSD proxy
 CSD_PROXY_PATH = _load_env_path('CSD_PROXY_PATH', ROOT_PATH / 'data' / 'csd_proxy.json')
 

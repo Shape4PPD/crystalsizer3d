@@ -7,30 +7,30 @@ channels:
 
 dependencies:
   - python = 3.9
+  - csd-python-api = 3.1
   - ffmpeg-python = 0.2
   - matplotlib = 3.8
   - mayavi = 4.8
   - numpy = 1.26
   - pillow = 9.5
   - python-dotenv = 1.0
-  - pytorch = 2.2
+  - pytorch = 2.1
+  - pytorch3d = 0.7
   - pyyaml = 6.0
   - rtree = 1.2
   - shapely = 2.0
   - tensorboard = 2.15
   - timm = 0.9
-  - torchvision = 0.17
+  - torchvision = 0.16
   - trimesh = 4.1
   - pip
   - pip:
-    - cholespy = 1.0
-    - csd-python-api = 3.0
-    - gigagan-pytorch = 0.2
-    - gpytoolbox = 0.2
-    - manifold3d = 2.4
-    - mitsuba = 3.5
-    - parti-pytorch = 0.2
-    - pymatgen = 2024.5
-    - python-fcl = 0.7
-    - pytorch-minimize = 0.0.2
-    - pytorch3d = 0.7
+    - cholespy == >= 1.0, < 1.1
+    - gigagan-pytorch >= 0.2, < 0.3
+    - gpytoolbox >= 0.2, < 0.3
+    - manifold3d >= 2.4, < 2.5
+    - mitsuba >= 3.5, < 3.6
+    - parti-pytorch >= 0.2, < 0.3
+    - pymatgen >= 2024.5, < 2024.6
+    - python-fcl >= 0.7, < 0.8
+    - pytorch-minimize >= 0.0.2, < 0.1

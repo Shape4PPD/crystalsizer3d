@@ -4,19 +4,17 @@ import drjit as dr
 import mitsuba as mi
 import numpy as np
 import torch
-from pytorch3d.ops import SubdivideMeshes
-from pytorch3d.structures import Meshes
 from pytorch3d.utils import ico_sphere
 from torch import nn
 
-from crystalsizer3d import USE_CUDA
+from crystalsizer3d import MI_CPU_VARIANT, USE_CUDA
 
 if USE_CUDA:
     if 'cuda_ad_rgb' not in mi.variants():
         raise RuntimeError('No CUDA variant found.')
     mi.set_variant('cuda_ad_rgb')
 else:
-    mi.set_variant('llvm_ad_rgb')
+    mi.set_variant(MI_CPU_VARIANT)
 
 ico_sphere_cache = {}
 

@@ -16,7 +16,7 @@ import torch
 from PIL import Image
 from filelock import SoftFileLock as FileLock, Timeout
 
-from crystalsizer3d import USE_CUDA, logger
+from crystalsizer3d import MI_CPU_VARIANT, USE_CUDA, logger
 from crystalsizer3d.args.dataset_synthetic_args import DatasetSyntheticArgs
 from crystalsizer3d.crystal import Crystal
 from crystalsizer3d.csd_proxy import CSDProxy
@@ -32,7 +32,7 @@ if USE_CUDA:
     mi.set_variant('cuda_ad_rgb')
     device = torch.device('cuda')
 else:
-    mi.set_variant('llvm_ad_rgb')
+    mi.set_variant(MI_CPU_VARIANT)
     device = torch.device('cpu')
 
 

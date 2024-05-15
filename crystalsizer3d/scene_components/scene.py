@@ -7,7 +7,7 @@ import torch
 from scipy.optimize import minimize
 from scipy.spatial import ConvexHull
 
-from crystalsizer3d import USE_CUDA
+from crystalsizer3d import MI_CPU_VARIANT, USE_CUDA
 from crystalsizer3d.args.dataset_synthetic_args import ROTATION_MODE_AXISANGLE
 from crystalsizer3d.crystal import Crystal
 from crystalsizer3d.scene_components.bubble import Bubble
@@ -20,7 +20,7 @@ if USE_CUDA:
         raise RuntimeError('No CUDA variant found.')
     mi.set_variant('cuda_ad_rgb')
 else:
-    mi.set_variant('llvm_ad_rgb')
+    mi.set_variant(MI_CPU_VARIANT)
 
 from mitsuba import ScalarTransform4f as T
 
@@ -385,7 +385,7 @@ class Scene:
 
         # Set up parameters and bounds
         if centre_crystal:
-            x0 = np.array([scale_new,])
+            x0 = np.array([scale_new, ])
             bounds = [[1e-3, 1e2], ]
         else:
             x0 = np.array([scale_new, *origin_new[:2]])
