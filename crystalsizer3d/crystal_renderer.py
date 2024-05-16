@@ -380,7 +380,8 @@ class CrystalRenderer:
             param_path: Path,
             dataset_args: DatasetSyntheticArgs,
             quiet_render: bool = False,
-            n_workers: int = 1
+            n_workers: int = 1,
+            remove_mismatched: bool = False,
     ):
         self.dataset_args = dataset_args
         self.quiet_render = quiet_render
@@ -395,7 +396,7 @@ class CrystalRenderer:
         self.segmentations_dir = self.root_dir / 'segmentations'
         self.segmentations_path = self.root_dir / 'segmentations.json'
         self._init_crystal_settings()
-        self._load_parameters()
+        self._load_parameters(remove_mismatched)
 
     def _init_crystal_settings(self):
         """
@@ -406,17 +407,9 @@ class CrystalRenderer:
         self.lattice_unit_cell = cs.lattice_unit_cell
         self.lattice_angles = cs.lattice_angles
         self.point_group_symbol = cs.point_group_symbol
+        self.miller_indices = self.dataset_args.miller_indices
 
-        # Parse the constraint string to get the miller indices
-        constraints_parts = self.dataset_args.distance_constraints.split('>')
-        hkls = []
-        for i, k in enumerate(constraints_parts):
-            if len(k) == 3:
-                hkls.append(tuple(int(idx) for idx in k))
-        self.miller_indices: List[Tuple[int, int, int]] = hkls
-        # miller_indices = [(1, 0, 1), (0, 2, 1), (0, 1, 0)]
-
-    def _load_parameters(self):
+    def _load_parameters(self, remove_mismatched: bool = False):
         """
         Load the crystal parameters from the parameter file.
         """
@@ -469,28 +462,32 @@ class CrystalRenderer:
         seg_idxs = set(self.segmentations.keys())
         broken_keys = rp_idxs.union(seg_idxs) - rp_idxs.intersection(seg_idxs)
         if len(broken_keys) > 0:
-            logger.warning(f'Found {len(broken_keys)} mis-matched keys. Removing these and reloading...')
-            rp_hash_pre = hash_data(self.rendering_params)
-            seg_hash_pre = hash_data(self.segmentations)
-            completed_hash_pre = hash_data(completed_idxs)
-            for k in broken_keys:
-                if k in self.segmentations:
-                    del self.segmentations[k]
-                if k in self.rendering_params:
-                    del self.rendering_params[k]
-                if k in completed_idxs:
-                    completed_idxs.remove(k)
-            rp_hash_post = hash_data(self.rendering_params)
-            seg_hash_post = hash_data(self.segmentations)
-            completed_hash_post = hash_data(completed_idxs)
-            if rp_hash_pre != rp_hash_post:
-                _write_json(self.rendering_params_path, self.rendering_params)
-            if seg_hash_pre != seg_hash_post:
-                _write_json(self.segmentations_path, self.segmentations)
-            if completed_hash_pre != completed_hash_post:
-                comlog['completed_idxs'] = completed_idxs
-                _update_comlog_completed_idxs(completed_idxs)
-            return self._load_parameters()
+            if remove_mismatched and not self.is_active():
+                logger.warning(f'Found {len(broken_keys)} mis-matched keys. Removing these and reloading...')
+                rp_hash_pre = hash_data(self.rendering_params)
+                seg_hash_pre = hash_data(self.segmentations)
+                completed_hash_pre = hash_data(completed_idxs)
+                for k in broken_keys:
+                    if k in self.segmentations:
+                        del self.segmentations[k]
+                    if k in self.rendering_params:
+                        del self.rendering_params[k]
+                    if k in completed_idxs:
+                        completed_idxs.remove(k)
+                rp_hash_post = hash_data(self.rendering_params)
+                seg_hash_post = hash_data(self.segmentations)
+                completed_hash_post = hash_data(completed_idxs)
+                if rp_hash_pre != rp_hash_post:
+                    _write_json(self.rendering_params_path, self.rendering_params)
+                if seg_hash_pre != seg_hash_post:
+                    _write_json(self.segmentations_path, self.segmentations)
+                if completed_hash_pre != completed_hash_post:
+                    comlog['completed_idxs'] = completed_idxs
+                    _update_comlog_completed_idxs(completed_idxs)
+                return self._load_parameters()
+            else:
+                raise ValueError(f'Found {len(broken_keys)} mis-matched keys '
+                                 f'between the rendering parameters and segmentations!')
 
         # Load the crystal parameters
         with open(self.param_path, 'r') as f:
@@ -602,9 +599,15 @@ class CrystalRenderer:
             return
 
         # Combine the rendering parameters and segmentations
+        try:
+            self.comlog_lock.acquire(timeout=0)
+        except Timeout:
+            logger.warning(f'Could not acquire comlog lock. Skipping collation.')
+            return
         combine_json_files(self.rendering_params_path, self.rendering_params_dir)
         combine_json_files(self.segmentations_path, self.segmentations_dir)
         self._load_parameters()
+        self.comlog_lock.release()
 
     def render_from_parameters(self, params: dict) -> np.ndarray:
         """
@@ -678,14 +681,19 @@ class CrystalRenderer:
         plt.savefig(self.images_dir.parent / f'segmentation_example_{img0_path.stem}.png')
         plt.close(fig)
 
-    def is_active(self):
+    def is_active(self) -> bool:
         """
         Check if there are any workers still actively processing this dataset.
         """
-        if self.comlog_path.exists():
-            with self.comlog_lock.acquire(timeout=60):
-                with open(self.comlog_path, 'r') as f:
-                    comlog = json.load(f)
-                if len(comlog['workers']) > 0:
-                    return True
+        if not self.comlog_path.exists():
+            return False
+        try:
+            self.comlog_lock.acquire(timeout=0)
+        except Timeout:
+            return True
+        with open(self.comlog_path, 'r') as f:
+            comlog = json.load(f)
+        self.comlog_lock.release()
+        if len(comlog['workers']) > 0:
+            return True
         return False

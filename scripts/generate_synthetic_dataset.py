@@ -406,7 +406,8 @@ def resume(
         param_path=save_dir / 'parameters.csv',
         dataset_args=dataset_args,
         quiet_render=True,
-        n_workers=runtime_args.n_renderer_workers
+        n_workers=runtime_args.n_renderer_workers,
+        remove_mismatched=True
     )
     renderer.render()
 
