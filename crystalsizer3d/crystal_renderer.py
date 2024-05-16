@@ -606,8 +606,8 @@ class CrystalRenderer:
             return
         combine_json_files(self.rendering_params_path, self.rendering_params_dir)
         combine_json_files(self.segmentations_path, self.segmentations_dir)
-        self._load_parameters()
         self.comlog_lock.release()
+        self._load_parameters()
 
     def render_from_parameters(self, params: dict) -> np.ndarray:
         """
