@@ -550,6 +550,7 @@ class CrystalRenderer:
             batches.append({idx: self.data[idx] for idx in idxs[i:i + bs]})
         if len(batches) == 0:
             logger.info('All crystals have been rendered.')
+            self.collate_results()
             return
         logger.info(f'Rendering {len(idxs)} crystals in {len(batches)} batches of size {bs}.')
         shared_args = {
@@ -572,8 +573,8 @@ class CrystalRenderer:
             mp.set_start_method('spawn', force=True)
 
             # Create a temporary output directory
-            output_dir = self.root_dir / 'tmp_output'
-            output_dir.mkdir(exist_ok=True)
+            output_dir = self.root_dir / 'tmp_output' / f'worker_{os.getpid()}'
+            output_dir.mkdir(parents=True, exist_ok=True)
 
             # Create process arguments
             shared_args = {**shared_args, 'output_dir': output_dir}
@@ -597,8 +598,12 @@ class CrystalRenderer:
         if self.is_active():
             logger.info('There are still active workers processing this dataset. Leaving the final collation to them.')
             return
+        self.collate_results()
 
-        # Combine the rendering parameters and segmentations
+    def collate_results(self):
+        """
+        Combine the rendering parameters and segmentations.
+        """
         try:
             self.comlog_lock.acquire(timeout=0)
         except Timeout:
