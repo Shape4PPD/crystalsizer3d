@@ -1652,7 +1652,7 @@ class Manager:
         """
         Calculate the light properties losses.
         """
-        assert l_pred.shape[-1] == 3
+        assert l_pred.shape[-1] == len(self.ds.labels_light_active)
         radiance_loss = ((l_pred - l_target)**2).mean()
         loss = radiance_loss
         stats = {

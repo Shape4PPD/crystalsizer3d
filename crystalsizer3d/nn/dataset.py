@@ -132,6 +132,8 @@ class Dataset:
                                              if k in self.labels]
         self.labels_material_active = [k for k in self.labels_material if k in self.labels]
         self.labels_light_active = [k for k in self.labels_light if k in self.labels]
+        if self.ds_args.train_light:
+            assert len(self.labels_light_active) > 0, 'Light parameters not present in dataset so can\'t train them!'
 
         # Cache the rotation matrices and symmetry groups
         self.rotation_matrices = self._calculate_rotation_matrices()
@@ -154,6 +156,7 @@ class Dataset:
         if r_params_file.exists():
             with open(r_params_file, 'r') as f:
                 rendering_parameters = json.load(f)
+            rendering_parameters = {int(k): v for k, v in rendering_parameters.items()}
         else:
             logger.warning(f'Rendering parameters file {r_params_file} does not exist.')
             rendering_parameters = None
@@ -192,7 +195,7 @@ class Dataset:
 
                 # Include the rendering parameters
                 if rendering_parameters is not None:
-                    item['rendering_parameters'] = rendering_parameters[row['image']]
+                    item['rendering_parameters'] = rendering_parameters[idx]
 
                 self.data[idx] = item
 
