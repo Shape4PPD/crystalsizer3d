@@ -436,7 +436,9 @@ class Dataset:
     def load_crystal(
             self,
             idx: Optional[int] = None,
-            r_params: Optional[Dict[str, Any]] = None
+            r_params: Optional[Dict[str, Any]] = None,
+            zero_origin: bool = False,
+            zero_rotation: bool = False
     ) -> Crystal:
         """
         Load the crystal for an item.
@@ -447,7 +449,6 @@ class Dataset:
             r_params = item['rendering_parameters']
         else:
             assert r_params is not None, 'Need to provide either an index or parameters.'
-            r_params = r_params
         crystal = Crystal(
             lattice_unit_cell=cs.lattice_unit_cell,
             lattice_angles=cs.lattice_angles,
@@ -455,8 +456,8 @@ class Dataset:
             point_group_symbol=cs.point_group_symbol,
             scale=r_params['crystal']['scale'],
             distances=r_params['crystal']['distances'],
-            origin=r_params['crystal']['origin'],
-            rotation=r_params['crystal']['rotation'],
+            origin=None if zero_origin else r_params['crystal']['origin'],
+            rotation=None if zero_rotation else r_params['crystal']['rotation'],
             rotation_mode=self.dataset_args.rotation_mode,
             material_roughness=r_params['crystal']['material_roughness'],
             material_ior=r_params['crystal']['material_ior'],
@@ -469,7 +470,7 @@ class Dataset:
         """
         Load the mesh for an item.
         """
-        crystal = self.load_crystal(idx)
+        crystal = self.load_crystal(idx, zero_origin=True, zero_rotation=True)
         mesh = Trimesh(
             vertices=to_numpy(crystal.mesh_vertices),
             faces=to_numpy(crystal.mesh_faces),
@@ -484,7 +485,7 @@ class Dataset:
         Get the rotational symmetry group of the crystal from cache or calculation.
         """
         item = self.data[idx]
-        d_str = ''.join([f'{item[k]:.2f}' for k in self.labels_distances])
+        d_str = ','.join([f'{item[k]:.2f}' for k in self.labels_distances])
         if d_str in self.symmetry_groups:
             return self.symmetry_groups[d_str]
         sym_group = self._calculate_symmetry_group(idx)

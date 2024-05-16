@@ -499,8 +499,8 @@ def plot_training_samples(
         meta = metas[idx]
         r_params_target = meta['rendering_parameters']
         r_params_pred = manager.ds.denormalise_rendering_params(Y_pred, idx, r_params_target)
-        crystal_target = manager.ds.load_crystal(r_params=r_params_target)
-        crystal_pred = manager.ds.load_crystal(r_params=r_params_pred)
+        crystal_target = manager.ds.load_crystal(r_params=r_params_target, zero_origin=True)
+        crystal_pred = manager.ds.load_crystal(r_params=r_params_pred, zero_origin=True)
         row_idx = 0
 
         # Plot the (possibly augmented) input image
