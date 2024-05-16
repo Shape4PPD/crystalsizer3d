@@ -549,7 +549,7 @@ class CrystalRenderer:
         for i in range(0, len(idxs), bs):
             batches.append({idx: self.data[idx] for idx in idxs[i:i + bs]})
         if len(batches) == 0:
-            logger.info('All crystals have been rendered. Exiting.')
+            logger.info('All crystals have been rendered.')
             return
         logger.info(f'Rendering {len(idxs)} crystals in {len(batches)} batches of size {bs}.')
         shared_args = {

@@ -29,6 +29,7 @@ def _generate_crystal(
         ratio_means: List[float],
         ratio_stds: List[float],
         rng: Optional[np.random.Generator] = None,
+        seed: int = 0,
         constraints: Optional[List[Tuple[int, ...]]] = None,
         zingg_bbox: Optional[List[float]] = None,
         idx: int = 0,
@@ -38,7 +39,7 @@ def _generate_crystal(
     Generate a crystal with randomised face distances.
     """
     if rng is None:
-        rng = default_rng(SEED)
+        rng = default_rng(seed)
     csd = CSDProxy()
     cs = csd.load(crystal_id)
 
@@ -190,7 +191,6 @@ class CrystalGenerator:
             miller_indices=self.miller_indices,
             ratio_means=self.ratio_means,
             ratio_stds=self.ratio_stds,
-            rng=self.rng,
             constraints=self.constraints,
             zingg_bbox=self.zingg_bbox,
             max_attempts=max_attempts
@@ -200,13 +200,13 @@ class CrystalGenerator:
             logger.info(f'Generating crystals in parallel, worker pool size: {self.n_workers}')
             args = []
             for i in range(num):
-                args.append({'idx': i, **shared_args})
+                args.append({'idx': i, 'seed': SEED + i, **shared_args})
             with Pool(processes=self.n_workers) as pool:
                 crystals = pool.map(_generate_crystal_wrapper, args)
         else:
             crystals = []
             for i in range(num):
-                r, z, m = _generate_crystal(idx=i, **shared_args)
+                r, z, m = _generate_crystal(idx=i, rng=self.rng, **shared_args)
                 crystals.append((r, z, m))
 
         return crystals
