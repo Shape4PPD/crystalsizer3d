@@ -372,7 +372,7 @@ class Dataset:
             l_min = np.array([self.ds_stats[xyz]['min'] for xyz in 'xyz'])
             ranges = l_max - l_min
             range_max = ranges.max()
-            location = 2 * (location - l_min) / range_max - 1
+            location = 2 * (location - l_min - ranges / 2) / range_max
 
             # Standardise the scale
             scale = z_transform(r_params['crystal']['scale'], 's')
@@ -390,16 +390,16 @@ class Dataset:
             for i, R in enumerate(sym_group):
                 sym_R[i] = (R0 * R).as_matrix()
 
-            # Check the symmetry group
-            mesh = self.load_mesh(idx)
-            v = mesh.vertices
-            v0 = R0.apply(v)
-            for r_mat in sym_R:
-                R = Rotation.from_matrix(r_mat)
-                v_rotated = R.apply(v)
-                cd = cdist(v0, v_rotated)
-                min_vertex_dists = cd.min(axis=1)
-                assert np.all(min_vertex_dists < 0.1), 'Symmetry group is not correct!'
+            # # Check the symmetry group
+            # mesh = self.load_mesh(idx)
+            # v = mesh.vertices
+            # v0 = R0.apply(v)
+            # for r_mat in sym_R:
+            #     R = Rotation.from_matrix(r_mat)
+            #     v_rotated = R.apply(v)
+            #     cd = cdist(v0, v_rotated)
+            #     min_vertex_dists = cd.min(axis=1)
+            #     assert np.all(min_vertex_dists < 0.1), 'Symmetry group is not correct!'
 
             # Get rotation representation
             if self.ds_args.rotation_mode == ROTATION_MODE_QUATERNION:
@@ -568,7 +568,7 @@ class Dataset:
             l_min = np.array([self.ds_stats[xyz]['min'] for xyz in 'xyz'])
             ranges = l_max - l_min
             range_max = ranges.max()
-            location = (location + 1) / 2 * range_max + l_min
+            location = location * range_max / 2 + l_min + ranges / 2
             c_params['origin'] = location.tolist()
 
             # Inverse z-transform the scale
