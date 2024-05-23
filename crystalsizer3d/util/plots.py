@@ -24,8 +24,11 @@ if TYPE_CHECKING:
 mlab.options.offscreen = True
 
 
-def _load_single_parameter(Y: Union[None, Dict[str, torch.Tensor]], key: str, idx: Optional[int] = 0) -> Union[
-    None, np.ndarray]:
+def _load_single_parameter(
+        Y: Union[None, Dict[str, torch.Tensor]],
+        key: str,
+        idx: Optional[int] = 0
+) -> Union[None, np.ndarray]:
     """
     Load a single parameter from the dictionary and convert it to a numpy array.
     """
@@ -99,9 +102,9 @@ def make_3d_digital_crystal_image(
         bg_col: float = 1.,
         wireframe_radius_factor: float = 0.1,
         surface_colour: str = 'skyblue',
-        wireframe_colour: str = 'darkblue',
+        wireframe_colour: str = 'cornflowerblue',
         surface_colour_comp: str = 'orange',
-        wireframe_colour_comp: str = 'red',
+        wireframe_colour_comp: str = 'darkorange',
         opacity: float = 0.6,
         azim: float = 150,
         elev: float = 160,
@@ -281,8 +284,8 @@ def _add_bars(
         pred: np.ndarray,
         target: Optional[np.ndarray] = None,
         pred2: Optional[np.ndarray] = None,
-        colour_pred: str = 'darkblue',
-        colour_target: str = 'red',
+        colour_pred: str = 'cornflowerblue',
+        colour_target: str = 'darkorange',
         colour_pred2: str = 'green',
 ) -> Tuple[np.ndarray, float, float]:
     """
@@ -331,8 +334,8 @@ def plot_distances(
         Y_target: Optional[Dict[str, torch.Tensor]] = None,
         Y_pred2: Optional[Dict[str, torch.Tensor]] = None,
         idx: int = 0,
-        colour_pred: str = 'darkblue',
-        colour_target: str = 'red',
+        colour_pred: str = 'cornflowerblue',
+        colour_target: str = 'darkorange',
         colour_pred2: str = 'green',
         share_ax: Optional[Dict[str, Axes]] = None
 ):
@@ -396,8 +399,8 @@ def plot_transformation(
         Y_target: Optional[Dict[str, torch.Tensor]] = None,
         Y_pred2: Optional[Dict[str, torch.Tensor]] = None,
         idx: int = 0,
-        colour_pred: str = 'darkblue',
-        colour_target: str = 'red',
+        colour_pred: str = 'cornflowerblue',
+        colour_target: str = 'darkorange',
         colour_pred2: str = 'green',
         share_ax: Optional[Dict[str, Axes]] = None
 ):
@@ -412,7 +415,10 @@ def plot_transformation(
     if (Y_target is not None
             and manager.dataset_args.rotation_mode in [ROTATION_MODE_QUATERNION, ROTATION_MODE_AXISANGLE]
             and 'sym_rotations' in Y_target):
-        t_target[4:] = get_closest_rotation(t_pred[4:], Y_target['sym_rotations'])
+        sym_rotations = Y_target['sym_rotations']
+        if isinstance(sym_rotations, list):
+            sym_rotations = sym_rotations[idx]
+        t_target[4:] = get_closest_rotation(t_pred[4:], sym_rotations)
 
     # Add bar chart data
     locs, bar_width, offset = _add_bars(
@@ -465,8 +471,8 @@ def plot_material(
         Y_target: Optional[Dict[str, torch.Tensor]] = None,
         Y_pred2: Optional[Dict[str, torch.Tensor]] = None,
         idx: int = 0,
-        colour_pred: str = 'darkblue',
-        colour_target: str = 'red',
+        colour_pred: str = 'cornflowerblue',
+        colour_target: str = 'darkorange',
         colour_pred2: str = 'green',
         share_ax: Optional[Dict[str, Axes]] = None
 ):
@@ -508,8 +514,8 @@ def plot_light(
         Y_target: Optional[Dict[str, torch.Tensor]] = None,
         Y_pred2: Optional[Dict[str, torch.Tensor]] = None,
         idx: int = 0,
-        colour_pred: str = 'darkblue',
-        colour_target: str = 'red',
+        colour_pred: str = 'cornflowerblue',
+        colour_target: str = 'darkorange',
         colour_pred2: str = 'green',
         share_ax: Optional[Dict[str, Axes]] = None,
         **kwargs
