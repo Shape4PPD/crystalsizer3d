@@ -228,7 +228,10 @@ def plot_prediction(args: Optional[RuntimeArgs] = None):
         r_params_target = metas['rendering_parameters']
 
     else:
-        X_target = to_tensor(Image.open(args.image_path).convert('L'))
+        X_target = to_tensor(Image.open(args.image_path))
+        if X_target.shape[0] == 4:
+            assert torch.allclose(X_target[3], torch.ones_like(X_target[3])), 'Transparent images not supported.'
+            X_target = X_target[:3]
         Y_target = None
         r_params_target = None
 
