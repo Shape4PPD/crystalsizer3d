@@ -31,6 +31,7 @@ from crystalsizer3d.args.optimiser_args import OptimiserArgs
 from crystalsizer3d.args.runtime_args import RuntimeArgs
 from crystalsizer3d.args.transcoder_args import TranscoderArgs
 from crystalsizer3d.crystal import ROTATION_MODE_AXISANGLE, ROTATION_MODE_QUATERNION
+from crystalsizer3d.crystal_generator import CrystalGenerator
 from crystalsizer3d.crystal_renderer import CrystalRenderer
 from crystalsizer3d.nn.checkpoint import Checkpoint
 from crystalsizer3d.nn.data_loader import get_data_loader
@@ -55,29 +56,32 @@ from crystalsizer3d.util.geometry import geodesic_distance
 from crystalsizer3d.util.plots import plot_training_samples
 from crystalsizer3d.util.utils import is_bad
 
-try:
-    from ccdc.morphology import VisualHabitMorphology
-    from crystalsizer3d.crystal_generator import CrystalGenerator
-
-    CCDC_AVAILABLE = True
-except RuntimeError as e:
-    if str(e) == 'A valid licence cannot be found':
-        CCDC_AVAILABLE = False
-    else:
-        raise e
-except ImportError:
-    CCDC_AVAILABLE = False
-
-if CCDC_AVAILABLE:
-    logger.info('CCDC is available!')
-else:
-    logger.warning('CCDC is not available. Crystal generation will not work.')
-
 
 # torch.autograd.set_detect_anomaly(True)
 
 
 class Manager:
+    ds: Dataset
+    train_loader: DataLoader
+    test_loader: DataLoader
+    crystal_generator: CrystalGenerator
+    crystal_renderer: CrystalRenderer
+    predictor: Optional[BaseNet]
+    generator: Optional[GeneratorNet]
+    discriminator: Optional[Discriminator]
+    transcoder: Optional[Transcoder]
+    optimiser_p: Optimizer
+    lr_scheduler_p: Scheduler
+    optimiser_g: Optional[Optimizer]
+    lr_scheduler_g: Optional[Scheduler]
+    optimiser_d: Optional[Optimizer]
+    lr_scheduler_d: Optional[Scheduler]
+    optimiser_t: Optional[Optimizer]
+    lr_scheduler_t: Optional[Scheduler]
+    metric_keys: List[str]
+    device: torch.device
+    checkpoint: Checkpoint
+
     def __init__(
             self,
             runtime_args: RuntimeArgs,
@@ -96,34 +100,69 @@ class Manager:
         self.transcoder_args = transcoder_args
         self.optimiser_args = optimiser_args
 
-        # Dataset and data loaders
-        self.ds = Dataset(self.dataset_args)
-        self.train_loader, self.test_loader = self._init_data_loaders()
+        # Save dir
+        self.save_dir = save_dir
 
-        # Crystal generator and renderer
-        self.crystal_generator = self._init_crystal_generator()
-        self.crystal_renderer = self._init_crystal_renderer()
-
-        # Networks
-        self.predictor = self._init_predictor()
-        self.generator = self._init_generator()
-        self.discriminator = self._init_discriminator()
-        self.transcoder = self._init_transcoder()
-
-        # Optimiser
-        (self.optimiser_p, self.lr_scheduler_p,
-         self.optimiser_g, self.lr_scheduler_g,
-         self.optimiser_d, self.lr_scheduler_d,
-         self.optimiser_t, self.lr_scheduler_t) = self._init_optimisers()
-
-        # Metrics
-        self.metric_keys = self._init_metrics()
-
-        # Runtime params
-        self.device = self._init_devices()
-
-        # Checkpoints
+        # Load checkpoint
         self.checkpoint = self._init_checkpoint(save_dir=save_dir)
+
+    @property
+    def image_shape(self) -> Tuple[int, ...]:
+        n_channels = 3 if self.dataset_args.add_coord_grid else 1
+        return n_channels, self.ds.image_size, self.ds.image_size
+
+    @property
+    def parameters_shape(self) -> Tuple[int, ...]:
+        return self.ds.label_size,
+
+    @property
+    def logs_path(self) -> Path:
+        return self.checkpoint.save_dir / self.checkpoint.id
+
+    def __getattr__(self, name: str):
+        """
+        Lazy loading of the components.
+        """
+        if name == 'ds':
+            self.ds = Dataset(self.dataset_args)
+            return self.ds
+        elif name in ['train_loader', 'test_loader']:
+            self.train_loader, self.test_loader = self._init_data_loaders()
+            return self.train_loader
+        elif name == 'crystal_generator':
+            self.crystal_generator = self._init_crystal_generator()
+            return self.crystal_generator
+        elif name == 'crystal_renderer':
+            self.crystal_renderer = self._init_crystal_renderer()
+            return self.crystal_renderer
+        elif name == 'predictor':
+            self.predictor = self._init_predictor()
+            return self.predictor
+        elif name == 'generator':
+            self.generator = self._init_generator()
+            return self.generator
+        elif name == 'discriminator':
+            self.discriminator = self._init_discriminator()
+            return self.discriminator
+        elif name == 'transcoder':
+            self.transcoder = self._init_transcoder()
+            return self.transcoder
+        elif name in ['optimiser_p', 'lr_scheduler_p',
+                      'optimiser_g', 'lr_scheduler_g',
+                      'optimiser_d', 'lr_scheduler_d',
+                      'optimiser_t', 'lr_scheduler_t']:
+            (self.optimiser_p, self.lr_scheduler_p,
+             self.optimiser_g, self.lr_scheduler_g,
+             self.optimiser_d, self.lr_scheduler_d,
+             self.optimiser_t, self.lr_scheduler_t) = self._init_optimisers()
+            return getattr(self, name)
+        elif name == 'metric_keys':
+            self.metric_keys = self._init_metrics()
+            return self.metric_keys
+        elif name == 'device':
+            self.device = self._init_devices()
+            return self.device
+        raise AttributeError(f"'{self.__class__.__name__}' object has no attribute '{name}'")
 
     @classmethod
     def load(
@@ -170,42 +209,25 @@ class Manager:
 
         return cls(**args, save_dir=save_dir)
 
-    @property
-    def image_shape(self) -> Tuple[int, ...]:
-        n_channels = 3 if self.dataset_args.add_coord_grid else 1
-        return n_channels, self.ds.image_size, self.ds.image_size
-
-    @property
-    def parameters_shape(self) -> Tuple[int, ...]:
-        return self.ds.label_size,
-
-    @property
-    def logs_path(self) -> Path:
-        return self.checkpoint.save_dir / self.checkpoint.id
-
-    def _init_crystal_generator(self) -> Optional['CrystalGenerator']:
+    def _init_crystal_generator(self) -> CrystalGenerator:
         """
         Initialise the crystal generator.
         """
-        if CCDC_AVAILABLE:
-            dsa = self.ds.dataset_args
-            generator = CrystalGenerator(
-                crystal_id=dsa.crystal_id,
-                miller_indices=dsa.miller_indices,
-                ratio_means=dsa.ratio_means,
-                ratio_stds=dsa.ratio_stds,
-                zingg_bbox=dsa.zingg_bbox,
-                constraints=dsa.distance_constraints,
-            )
-        else:
-            generator = None
+        dsa = self.ds.dataset_args
+        generator = CrystalGenerator(
+            crystal_id=dsa.crystal_id,
+            miller_indices=dsa.miller_indices,
+            ratio_means=dsa.ratio_means,
+            ratio_stds=dsa.ratio_stds,
+            zingg_bbox=dsa.zingg_bbox,
+            constraints=dsa.distance_constraints,
+        )
         return generator
 
     def _init_crystal_renderer(self) -> CrystalRenderer:
         """
         Initialise the crystal renderer.
         """
-        dsa = self.ds.dataset_args
         renderer = CrystalRenderer(
             param_path=self.ds.path / 'parameters.csv',
             dataset_args=self.ds.dataset_args,
@@ -314,6 +336,7 @@ class Manager:
         if net_args.base_net in ['vitnet', 'timm']:
             logger.info(f'Classifier has {predictor.get_n_classifier_params() / 1e6:.4f}M parameters.')
         logger.debug(f'----------- Predictor Network --------------\n\n{predictor}\n\n')
+        predictor.to(self.device)
 
         # Instantiate an exponential moving average tracker for the predictor loss
         self.p_loss_ema = EMA()
@@ -382,6 +405,7 @@ class Manager:
         # Instantiate the network
         logger.info(f'Instantiated generator network with {generator.get_n_params() / 1e6:.4f}M parameters.')
         logger.debug(f'----------- Generator Network --------------\n\n{generator}\n\n')
+        generator.to(self.device)
 
         # Instantiate an exponential moving average tracker for the generator loss
         self.g_loss_ema = EMA()
@@ -407,6 +431,7 @@ class Manager:
         # Instantiate the network
         logger.info(f'Instantiated discriminator network with {discriminator.get_n_params() / 1e6:.4f}M parameters.')
         logger.debug(f'----------- Discriminator Network --------------\n\n{discriminator}\n\n')
+        discriminator.to(self.device)
 
         # Instantiate an exponential moving average tracker for the discriminator loss
         self.d_loss_ema = EMA()
@@ -456,6 +481,7 @@ class Manager:
         # Instantiate the network
         logger.info(f'Instantiated transcoder network with {transcoder.get_n_params() / 1e6:.4f}M parameters.')
         logger.debug(f'----------- Transcoder Network --------------\n\n{transcoder}\n\n')
+        transcoder.to(self.device)
 
         # Instantiate exponential moving average trackers for the reconstruction and regularisation losses
         self.tc_rec_loss_ema = EMA()
@@ -683,27 +709,26 @@ class Manager:
                 else:
                     self.predictor.load_state_dict(self._fix_state(state['net_p_state_dict']), strict=False)
                 self.optimiser_p.load_state_dict(state['optimiser_p_state_dict'])
-                self.predictor.eval()
 
             # Load generator network parameters and optimiser state
             if self.dataset_args.train_generator:
                 self.generator.load_state_dict(self._fix_state(state['net_g_state_dict']), strict=False)
                 if not self.dataset_args.train_combined:
                     self.optimiser_g.load_state_dict(state['optimiser_g_state_dict'])
-                self.generator.eval()
 
             # Load discriminator network parameters and optimiser state
             if self.dataset_args.train_generator and self.generator_args.use_discriminator:
                 self.discriminator.load_state_dict(self._fix_state(state['net_d_state_dict']), strict=False)
                 self.optimiser_d.load_state_dict(state['optimiser_d_state_dict'])
-                self.discriminator.eval()
 
             # Load transcoder network parameters
             if self.transcoder_args.use_transcoder:
                 self.transcoder.load_state_dict(self._fix_state(state['net_t_state_dict']), strict=False)
                 if self.optimiser_t is not None and 'optimiser_t_state_dict' in state:
                     self.optimiser_t.load_state_dict(state['optimiser_t_state_dict'])
-                self.transcoder.eval()
+
+            # Put all networks in evaluation mode
+            self.enable_eval()
 
         elif self.runtime_args.resume_only:
             raise RuntimeError('Could not resume!')
@@ -742,6 +767,32 @@ class Manager:
                 self._init_tb_logger()
             self.tb_logger.add_graph(self.predictor, [dummy_input, ], verbose=False)
             self.tb_logger.flush()
+
+    def enable_eval(self):
+        """
+        Put the networks in evaluation mode.
+        """
+        if self.dataset_args.train_predictor:
+            self.predictor.eval()
+        if self.generator is not None:
+            self.generator.eval()
+            if self.discriminator is not None:
+                self.discriminator.eval()
+        if self.transcoder is not None:
+            self.transcoder.eval()
+
+    def enable_train(self):
+        """
+        Put the networks in training mode.
+        """
+        if self.dataset_args.train_predictor:
+            self.predictor.train()
+        if self.dataset_args.train_generator:
+            self.generator.train()
+            if self.generator_args.use_discriminator:
+                self.discriminator.train()
+        if self.transcoder_args.use_transcoder:
+            self.transcoder.train()
 
     def train(self, n_epochs: int):
         """
@@ -885,15 +936,7 @@ class Manager:
         """
         Train on a single batch of data.
         """
-        if self.dataset_args.train_predictor:
-            self.predictor.train()
-        if self.dataset_args.train_generator:
-            self.generator.train()
-            if self.generator_args.use_discriminator:
-                self.discriminator.train()
-        if self.transcoder_args.use_transcoder:
-            self.transcoder.train()
-
+        self.enable_train()
         outputs = {}
         stats = {}
         loss_total = 0.
@@ -1010,14 +1053,7 @@ class Manager:
             raise RuntimeError('No test data available, cannot test!')
         logger.info('Testing.')
         log_freq = self.runtime_args.log_every_n_batches
-        if self.dataset_args.train_predictor:
-            self.predictor.eval()
-        if self.dataset_args.train_generator:
-            self.generator.eval()
-            if self.generator_args.use_discriminator:
-                self.discriminator.eval()
-        if self.transcoder_args.use_transcoder:
-            self.transcoder.eval()
+        self.enable_eval()
         cumulative_loss = 0.
         cumulative_stats = {k: 0. for k in self.metric_keys}
 

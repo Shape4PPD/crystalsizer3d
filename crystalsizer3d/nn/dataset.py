@@ -197,6 +197,13 @@ class Dataset:
                 if rendering_parameters is not None:
                     item['rendering_parameters'] = rendering_parameters[idx]
 
+                # Add the bumpmap path if required
+                if self.dataset_args.crystal_bumpmap_dim > -1:
+                    bumpmap_path = self.path / 'bumpmaps' / f'{row["image"][:-4]}.npz'
+                    if self.ds_args.check_image_paths:
+                        assert bumpmap_path.exists(), f'Bumpmap path does not exist: {bumpmap_path}'
+                    item['rendering_parameters']['bumpmap'] = bumpmap_path
+
                 self.data[idx] = item
 
     def _load_ds_stats(self):

@@ -2,7 +2,10 @@ from typing import Optional, Tuple, Union
 
 import numpy as np
 import torch
-from kornia.geometry import axis_angle_to_rotation_matrix
+from kornia.geometry import axis_angle_to_rotation_matrix, quaternion_to_rotation_matrix, rotation_matrix_to_axis_angle, \
+    rotation_matrix_to_quaternion
+
+from crystalsizer3d.util.utils import to_numpy
 
 
 def normalise(v: Union[np.ndarray, torch.Tensor]) -> Union[np.ndarray, torch.Tensor]:
@@ -87,6 +90,58 @@ def geodesic_distance(R1: torch.Tensor, R2: torch.Tensor, EPS: float = 1e-4) -> 
     trace_temp = torch.clamp(trace_temp, -1 + EPS, 1 - EPS)
     theta = torch.acos(trace_temp)
     return theta
+
+
+def get_closest_rotation(
+        R0: Union[np.ndarray, torch.Tensor],
+        rotation_group: torch.Tensor,
+) -> Union[np.ndarray, torch.Tensor]:
+    """
+    Get the closest rotation in a group to a target rotation matrix.
+    """
+    return_numpy = False
+    if isinstance(R0, np.ndarray):
+        R0 = torch.from_numpy(R0)
+        return_numpy = True
+    R0_dev = R0.device
+    if R0_dev != rotation_group.device:
+        R0 = R0.to(rotation_group.device)
+    mode = 'rotation_matrix'
+    if R0.ndim == 1:
+        if len(R0) == 4:
+            mode = 'quaternion'
+            R0 = quaternion_to_rotation_matrix(R0[None, ...])[0]
+        elif len(R0) == 3:
+            mode = 'axis_angle'
+            R0 = axis_angle_to_rotation_matrix(R0[None, ...])[0]
+        else:
+            raise ValueError('Invalid rotation parameters.')
+    assert R0.shape == (3, 3), 'Invalid rotation matrix shape.'
+    assert rotation_group.ndim == 3 and rotation_group.shape[1:] == (3, 3), \
+        'Invalid rotation group shape.'
+
+    # Expand the rotation matrix to match the shape of the rotation group
+    R0 = R0[None, ...].expand(len(rotation_group), -1, -1)
+
+    # Calculate the angular differences between the target rotation and each rotation in the group
+    angular_differences = geodesic_distance(R0, rotation_group)
+
+    # Get the rotation with the smallest angular difference
+    min_idx = int(torch.argmin(angular_differences))
+    R_star = rotation_group[min_idx]
+
+    # Convert the rotation to the appropriate format
+    if mode == 'quaternion':
+        R_star = rotation_matrix_to_quaternion(R_star[None, ...])[0]
+    elif mode == 'axis_angle':
+        R_star = rotation_matrix_to_axis_angle(R_star[None, ...])[0]
+
+    # Return the result as a numpy array if the input was a numpy array
+    if return_numpy:
+        return to_numpy(R_star)
+
+    # Return the result as a tensor on the original device
+    return R_star.to(R0_dev)
 
 
 def align_points_to_xy_plane(

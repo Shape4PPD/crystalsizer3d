@@ -1,19 +1,20 @@
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional, TYPE_CHECKING, Tuple
+from typing import Any, Dict, List, Optional, TYPE_CHECKING, Tuple, Union
 
 import cv2
 import numpy as np
 import torch
+from PIL import Image
 from matplotlib import pyplot as plt
 from matplotlib.axes import Axes
 from matplotlib.figure import Figure
 from matplotlib.gridspec import GridSpec
 from mayavi import mlab
-from scipy.spatial.transform import Rotation
 
 from crystalsizer3d import USE_MLAB
-from crystalsizer3d.crystal import Crystal, ROTATION_MODE_QUATERNION
+from crystalsizer3d.crystal import Crystal, ROTATION_MODE_AXISANGLE, ROTATION_MODE_QUATERNION
+from crystalsizer3d.util.geometry import get_closest_rotation
 from crystalsizer3d.util.utils import equal_aspect_ratio, to_numpy, to_rgb
 
 if TYPE_CHECKING:
@@ -21,6 +22,19 @@ if TYPE_CHECKING:
 
 # Off-screen rendering
 mlab.options.offscreen = True
+
+
+def _load_single_parameter(Y: Union[None, Dict[str, torch.Tensor]], key: str, idx: Optional[int] = 0) -> Union[
+    None, np.ndarray]:
+    """
+    Load a single parameter from the dictionary and convert it to a numpy array.
+    """
+    if Y is None:
+        return None
+    val = to_numpy(Y[key])
+    if val.ndim == 2:
+        val = val[idx]
+    return val
 
 
 def get_ax_size(ax: Axes) -> Tuple[float, float]:
@@ -80,17 +94,20 @@ def add_discriminator_value(ax: Axes, outputs: Dict[str, torch.Tensor], D_key: s
 
 def make_3d_digital_crystal_image(
         crystal: Crystal,
+        crystal_comp: Optional[Crystal] = None,
         res: int = 100,
         bg_col: float = 1.,
         wireframe_radius_factor: float = 0.1,
         surface_colour: str = 'skyblue',
         wireframe_colour: str = 'darkblue',
+        surface_colour_comp: str = 'orange',
+        wireframe_colour_comp: str = 'red',
         opacity: float = 0.6,
         azim: float = 150,
         elev: float = 160,
         distance: Optional[float] = None,
         roll: float = 0
-):
+) -> Image:
     """
     Make a 3D image of the crystal.
     """
@@ -106,17 +123,23 @@ def make_3d_digital_crystal_image(
     fig.scene.anti_aliasing_frames = 20
 
     # Add crystal mesh
-    origin = crystal.origin.clone()
-    crystal.origin.data = torch.zeros_like(origin)
-    v, f = crystal.build_mesh()
-    v, f = to_numpy(v), to_numpy(f)
-    mlab.triangular_mesh(*v.T, f, figure=fig, color=to_rgb(surface_colour), opacity=opacity)
-    for fv_idxs in crystal.faces.values():
-        fv = to_numpy(crystal.vertices[fv_idxs])
-        fv = np.vstack([fv, fv[0]])  # Close the loop
-        mlab.plot3d(*fv.T, color=to_rgb(wireframe_colour),
-                    tube_radius=crystal.distances[0].item() * wireframe_radius_factor)
-    crystal.origin.data = origin
+    def _add_crystal_mesh(crystal_: Crystal, surface_colour_: str, wireframe_colour_: str):
+        origin = crystal_.origin.clone()
+        crystal_.origin.data = torch.zeros_like(origin)
+        v, f = crystal_.build_mesh()
+        v, f = to_numpy(v), to_numpy(f)
+        mlab.triangular_mesh(*v.T, f, figure=fig, color=to_rgb(surface_colour_), opacity=opacity)
+        for fv_idxs in crystal_.faces.values():
+            fv = to_numpy(crystal_.vertices[fv_idxs])
+            fv = np.vstack([fv, fv[0]])  # Close the loop
+            mlab.plot3d(*fv.T, color=to_rgb(wireframe_colour_),
+                        tube_radius=crystal_.distances[0].item() * wireframe_radius_factor)
+        crystal_.origin.data = origin
+
+    # Add crystal(s)
+    _add_crystal_mesh(crystal, surface_colour, wireframe_colour)
+    if crystal_comp is not None:
+        _add_crystal_mesh(crystal_comp, surface_colour_comp, wireframe_colour_comp)
 
     # Render
     mlab.view(figure=fig, azimuth=azim, elevation=elev, distance=distance, roll=roll, focalpoint=np.zeros(3))
@@ -139,13 +162,44 @@ def make_3d_digital_crystal_image(
     # exit()
 
     # fig.scene.render()
-    image = mlab.screenshot(mode='rgb', antialiased=True, figure=fig)
-    image = cv2.resize(image, None, fx=0.5, fy=0.5, interpolation=cv2.INTER_AREA)
-    image = cv2.cvtColor(image, cv2.COLOR_RGB2BGR)
+    frame = mlab.screenshot(mode='rgba', antialiased=True, figure=fig)
+    frame = cv2.resize(frame, None, fx=0.5, fy=0.5, interpolation=cv2.INTER_AREA)
+    img = Image.fromarray((frame * 255).astype(np.uint8), 'RGBA')
 
     mlab.close()
 
-    return image
+    return img
+
+
+def make_error_image(
+        img_target: np.ndarray,
+        img_pred: np.ndarray,
+        loss_type: str = 'l2'
+) -> Image:
+    """
+    Make an error image.
+    """
+    img_target = np.array(Image.fromarray(img_target).convert('L')).astype(np.float32) / 255
+    img_pred = np.array(Image.fromarray(img_pred).convert('L')).astype(np.float32) / 255
+    if loss_type == 'l2':
+        err = (img_target - img_pred)**2
+    elif loss_type == 'l1':
+        err = np.abs(img_target - img_pred)
+    else:
+        raise NotImplementedError()
+    if err.ndim == 3:
+        err = np.mean(err, axis=-1)
+    err = err / err.max()
+    err_pos, err_neg = err.copy(), err.copy()
+    err_pos[img_target > img_pred] = 0
+    err_neg[img_target < img_pred] = 0
+    img = np.ones((*img_pred.shape, 4))
+    img[:, :, 0] = 1 - err_neg
+    img[:, :, 1] = 1 - err_pos - err_neg
+    img[:, :, 2] = 1 - err_pos
+    img[:, :, 3] = np.where(err > 1e-3, 1, 0)
+    img = Image.fromarray((img * 255).astype(np.uint8))
+    return img
 
 
 def plot_3d(
@@ -222,44 +276,94 @@ def plot_zingg(
         ax.yaxis.set_tick_params(labelleft=False)
 
 
+def _add_bars(
+        ax: Axes,
+        pred: np.ndarray,
+        target: Optional[np.ndarray] = None,
+        pred2: Optional[np.ndarray] = None,
+        colour_pred: str = 'darkblue',
+        colour_target: str = 'red',
+        colour_pred2: str = 'green',
+) -> Tuple[np.ndarray, float, float]:
+    """
+    Add bar chart data to the axis.
+    """
+    locs = np.arange(len(pred))
+    if pred2 is not None:
+        bar_width = 0.25
+        offset = bar_width
+        ax.bar(locs - offset, target, bar_width, color=colour_target, label='Target')
+        ax.bar(locs, pred, bar_width, color=colour_pred, label='Predicted')
+        ax.bar(locs + offset, pred2, bar_width, color=colour_pred2, label='Predicted2')
+    elif target is not None:
+        bar_width = 0.35
+        offset = bar_width / 2
+        ax.bar(locs - offset, target, bar_width, color=colour_target, label='Target')
+        ax.bar(locs + offset, pred, bar_width, color=colour_pred, label='Predicted')
+    else:
+        bar_width = 0.7
+        offset = 0
+        ax.bar(locs, pred, bar_width, color=colour_pred, label='Predicted')
+
+    return locs, bar_width, offset
+
+
+def _shared_ax_legend(share_ax: Dict[str, Axes], ax: Axes, key: str):
+    """
+    Add a shared legend to the axis.
+    """
+    if share_ax is None:
+        ax.legend()
+    else:
+        if key not in share_ax:
+            ax.legend()
+            share_ax[key] = ax
+        else:
+            ax.sharey(share_ax[key])
+            ax.yaxis.set_tick_params(labelleft=False)
+            ax.autoscale()
+
+
 def plot_distances(
         ax: Axes,
+        manager: Manager,
         Y_pred: Dict[str, torch.Tensor],
-        Y_target: Dict[str, torch.Tensor],
-        Y_pred2: Dict[str, torch.Tensor],
-        idx: int,
-        share_ax: Dict[str, Axes],
-        manager: Manager
+        Y_target: Optional[Dict[str, torch.Tensor]] = None,
+        Y_pred2: Optional[Dict[str, torch.Tensor]] = None,
+        idx: int = 0,
+        colour_pred: str = 'darkblue',
+        colour_target: str = 'red',
+        colour_pred2: str = 'green',
+        share_ax: Optional[Dict[str, Axes]] = None
 ):
     """
     Plot the distances on the axis.
     """
     ax_pos = ax.get_position()
     ax.set_position([ax_pos.x0, ax_pos.y0 + 0.02, ax_pos.width, ax_pos.height - 0.02])
-    d_pred = to_numpy(Y_pred['distances'][idx])
-    d_target = to_numpy(Y_target['distances'][idx])
-    if manager.dataset_args.train_generator:
-        d_pred2 = to_numpy(Y_pred2['distances'][idx])
+    d_pred = _load_single_parameter(Y_pred, 'distances', idx)
+    d_target = _load_single_parameter(Y_target, 'distances', idx)
+    d_pred2 = _load_single_parameter(Y_pred2, 'distances', idx)
 
     # Clip predictions to -1 to avoid large negatives skewing the plots
     d_pred = np.clip(d_pred, a_min=-1, a_max=np.inf)
 
-    locs = np.arange(len(d_target))
-    if manager.dataset_args.train_generator:
-        bar_width = 0.25
-        offset = bar_width
-        ax.bar(locs - offset, d_target, bar_width, label='Target')
-        ax.bar(locs, d_pred, bar_width, label='Predicted')
-        ax.bar(locs + offset, d_pred2, bar_width, label='Predicted2')
-    else:
-        bar_width = 0.35
-        offset = bar_width / 2
-        ax.bar(locs - offset, d_target, bar_width, label='Target')
-        ax.bar(locs + offset, d_pred, bar_width, label='Predicted')
+    # Add bar chart data
+    locs, bar_width, offset = _add_bars(
+        ax=ax,
+        pred=d_pred,
+        target=d_target,
+        pred2=d_pred2,
+        colour_pred=colour_pred,
+        colour_target=colour_target,
+        colour_pred2=colour_pred2,
+    )
+    locs = np.arange(len(d_pred))
+    xlabels = ['(' + ','.join(list(l[3:])) + ')' for l in manager.ds.labels_distances_active]
 
     if manager.dataset_args.use_distance_switches:
-        s_pred = to_numpy(Y_pred['distance_switches'][idx])
-        s_target = to_numpy(Y_target['distance_switches'][idx])
+        s_pred = _load_single_parameter(Y_pred, 'distance_switches', idx)
+        s_target = _load_single_parameter(Y_target, 'distance_switches', idx)
         k = 2.3
         colours = []
         for i, (sp, st) in enumerate(zip(s_pred, s_target)):
@@ -270,109 +374,122 @@ def plot_distances(
             colours.append('red' if (st < 0.5 < sp) or (st > 0.5 > sp) else 'green')
         ax.scatter(locs + offset, s_pred, color=colours, marker='+', s=100, label='Switches')
 
+    if manager.ds.dataset_args.distance_constraints is not None:
+        locs = np.concatenate([[-1], locs])
+        ax.bar(-1, 1, bar_width, color='purple', label='Constraint')
+        largest_hkl = '(' + ','.join([str(hkl) for hkl in manager.crystal_generator.constraints[0]]) + ')'
+        xlabels = [largest_hkl] + xlabels
+
     ax.set_title('Distances')
     ax.set_xticks(locs)
-    ax.set_xticklabels(manager.ds.labels_distances_active)
-    ax.tick_params(axis='x', rotation=270)
-    if 'distances' not in share_ax:
-        ax.legend()
-        share_ax['distances'] = ax
-    else:
-        ax.sharey(share_ax['distances'])
-        ax.yaxis.set_tick_params(labelleft=False)
-        ax.autoscale()
+    ax.set_xticklabels(xlabels)
+    ax.set_ylim(0, 1)
+    ax.set_yticks([0, 0.5, 1])
+    ax.set_yticklabels(['0', '', '1'])
+    _shared_ax_legend(share_ax, ax, 'distances')
 
 
 def plot_transformation(
         ax: Axes,
+        manager: Manager,
         Y_pred: Dict[str, torch.Tensor],
-        Y_target: Dict[str, torch.Tensor],
-        Y_pred2: Dict[str, torch.Tensor],
-        idx: int,
-        share_ax: Dict[str, Axes],
-        manager: Manager
+        Y_target: Optional[Dict[str, torch.Tensor]] = None,
+        Y_pred2: Optional[Dict[str, torch.Tensor]] = None,
+        idx: int = 0,
+        colour_pred: str = 'darkblue',
+        colour_target: str = 'red',
+        colour_pred2: str = 'green',
+        share_ax: Optional[Dict[str, Axes]] = None
 ):
     """
     Plot the transformation parameters.
     """
-    t_pred = to_numpy(Y_pred['transformation'][idx])
-    t_target = to_numpy(Y_target['transformation'][idx])
-    if manager.dataset_args.train_generator:
-        t_pred2 = to_numpy(Y_pred2['transformation'][idx])
+    t_pred = _load_single_parameter(Y_pred, 'transformation', idx)
+    t_target = _load_single_parameter(Y_target, 'transformation', idx)
+    t_pred2 = _load_single_parameter(Y_pred2, 'transformation', idx)
 
     # Adjust the target rotation to the best matching symmetry group
-    sgi = manager.sym_group_idxs[idx]
-    if manager.dataset_args.rotation_mode == ROTATION_MODE_QUATERNION:
-        t_target[4:] = to_numpy(Y_target['sym_rotations'][idx][sgi])
-    else:
-        R = to_numpy(Y_target['sym_rotations'][idx][sgi])
-        t_target[4:] = Rotation.from_matrix(R).as_rotvec()
+    if (Y_target is not None
+            and manager.dataset_args.rotation_mode in [ROTATION_MODE_QUATERNION, ROTATION_MODE_AXISANGLE]
+            and 'sym_rotations' in Y_target):
+        t_target[4:] = get_closest_rotation(t_pred[4:], Y_target['sym_rotations'])
 
-    locs = np.arange(len(t_target))
+    # Add bar chart data
+    locs, bar_width, offset = _add_bars(
+        ax=ax,
+        pred=t_pred,
+        target=t_target,
+        pred2=t_pred2,
+        colour_pred=colour_pred,
+        colour_target=colour_target,
+        colour_pred2=colour_pred2,
+    )
 
-    if manager.dataset_args.train_generator:
-        bar_width = 0.25
-        offset = bar_width
-        ax.bar(locs - offset, t_target, bar_width, label='Target')
-        ax.bar(locs, t_pred, bar_width, label='Predicted')
-        ax.bar(locs + offset, t_pred2, bar_width, label='Predicted2')
+    # Add highlight spans
+    if t_pred2 is not None:
         k = 2 * offset
+    elif t_target is not None:
+        k = 3 / 2 * bar_width
     else:
-        bar_width = 0.35
-        offset = bar_width / 2
-        ax.bar(locs - offset, t_target, bar_width, label='Target')
-        ax.bar(locs + offset, t_pred, bar_width, label='Predicted')
-        k = 3 * offset
+        k = 3 / 4 * bar_width
     ax.axvspan(locs[0] - k, locs[2] + k, alpha=0.1, color='green')
     ax.axvspan(locs[3] - k, locs[3] + k, alpha=0.1, color='red')
     ax.axvspan(locs[4] - k, locs[-1] + k, alpha=0.1, color='blue')
+
     ax.set_title('Transformation')
+    ax.axhline(0, color='grey', linestyle='--', linewidth=1)
+    lbls = []
+    for l in manager.ds.labels_transformation_active:
+        if l in ['x', 'z', 'rw', 'ry', 'rz', 'rax', 'raz']:
+            lbls.append('')
+        elif l == 'y':
+            lbls.append('Position')
+        elif l == 's':
+            lbls.append('Scale')
+        elif l in ['rx', 'ray']:
+            lbls.append('Rotation')
     ax.set_xticks(locs)
-    xlabels = manager.ds.labels_transformation.copy()
-    if manager.dataset_args.rotation_mode == ROTATION_MODE_QUATERNION:
-        xlabels += manager.ds.labels_rotation_quaternion
-    else:
-        xlabels += manager.ds.labels_rotation_axisangle
-    ax.set_xticklabels(xlabels)
-    if 'transformation' not in share_ax:
-        ax.legend()
-        share_ax['transformation'] = ax
-    else:
-        ax.sharey(share_ax['transformation'])
-        ax.yaxis.set_tick_params(labelleft=False)
-        ax.autoscale()
+    ax.set_xticklabels(lbls)
+    y_extent = max(1, max(abs(y) for y in ax.get_ylim()))
+    ax.set_ylim(-y_extent, y_extent)
+    ylabels = [str(int(y)) if y == int(y) else '' for y in ax.get_yticks()]
+    ax.set_yticks(ax.get_yticks())  # Suppress warning
+    ax.set_yticklabels(ylabels)
+    _shared_ax_legend(share_ax, ax, 'transformation')
 
 
 def plot_material(
         ax: Axes,
+        manager: Manager,
         Y_pred: Dict[str, torch.Tensor],
-        Y_target: Dict[str, torch.Tensor],
-        Y_pred2: Dict[str, torch.Tensor],
-        idx: int,
-        share_ax: Dict[str, Axes],
-        manager: Manager
+        Y_target: Optional[Dict[str, torch.Tensor]] = None,
+        Y_pred2: Optional[Dict[str, torch.Tensor]] = None,
+        idx: int = 0,
+        colour_pred: str = 'darkblue',
+        colour_target: str = 'red',
+        colour_pred2: str = 'green',
+        share_ax: Optional[Dict[str, Axes]] = None
 ):
     """
     Plot the material parameters.
     """
-    m_pred = to_numpy(Y_pred['material'][idx])
-    m_target = to_numpy(Y_target['material'][idx])
-    if manager.dataset_args.train_generator:
-        m_pred2 = to_numpy(Y_pred2['material'][idx])
+    m_pred = _load_single_parameter(Y_pred, 'material', idx)
+    m_target = _load_single_parameter(Y_target, 'material', idx)
+    m_pred2 = _load_single_parameter(Y_pred2, 'material', idx)
 
-    locs = np.arange(len(m_target))
-    if manager.dataset_args.train_generator:
-        bar_width = 0.25
-        offset = bar_width
-        ax.bar(locs - offset, m_target, bar_width, label='Target')
-        ax.bar(locs, m_pred, bar_width, label='Predicted')
-        ax.bar(locs + offset, m_pred2, bar_width, label='Predicted2')
-    else:
-        bar_width = 0.35
-        offset = bar_width / 2
-        ax.bar(locs - offset, m_target, bar_width, label='Target')
-        ax.bar(locs + offset, m_pred, bar_width, label='Predicted')
+    # Add bar chart data
+    locs, bar_width, offset = _add_bars(
+        ax=ax,
+        pred=m_pred,
+        target=m_target,
+        pred2=m_pred2,
+        colour_pred=colour_pred,
+        colour_target=colour_target,
+        colour_pred2=colour_pred2,
+    )
+
     ax.set_title('Material')
+    ax.axhline(0, color='grey', linestyle='--', linewidth=1)
     ax.set_xticks(locs)
     for i in range(len(locs) - 1):
         ax.axvline(locs[i] + .5, color='black', linestyle='--', linewidth=1)
@@ -382,46 +499,44 @@ def plot_material(
     if 'r' in manager.ds.labels_material_active:
         labels.append('Roughness')
     ax.set_xticklabels(labels)
-    if 'material' not in share_ax:
-        ax.legend()
-        share_ax['material'] = ax
-    else:
-        ax.sharey(share_ax['material'])
-        ax.yaxis.set_tick_params(labelleft=False)
-        ax.autoscale()
+    _shared_ax_legend(share_ax, ax, 'material')
 
 
 def plot_light(
         ax: Axes,
         Y_pred: Dict[str, torch.Tensor],
-        Y_target: Dict[str, torch.Tensor],
-        idx: int,
-        share_ax: Dict[str, Axes],
-        manager: Manager,
+        Y_target: Optional[Dict[str, torch.Tensor]] = None,
+        Y_pred2: Optional[Dict[str, torch.Tensor]] = None,
+        idx: int = 0,
+        colour_pred: str = 'darkblue',
+        colour_target: str = 'red',
+        colour_pred2: str = 'green',
+        share_ax: Optional[Dict[str, Axes]] = None,
         **kwargs
 ):
     """
     Plot the light parameters.
     """
-    l_pred = to_numpy(Y_pred['light'][idx])
-    l_target = to_numpy(Y_target['light'][idx])
-    locs = np.arange(len(l_target))
-    bar_width = 0.35
-    offset = bar_width / 2
-    ax.bar(locs - offset, l_target, bar_width, label='Target')
-    ax.bar(locs + offset, l_pred, bar_width, label='Predicted')
+    l_pred = _load_single_parameter(Y_pred, 'light', idx)
+    l_target = _load_single_parameter(Y_target, 'light', idx)
+    l_pred2 = _load_single_parameter(Y_pred2, 'light', idx)
+
+    # Add bar chart data
+    locs, bar_width, offset = _add_bars(
+        ax=ax,
+        pred=l_pred,
+        target=l_target,
+        pred2=l_pred2,
+        colour_pred=colour_pred,
+        colour_target=colour_target,
+        colour_pred2=colour_pred2,
+    )
+
     ax.set_title('Light')
     ax.set_xticks(locs)
-
-    xlabels = manager.ds.labels_light.copy()
-    ax.set_xticklabels(xlabels)
-    if 'light' not in share_ax:
-        ax.legend()
-        share_ax['light'] = ax
-    else:
-        ax.sharey(share_ax['light'])
-        ax.yaxis.set_tick_params(labelleft=False)
-        ax.autoscale()
+    ax.set_xticklabels(['R', 'G', 'B'])
+    ax.axhline(0, color='grey', linestyle='--', linewidth=1)
+    _shared_ax_legend(share_ax, ax, 'light')
 
 
 def plot_training_samples(
@@ -437,7 +552,8 @@ def plot_training_samples(
     n_examples = len(idxs)
     metas, images, images_aug, Y_target = data
     Y_pred = outputs['Y_pred']
-    if manager.dataset_args.train_generator:
+    dsa = manager.dataset_args
+    if dsa.train_generator:
         X_pred = outputs['X_pred']
         X_pred2 = outputs['X_pred2']
         Y_pred2 = outputs['Y_pred2']
@@ -446,25 +562,25 @@ def plot_training_samples(
         X_pred2 = None
         Y_pred2 = None
     n_rows = 4 \
-             + int(manager.dataset_args.train_zingg) \
-             + int(manager.dataset_args.train_distances) \
-             + int(manager.dataset_args.train_transformation) \
-             + int(manager.dataset_args.train_material and len(manager.ds.labels_material_active) > 0) \
-             + int(manager.dataset_args.train_light) \
-             + int(manager.dataset_args.train_generator) * 2
+             + int(dsa.train_zingg) \
+             + int(dsa.train_distances) \
+             + int(dsa.train_transformation) \
+             + int(dsa.train_material and len(manager.ds.labels_material_active) > 0) \
+             + int(dsa.train_light) \
+             + int(dsa.train_generator) * 2
 
     height_ratios = [1.2, 1.2, 1, 1]  # images and 3d plots
-    if manager.dataset_args.train_zingg:
+    if dsa.train_zingg:
         height_ratios.append(0.5)
-    if manager.dataset_args.train_distances:
+    if dsa.train_distances:
         height_ratios.append(1)
-    if manager.dataset_args.train_transformation:
+    if dsa.train_transformation:
         height_ratios.append(0.7)
-    if manager.dataset_args.train_material and len(manager.ds.labels_material_active) > 0:
+    if dsa.train_material and len(manager.ds.labels_material_active) > 0:
         height_ratios.append(0.7)
-    if manager.dataset_args.train_light:
+    if dsa.train_light:
         height_ratios.append(0.7)
-    if manager.dataset_args.train_generator:
+    if dsa.train_generator:
         height_ratios.insert(0, 1.2)
         height_ratios.insert(0, 1.2)
 
@@ -519,7 +635,7 @@ def plot_training_samples(
         row_idx += 1
 
         # Plot the generated image(s)
-        if manager.dataset_args.train_generator:
+        if dsa.train_generator:
             img = to_numpy(X_pred[idx]).squeeze()
             ax = fig.add_subplot(gs[row_idx, i])
             plot_image(ax, 'Generated', img)
@@ -548,19 +664,19 @@ def plot_training_samples(
             share_ax=share_ax,
             manager=manager
         )
-        if manager.dataset_args.train_zingg:
+        if dsa.train_zingg:
             plot_zingg(fig.add_subplot(gs[row_idx, i]), **shared_args)
             row_idx += 1
-        if manager.dataset_args.train_distances:
+        if dsa.train_distances:
             plot_distances(fig.add_subplot(gs[row_idx, i]), **shared_args)
             row_idx += 1
-        if manager.dataset_args.train_transformation:
+        if dsa.train_transformation:
             plot_transformation(fig.add_subplot(gs[row_idx, i]), **shared_args)
             row_idx += 1
-        if manager.dataset_args.train_material and len(manager.ds.labels_material_active) > 0:
+        if dsa.train_material and len(manager.ds.labels_material_active) > 0:
             plot_material(fig.add_subplot(gs[row_idx, i]), **shared_args)
             row_idx += 1
-        if manager.dataset_args.train_light:
+        if dsa.train_light:
             plot_light(fig.add_subplot(gs[row_idx, i]), **shared_args)
 
     return fig

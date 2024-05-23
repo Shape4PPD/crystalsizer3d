@@ -6,7 +6,7 @@ import shutil
 import time
 from multiprocessing import Pool
 from pathlib import Path
-from typing import List, Optional, Tuple
+from typing import List, Optional
 
 import cv2
 import matplotlib.pyplot as plt
@@ -395,8 +395,8 @@ class CrystalRenderer:
         self.rendering_params_path = self.root_dir / 'rendering_parameters.json'
         self.segmentations_dir = self.root_dir / 'segmentations'
         self.segmentations_path = self.root_dir / 'segmentations.json'
+        self.remove_mismatched = remove_mismatched
         self._init_crystal_settings()
-        self._load_parameters(remove_mismatched)
 
     def _init_crystal_settings(self):
         """
@@ -408,6 +408,15 @@ class CrystalRenderer:
         self.lattice_angles = cs.lattice_angles
         self.point_group_symbol = cs.point_group_symbol
         self.miller_indices = self.dataset_args.miller_indices
+
+    def __getattr__(self, name: str):
+        """
+        Lazy loading of the data.
+        """
+        if name in ['rendering_params', 'segmentations', 'data']:
+            self._load_parameters(remove_mismatched=self.remove_mismatched)
+            return getattr(self, name)
+        raise AttributeError(f"'{self.__class__.__name__}' object has no attribute '{name}'")
 
     def _load_parameters(self, remove_mismatched: bool = False):
         """

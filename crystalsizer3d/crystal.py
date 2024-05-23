@@ -235,7 +235,7 @@ class Crystal(nn.Module):
                 rotated_indices = sym_op.operate(indices)
                 # Check if the rotated indices already exist
                 found = False
-                for (mi, d) in zip(all_miller_indices, all_distances):
+                for mi in all_miller_indices:
                     if np.array_equal(mi, rotated_indices):
                         found = True
                         break

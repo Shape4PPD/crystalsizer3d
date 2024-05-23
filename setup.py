@@ -12,6 +12,7 @@ setup(
     install_requires=[
         'cholespy >= 1.0, < 1.1',
         'csd-python-api >= 3.1, < 3.2',
+        'filelock >= 3.13, < 3.14',
         'ffmpeg-python >= 0.2, < 0.3',
         'gigagan-pytorch >= 0.2, < 0.3',
         'gpytoolbox >= 0.2, < 0.3',
@@ -20,6 +21,7 @@ setup(
         'mayavi >= 4.8, < 4.9',
         'mitsuba >= 3.5, < 3.6',
         'numpy >= 1.26, < 1.27',
+        'opencv-python >= 4.9, < 5.0',
         'parti-pytorch >= 0.2, < 0.3',
         'pillow >= 9.5, < 9.6',
         'pymatgen >= 2024.5, < 2024.6',
