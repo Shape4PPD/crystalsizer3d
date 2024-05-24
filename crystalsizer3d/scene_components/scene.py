@@ -1,26 +1,28 @@
 import math
-from typing import List, Optional, Tuple
+from typing import List, Optional, Tuple, Union
 
 import mitsuba as mi
 import numpy as np
 import torch
-from scipy.optimize import minimize
-from scipy.spatial import ConvexHull
-
 from crystalsizer3d import MI_CPU_VARIANT, USE_CUDA
 from crystalsizer3d.args.dataset_synthetic_args import ROTATION_MODE_AXISANGLE
 from crystalsizer3d.crystal import Crystal
 from crystalsizer3d.scene_components.bubble import Bubble
+from crystalsizer3d.scene_components.textures import NoiseTexture, NormalMapNoiseTexture
 from crystalsizer3d.scene_components.utils import RenderError, build_crystal_mesh, project_to_image
 from crystalsizer3d.util.geometry import normalise
 from crystalsizer3d.util.utils import to_numpy
+from scipy.optimize import minimize
+from scipy.spatial import ConvexHull
 
 if USE_CUDA:
     if 'cuda_ad_rgb' not in mi.variants():
         raise RuntimeError('No CUDA variant found.')
     mi.set_variant('cuda_ad_rgb')
+    device = torch.device('cuda')
 else:
     mi.set_variant(MI_CPU_VARIANT)
+    device = torch.device('cpu')
 
 from mitsuba import ScalarTransform4f as T
 
@@ -52,9 +54,12 @@ class Scene:
             light_z_position: float = -10.1,
             light_scale: float = 50.,
             light_radiance: Tuple[float, float, float] = (0.5, 0.5, 0.5),
+            light_st_texture: Optional[Union[NoiseTexture, torch.Tensor]] = None,
 
             cell_z_positions: List[float] = [-10., 0., 50., 60.],
             cell_surface_scale: float = 100.,
+            cell_bumpmap: Optional[Union[NormalMapNoiseTexture, torch.Tensor]] = None,
+            cell_bumpmap_idx: int = 1,
 
             **kwargs
     ):
@@ -85,10 +90,13 @@ class Scene:
         self.light_z_position = light_z_position
         self.light_scale = light_scale
         self.light_radiance = light_radiance
+        self.light_st_texture = light_st_texture
 
         # Growth cell parameters
         self.cell_z_positions = cell_z_positions
         self.cell_surface_scale = cell_surface_scale
+        self.cell_bumpmap = cell_bumpmap
+        self.cell_bumpmap_idx = cell_bumpmap_idx
 
         self.build_mi_scene()
 
@@ -112,9 +120,14 @@ class Scene:
             'light_z_position': self.light_z_position,
             'light_scale': self.light_scale,
             'light_radiance': self.light_radiance,
+            'light_st_texture': self.light_st_texture.to_dict()
+            if isinstance(self.light_st_texture, NoiseTexture) else None,
 
             'cell_z_positions': self.cell_z_positions,
             'cell_surface_scale': self.cell_surface_scale,
+            'cell_bumpmap': self.cell_bumpmap.to_dict()
+            if isinstance(self.cell_bumpmap, NormalMapNoiseTexture) else None,
+            'cell_bumpmap_idx': self.cell_bumpmap_idx,
         }
 
         if self.crystal is not None:
@@ -178,17 +191,42 @@ class Scene:
 
     @property
     def light_params(self) -> dict:
-        return {
-            'type': 'rectangle',
-            'to_world': T.translate([0, 0, self.light_z_position]) @ T.scale(self.light_scale),
-            'emitter': {
-                'type': 'area',
-                'radiance': {
-                    'type': 'rgb',
-                    'value': self.light_radiance
-                }
-            },
+        light_params = {
+            'light': {
+                'type': 'rectangle',
+                'to_world': T.translate([0, 0, self.light_z_position]) @ T.scale(self.light_scale),
+                'emitter': {
+                    'type': 'area',
+                    'radiance': {
+                        'type': 'rgb',
+                        'value': self.light_radiance
+                    }
+                },
+            }
         }
+        if self.light_st_texture is not None:
+            if isinstance(self.light_st_texture, NoiseTexture):
+                tex = self.light_st_texture.build(device=device)
+            elif isinstance(self.light_st_texture, torch.Tensor):
+                tex = self.light_st_texture
+            else:
+                raise ValueError(f'Invalid light specular transmittance texture type: {type(self.light_st_texture)}')
+            assert tex.ndim == 3, 'Light specular transmittance texture must be 3D.'
+            assert tex.shape[-1] == 3, 'Light specular transmittance texture must have 3 channels.'
+            light_params['diffuser'] = {
+                'type': 'rectangle',
+                'to_world': T.translate([0, 0, self.light_z_position + 0.01]) @ T.scale(self.light_scale),
+                'material': {
+                    'type': 'roughdielectric',
+                    'specular_transmittance': {
+                        'type': 'bitmap',
+                        'bitmap': mi.Bitmap(mi.TensorXf(tex)),
+                        'wrap_mode': 'clamp',
+                        'raw': True,
+                    }
+                }
+            }
+        return light_params
 
     @property
     def crystal_material_bsdf(self) -> dict:
@@ -204,15 +242,39 @@ class Scene:
     def growth_cell_params(self) -> dict:
         cell = {}
         for i, z in enumerate(self.cell_z_positions):
+            material_bsdf = {
+                'type': 'thindielectric',
+                'int_ior': 'acrylic glass',  # 1.49
+                'ext_ior': 'water',  # 1.333
+            }
+
+            if self.cell_bumpmap is not None and i == self.cell_bumpmap_idx:
+                if isinstance(self.cell_bumpmap, NormalMapNoiseTexture):
+                    tex = self.cell_bumpmap.build(device=device)
+                elif isinstance(self.cell_bumpmap, torch.Tensor):
+                    tex = self.cell_bumpmap
+                else:
+                    raise ValueError(f'Invalid cell bumpmap texture type: {type(self.cell_bumpmap)}')
+                assert tex.ndim == 3, 'Cell bumpmap texture must be 2D.'
+                bsdf = {
+                    'type': 'normalmap',
+                    'normalmap': {
+                        'type': 'bitmap',
+                        'bitmap': mi.Bitmap(mi.TensorXf(tex)),
+                        'wrap_mode': 'clamp',
+                        'raw': True,
+                    },
+                    'bsdf': material_bsdf
+                }
+            else:
+                bsdf = material_bsdf
+
             cell[f'cell_glass_{i}'] = {
                 'type': 'rectangle',
                 'to_world': T.translate([0, 0, z]) @ T.scale(self.cell_surface_scale),
-                'material': {
-                    'type': 'thindielectric',
-                    'int_ior': 'acrylic glass',  # 1.49
-                    'ext_ior': 'water',  # 1.333
-                },
+                'material': bsdf,
             }
+
         return cell
 
     def build_mi_scene(self):
@@ -223,8 +285,8 @@ class Scene:
             'type': 'scene',
             'integrator': self.integrator_params,
             'sensor': self.sensor_params,
-            'light': self.light_params,
         }
+        scene_dict.update(self.light_params)
         scene_dict.update(self.growth_cell_params)
 
         # Add crystal
@@ -517,12 +579,14 @@ class Scene:
         if rebuild_scene:
             self.build_mi_scene()
 
-    def clear_bubbles_and_bumpmap(self):
+    def clear_interference(self):
         """
-        Clear the bubbles and bumpmap from the scene.
+        Clear the textures, bumpmaps, bubbles and defects from the scene.
         """
-        self.bubbles = []
+        self.light_st_texture = None
+        self.cell_bumpmap = None
         if self.crystal is not None:
             self.crystal.use_bumpmap = False
             self.crystal.bumpmap = None
+        self.bubbles = []
         self.build_mi_scene()

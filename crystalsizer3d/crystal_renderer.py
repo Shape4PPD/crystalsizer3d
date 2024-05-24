@@ -21,7 +21,7 @@ from crystalsizer3d.args.dataset_synthetic_args import DatasetSyntheticArgs
 from crystalsizer3d.crystal import Crystal
 from crystalsizer3d.csd_proxy import CSDProxy
 from crystalsizer3d.scene_components.bubble import Bubble, make_bubbles
-from crystalsizer3d.scene_components.bumpmap import generate_bumpmap
+from crystalsizer3d.scene_components.textures import NoiseTexture, NormalMapNoiseTexture, generate_crystal_bumpmap
 from crystalsizer3d.scene_components.scene import Scene
 from crystalsizer3d.scene_components.utils import RenderError
 from crystalsizer3d.util.utils import SEED, hash_data, to_numpy
@@ -143,7 +143,7 @@ def _initialise_crystal(
     # Create the crystal bumpmap
     if da.crystal_bumpmap_dim > 0:
         n_defects = np.random.randint(da.min_defects, da.max_defects + 1)
-        crystal.bumpmap.data = generate_bumpmap(
+        crystal.bumpmap.data = generate_crystal_bumpmap(
             crystal=crystal,
             n_defects=n_defects,
             defect_min_width=da.defect_min_width,
@@ -215,13 +215,13 @@ def _render_batch(
     images_dir = root_dir / 'images'
     params_dir = root_dir / 'rendering_parameters'
     segmentations_dir = root_dir / 'segmentations'
-    bumpmaps_dir = root_dir / 'bumpmaps'
+    crystal_bumpmaps_dir = root_dir / 'crystal_bumpmaps'
     clean_images_dir = root_dir / 'images_clean'
     images_dir.mkdir(exist_ok=True)
     params_dir.mkdir(exist_ok=True)
     segmentations_dir.mkdir(exist_ok=True)
     if da.crystal_bumpmap_dim > 0:
-        bumpmaps_dir.mkdir(exist_ok=True)
+        crystal_bumpmaps_dir.mkdir(exist_ok=True)
     if da.generate_clean:
         clean_images_dir.mkdir(exist_ok=True)
     if output_dir is None:
@@ -263,6 +263,32 @@ def _render_batch(
             # Sample the light radiance
             scene.light_radiance = np.random.uniform(da.light_radiance_min, da.light_radiance_max)
 
+            # Randomise the light texture
+            if da.light_texture_dim > -1:
+                scene.light_st_texture = NoiseTexture(
+                    dim=da.light_texture_dim,
+                    channels=3,
+                    perlin_freq=np.random.uniform(da.light_perlin_freq_min, da.light_perlin_freq_max),
+                    perlin_octaves=np.random.randint(da.light_perlin_octaves_min, da.light_perlin_octaves_max + 1),
+                    white_noise_scale=np.random.uniform(da.light_white_noise_scale_min, da.light_white_noise_scale_max),
+                    max_amplitude=np.random.uniform(da.light_noise_amplitude_min, da.light_noise_amplitude_max),
+                    zero_centred=True,
+                    shift=1.,
+                    seed=seed
+                )
+
+            # Randomise the cell bumpmap
+            if da.cell_bumpmap_dim > -1:
+                scene.cell_bumpmap = NormalMapNoiseTexture(
+                    dim=da.cell_bumpmap_dim,
+                    perlin_freq=np.random.uniform(da.cell_perlin_freq_min, da.cell_perlin_freq_max),
+                    perlin_octaves=np.random.randint(da.cell_perlin_octaves_min, da.cell_perlin_octaves_max + 1),
+                    white_noise_scale=np.random.uniform(da.cell_white_noise_scale_min, da.cell_white_noise_scale_max),
+                    max_amplitude=np.random.uniform(da.cell_noise_amplitude_min, da.cell_noise_amplitude_max),
+                    seed=seed
+                )
+                scene.cell_bumpmap_idx = 1  # Only one bumpmap supported for now
+
             # Create and render the scene
             with torch.no_grad():
                 scene.place_crystal(
@@ -296,20 +322,24 @@ def _render_batch(
             rendering_params[idx] = {
                 'seed': seed + idx,
                 'light_radiance': scene_params['light_radiance'].tolist(),
+                'light_st_texture': scene_params['light_st_texture'],
+                'cell_bumpmap': scene_params['cell_bumpmap'],
+                'cell_bumpmap_idx': scene_params['cell_bumpmap_idx'],
                 'crystal': scene_params['crystal'],
             }
             if 'bubbles' in scene_params:
                 rendering_params[idx]['bubbles'] = scene_params['bubbles']
             segmentations[idx] = scene.get_crystal_image_coords().tolist()
 
-            # Save the defect bumpmap
-            if da.crystal_bumpmap_dim > -1:
-                bumpmap_path = output_dir / f'{params["image"][:-4]}.npz'
-                np.savez_compressed(bumpmap_path, data=to_numpy(scene.crystal.bumpmap))
+            # Save crystal bumpmap
+            if da.crystal_bumpmap_dim > 0:
+                assert scene.crystal.bumpmap is not None, f'No bumpmap found for crystal {idx}!'
+                tex_path = output_dir / f'{params["image"][:-4]}_bumpmap.npz'
+                np.savez_compressed(tex_path, data=to_numpy(scene.crystal.bumpmap.data))
 
             # Save a clean version of the image without bubbles and no bumpmap if required
             if da.generate_clean:
-                scene.clear_bubbles_and_bumpmap()
+                scene.clear_interference()
                 img_clean = scene.render(seed=seed + idx)
                 img_clean = cv2.cvtColor(img_clean, cv2.COLOR_RGB2BGR)
                 cv2.imwrite(str(output_dir / params['image']) + '_clean', img_clean)
@@ -339,10 +369,10 @@ def _render_batch(
     for img in image_files:
         img.rename(images_dir / img.name)
 
-    # Move bumpmaps into the bumpmaps directory
-    bumpmap_files = list(output_dir.glob('*.npz'))
-    for bumpmap in bumpmap_files:
-        bumpmap.rename(bumpmaps_dir / bumpmap.name)
+    # Move crystal bumpmap textures
+    tex_files = list(output_dir.glob(f'*_bumpmap.npz'))
+    for tex in tex_files:
+        tex.rename(crystal_bumpmaps_dir / (tex.name.split('_')[0] + '.npz'))
 
     # Move the clean images into the clean images directory
     clean_image_files = list(output_dir.glob('*_clean'))
@@ -637,6 +667,34 @@ class CrystalRenderer:
             bumpmap_dim=self.dataset_args.crystal_bumpmap_dim
         )
 
+        # Load light specular transmittance texture
+        if 'light_st_texture' in params and isinstance(params['light_st_texture'], dict):
+            light_st_texture = NoiseTexture(**params['light_st_texture'])
+        else:
+            light_st_texture = None
+
+        # Load cell bumpmap
+        if 'cell_bumpmap' in params and isinstance(params['cell_bumpmap'], dict):
+            cell_bumpmap = NormalMapNoiseTexture(**params['cell_bumpmap'])
+        else:
+            cell_bumpmap = None
+
+        # Load crystal bumpmap
+        if params['crystal']['use_bumpmap']:
+            tex = params['crystal']['bumpmap']
+            tex_data = None
+            if isinstance(tex, Path):
+                assert tex.exists(), f'Crystal bumpmap texture does not exist! ({tex})'
+                tex_data = torch.from_numpy(np.load(tex)['data']).to(device)
+            elif isinstance(tex, np.ndarray):
+                tex_data = torch.from_numpy(tex).to(device)
+            elif isinstance(tex, torch.Tensor):
+                tex_data = tex.clone().detach().to(device)
+            if tex_data is not None:
+                crystal.bumpmap.data = tex_data
+            else:
+                crystal.bumpmap.data.zero_()
+
         # Create the bubbles
         bubbles = []
         if 'bubbles' in params:
@@ -651,25 +709,14 @@ class CrystalRenderer:
                 bubble.to(device)
                 bubbles.append(bubble)
 
-        # Add bumpmap to the crystal
-        if crystal.use_bumpmap:
-            assert 'bumpmap' in params, 'Bumpmap not provided!'
-            if isinstance(params['bumpmap'], Path):
-                assert params['bumpmap'].exists(), f'Bumpmap file does not exist! ({params["bumpmap"]})'
-                crystal.bumpmap.data = torch.from_numpy(np.load(params['bumpmap'])['data']).to(device)
-            elif isinstance(params['bumpmap'], np.ndarray):
-                crystal.bumpmap.data = torch.from_numpy(params['bumpmap']).to(device)
-            elif isinstance(params['bumpmap'], torch.Tensor):
-                crystal.bumpmap.data = params['bumpmap'].clone().detach().to(device)
-            else:
-                crystal.bumpmap.data.zero_()
-
         # Create and render the scene
         scene = Scene(
             crystal=crystal,
             bubbles=bubbles,
             res=self.dataset_args.image_size,
             light_radiance=params['light_radiance'],
+            light_st_texture=light_st_texture,
+            cell_bumpmap=cell_bumpmap,
             **self.dataset_args.to_dict(),
         )
         img = scene.render(seed=params['seed'] if 'seed' in params else SEED)

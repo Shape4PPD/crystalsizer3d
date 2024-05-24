@@ -33,6 +33,7 @@ dependencies:
     - mitsuba >= 3.5, < 3.6
     - opencv-python >= 4.9, < 5.0
     - parti-pytorch >= 0.2, < 0.3
+    - pyfastnoisesimd >= 0.4, < 0.5
     - pymatgen >= 2024.5, < 2024.6
     - python-fcl >= 0.7, < 0.8
     - pytorch-minimize >= 0.0.2, < 0.1

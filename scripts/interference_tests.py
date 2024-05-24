@@ -9,7 +9,8 @@ from crystalsizer3d.crystal import Crystal, ROTATION_MODE_AXISANGLE
 from crystalsizer3d.crystal_renderer import Scene
 from crystalsizer3d.csd_proxy import CSDProxy
 from crystalsizer3d.scene_components.bubble import make_bubbles
-from crystalsizer3d.scene_components.bumpmap import generate_bumpmap
+from crystalsizer3d.scene_components.textures import NoiseTexture, NormalMapNoiseTexture, generate_crystal_bumpmap, \
+    generate_noise_map
 from crystalsizer3d.util.utils import to_numpy
 
 if USE_CUDA:
@@ -17,7 +18,7 @@ if USE_CUDA:
 else:
     device = torch.device('cpu')
 
-save_plots = True
+save_plots = False
 show_plots = True
 
 
@@ -61,6 +62,22 @@ def _generate_crystal(
     return crystal
 
 
+def make_noise():
+    for freq in [0.002]:  # , 0.02, 0.05]:
+        for oct in [1, 2, 3, 4, 10]:
+            # for oct in [4]:
+            for ns in [0.01]:  # , 0.2, 0.3]:
+                n = generate_noise_map(
+                    perlin_freq=freq,
+                    perlin_octaves=oct,
+                    white_noise_scale=ns
+                )
+                plt.title(f'freq={freq}, oct={oct}, ns={ns}')
+                plt.imshow(n, cmap='gray')
+                plt.colorbar()
+                plt.show()
+
+
 def plot_scene():
     """
     Plot the scene with some interference patterns.
@@ -68,7 +85,7 @@ def plot_scene():
     spp = 2**9
 
     # Bubble parameters
-    n_bubbles = 50
+    n_bubbles = 0
     bubbles_min_x = -20
     bubbles_max_x = 20
     bubbles_min_y = -20
@@ -83,7 +100,7 @@ def plot_scene():
     bubbles_max_ior = 1.8
 
     # Bumpmap defects
-    n_defects = 20
+    n_defects = 5
     defect_max_z = 1
     defect_min_width = 0.001
     defect_max_width = 0.01
@@ -118,12 +135,35 @@ def plot_scene():
         bubbles = []
 
     # Generate a defect bumpmap
-    crystal.bumpmap.data = generate_bumpmap(
+    crystal.bumpmap.data = generate_crystal_bumpmap(
         crystal=crystal,
         n_defects=n_defects,
         defect_min_width=defect_min_width,
         defect_max_width=defect_max_width,
         defect_max_z=defect_max_z,
+    )
+
+    # Generate a surface texture map
+    cell_bumpmap = NormalMapNoiseTexture(
+        dim=crystal.bumpmap_dim,
+        perlin_freq=10.,
+        perlin_octaves=5,
+        white_noise_scale=0.1,
+        max_amplitude=0.5,
+        seed=0
+    )
+
+    # Generate a light radiance texture
+    light_radiance_texture = NoiseTexture(
+        dim=crystal.bumpmap_dim,
+        channels=3,
+        perlin_freq=5.,
+        perlin_octaves=8,
+        white_noise_scale=0.2,
+        max_amplitude=0.5,
+        zero_centred=True,
+        shift=1,
+        seed=0,
     )
 
     # Render the scene
@@ -132,15 +172,31 @@ def plot_scene():
         bubbles=bubbles,
         spp=spp,
         light_radiance=(0.6, 0.5, 0.3),
+        light_st_texture=light_radiance_texture,
+        cell_bumpmap=cell_bumpmap
     )
     image = scene.render()
 
     # Plot it
-    fig, axes = plt.subplots(1, 2, figsize=(10, 5))
-    axes[0].imshow(image)
-    axes[0].axis('off')
-    axes[1].imshow(to_numpy(crystal.bumpmap - crystal.uv_mask.to(torch.float32)), cmap='gray')
-    axes[1].axis('off')
+    fig, axes = plt.subplots(2, 2, figsize=(10, 10))
+    ax = axes[0, 0]
+    ax.imshow(image)
+    ax.axis('off')
+
+    ax = axes[0, 1]
+    ax.set_title('Crystal bumpmap')
+    ax.imshow(to_numpy(crystal.bumpmap - crystal.uv_mask.to(torch.float32)), cmap='gray')
+
+    ax = axes[1, 0]
+    ax.set_title('Cell bumpmap')
+    ax.imshow(to_numpy(cell_bumpmap.build()))
+    ax.axis('off')
+
+    ax = axes[1, 1]
+    ax.set_title('Light radiance texture')
+    ax.imshow(to_numpy(light_radiance_texture.build()))
+    ax.axis('off')
+
     fig.tight_layout()
 
     if save_plots:
@@ -152,3 +208,4 @@ def plot_scene():
 
 if __name__ == '__main__':
     plot_scene()
+    # make_noise()

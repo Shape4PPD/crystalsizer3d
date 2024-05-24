@@ -24,6 +24,7 @@ setup(
         'opencv-python >= 4.9, < 5.0',
         'parti-pytorch >= 0.2, < 0.3',
         'pillow >= 9.5, < 9.6',
+        'pyfastnoisesimd >= 0.4, < 0.5',
         'pymatgen >= 2024.5, < 2024.6',
         'python-dotenv >= 1.0, < 1.1',
         'python-fcl >= 0.7, < 0.8',

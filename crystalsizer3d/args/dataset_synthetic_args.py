@@ -36,10 +36,28 @@ class DatasetSyntheticArgs(BaseArgs):
             light_scale: float = 50.,
             light_radiance_min: Tuple[float, float, float] = (0.5, 0.5, 0.5),
             light_radiance_max: Tuple[float, float, float] = (0.5, 0.5, 0.5),
+            light_texture_dim: int = 1000,
+            light_perlin_freq_min: float = 0.1,
+            light_perlin_freq_max: float = 10.,
+            light_perlin_octaves_min: int = 1,
+            light_perlin_octaves_max: int = 10,
+            light_white_noise_scale_min: float = 0.01,
+            light_white_noise_scale_max: float = 0.2,
+            light_noise_amplitude_min: float = 0.1,
+            light_noise_amplitude_max: float = 0.8,
 
             # Growth cell parameters
             cell_z_positions: List[float] = [-10., 0., 50., 60.],
             cell_surface_scale: float = 100.,
+            cell_bumpmap_dim: int = 1000,
+            cell_perlin_freq_min: float = 0.1,
+            cell_perlin_freq_max: float = 10.,
+            cell_perlin_octaves_min: int = 1,
+            cell_perlin_octaves_max: int = 10,
+            cell_white_noise_scale_min: float = 0.01,
+            cell_white_noise_scale_max: float = 0.2,
+            cell_noise_amplitude_min: float = 0.1,
+            cell_noise_amplitude_max: float = 0.8,
 
             # Crystal parameters
             crystal_id: str = 'LGLUAC01',
@@ -115,10 +133,28 @@ class DatasetSyntheticArgs(BaseArgs):
         self.light_scale = light_scale
         self.light_radiance_min = light_radiance_min
         self.light_radiance_max = light_radiance_max
+        self.light_texture_dim = light_texture_dim
+        self.light_perlin_freq_min = light_perlin_freq_min
+        self.light_perlin_freq_max = light_perlin_freq_max
+        self.light_perlin_octaves_min = light_perlin_octaves_min
+        self.light_perlin_octaves_max = light_perlin_octaves_max
+        self.light_white_noise_scale_min = light_white_noise_scale_min
+        self.light_white_noise_scale_max = light_white_noise_scale_max
+        self.light_noise_amplitude_min = light_noise_amplitude_min
+        self.light_noise_amplitude_max = light_noise_amplitude_max
 
         # Growth cell parameters
         self.cell_z_positions = cell_z_positions
         self.cell_surface_scale = cell_surface_scale
+        self.cell_bumpmap_dim = cell_bumpmap_dim
+        self.cell_perlin_freq_min = cell_perlin_freq_min
+        self.cell_perlin_freq_max = cell_perlin_freq_max
+        self.cell_perlin_octaves_min = cell_perlin_octaves_min
+        self.cell_perlin_octaves_max = cell_perlin_octaves_max
+        self.cell_white_noise_scale_min = cell_white_noise_scale_min
+        self.cell_white_noise_scale_max = cell_white_noise_scale_max
+        self.cell_noise_amplitude_min = cell_noise_amplitude_min
+        self.cell_noise_amplitude_max = cell_noise_amplitude_max
 
         # Crystal parameters
         assert crystal_id in CRYSTAL_IDS, f'Crystal ID must be one of {CRYSTAL_IDS}. {crystal_id} received.'
@@ -235,12 +271,48 @@ class DatasetSyntheticArgs(BaseArgs):
                            default='0.5,0.5,0.5', help='Minimum radiance.')
         group.add_argument('--light-radiance-max', type=lambda s: [float(item) for item in s.split(',')],
                            default='0.5,0.5,0.5', help='Maximum radiance.')
+        group.add_argument('--light-texture-dim', type=int, default=1000,
+                           help='Light texture dimension.')
+        group.add_argument('--light-perlin-freq-min', type=float, default=0.01,
+                           help='Minimum Perlin frequency.')
+        group.add_argument('--light-perlin-freq-max', type=float, default=4.,
+                           help='Maximum Perlin frequency.')
+        group.add_argument('--light-perlin-octaves-min', type=int, default=1,
+                           help='Minimum Perlin octaves.')
+        group.add_argument('--light-perlin-octaves-max', type=int, default=10,
+                           help='Maximum Perlin octaves.')
+        group.add_argument('--light-white-noise-scale-min', type=float, default=0.01,
+                           help='Minimum white noise scale.')
+        group.add_argument('--light-white-noise-scale-max', type=float, default=0.2,
+                           help='Maximum white noise scale.')
+        group.add_argument('--light-noise-amplitude-min', type=float, default=0.01,
+                           help='Minimum noise amplitude.')
+        group.add_argument('--light-noise-amplitude-max', type=float, default=0.5,
+                           help='Maximum noise amplitude.')
 
         # Growth cell parameters
         group.add_argument('--cell-z-positions', type=float, nargs='+', default=[-10., 0., 50., 60.],
                            help='Cell z-positions.')
         group.add_argument('--cell-surface-scale', type=float, default=100.,
                            help='Cell surface scale.')
+        group.add_argument('--cell-bumpmap-dim', type=int, default=1000,
+                           help='Cell bumpmap dimension.')
+        group.add_argument('--cell-perlin-freq-min', type=float, default=0.1,
+                           help='Minimum Perlin frequency.')
+        group.add_argument('--cell-perlin-freq-max', type=float, default=10.,
+                           help='Maximum Perlin frequency.')
+        group.add_argument('--cell-perlin-octaves-min', type=int, default=1,
+                           help='Minimum Perlin octaves.')
+        group.add_argument('--cell-perlin-octaves-max', type=int, default=10,
+                           help='Maximum Perlin octaves.')
+        group.add_argument('--cell-white-noise-scale-min', type=float, default=0.01,
+                           help='Minimum white noise scale.')
+        group.add_argument('--cell-white-noise-scale-max', type=float, default=0.2,
+                           help='Maximum white noise scale.')
+        group.add_argument('--cell-noise-amplitude-min', type=float, default=0.01,
+                           help='Minimum noise amplitude.')
+        group.add_argument('--cell-noise-amplitude-max', type=float, default=0.7,
+                           help='Maximum noise amplitude.')
 
         # Crystal parameters
         group.add_argument('--crystal-id', type=str, default='LGLUAC01',
@@ -266,13 +338,13 @@ class DatasetSyntheticArgs(BaseArgs):
                            help='Minimum area of the image covered by the crystal.')
         group.add_argument('--crystal-area-max', type=float, default=0.3,
                            help='Maximum area of the image covered by the crystal.')
-        group.add_argument('--crystal-min-x', type=float, default=-10.0,
+        group.add_argument('--crystal-min-x', type=float, default=-5.0,
                            help='Minimum x-coordinate of the crystal origin.')
-        group.add_argument('--crystal-max-x', type=float, default=10.0,
+        group.add_argument('--crystal-max-x', type=float, default=5.0,
                            help='Maximum x-coordinate of the crystal origin.')
-        group.add_argument('--crystal-min-y', type=float, default=-10.0,
+        group.add_argument('--crystal-min-y', type=float, default=-5.0,
                            help='Minimum y-coordinate of the crystal origin.')
-        group.add_argument('--crystal-max-y', type=float, default=10.0,
+        group.add_argument('--crystal-max-y', type=float, default=5.0,
                            help='Maximum y-coordinate of the crystal origin.')
 
         # Crystal material properties

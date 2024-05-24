@@ -15,7 +15,7 @@ from crystalsizer3d import LOGS_PATH, N_WORKERS, START_TIMESTAMP, logger
 from crystalsizer3d.args.dataset_synthetic_args import DatasetSyntheticArgs
 from crystalsizer3d.crystal_generator import CrystalGenerator
 from crystalsizer3d.crystal_renderer import CrystalRenderer
-from crystalsizer3d.util.utils import print_args, set_seed, to_dict
+from crystalsizer3d.util.utils import print_args, set_seed, str2bool, to_dict
 
 PARAMETER_HEADERS = [
     'crystal_id',
@@ -34,6 +34,8 @@ def parse_args(printout: bool = True) -> Tuple[DatasetSyntheticArgs, Namespace]:
     DatasetSyntheticArgs.add_args(parser)
     parser.add_argument('--ds-name', type=str,
                         help='Set a dataset name to use for setting multiple workers on the same dataset.')
+    parser.add_argument('--overwrite-existing', type=str2bool, default=False,
+                        help='Overwrite an existing dataset if it exists, otherwise try resume then validate.')
     parser.add_argument('--seed', type=int, default=1,
                         help='Set the random seed for the dataset generation.')
     parser.add_argument('--n-generator-workers', type=int, default=N_WORKERS,
@@ -50,6 +52,7 @@ def parse_args(printout: bool = True) -> Tuple[DatasetSyntheticArgs, Namespace]:
     dataset_args = DatasetSyntheticArgs.from_args(args)
     runtime_args = Namespace(
         ds_name=args.ds_name if args.ds_name is not None else START_TIMESTAMP,
+        overwrite_existing=args.overwrite_existing,
         seed=args.seed,
         n_generator_workers=args.n_generator_workers,
         n_renderer_workers=args.n_renderer_workers
@@ -66,9 +69,9 @@ def validate(
     """
     with open(output_dir / 'options.yml', 'r') as f:
         spec = yaml.load(f, Loader=yaml.FullLoader)
-        dataset_args = DatasetSyntheticArgs.from_args(spec['dataset_args'])
+        dsa = DatasetSyntheticArgs.from_args(spec['dataset_args'])
 
-    n_examples = min(dataset_args.validate_n_samples, dataset_args.n_samples)
+    n_examples = min(dsa.validate_n_samples, dsa.n_samples)
     if n_examples <= 0:
         logger.info('Skipping validation.')
         return
@@ -79,18 +82,18 @@ def validate(
     # Initialise synthetic crystal generator
     from crystalsizer3d.crystal_generator import CrystalGenerator
     generator = CrystalGenerator(
-        crystal_id=dataset_args.crystal_id,
-        miller_indices=dataset_args.miller_indices,
-        ratio_means=dataset_args.ratio_means,
-        ratio_stds=dataset_args.ratio_stds,
-        zingg_bbox=dataset_args.zingg_bbox,
-        constraints=dataset_args.distance_constraints,
+        crystal_id=dsa.crystal_id,
+        miller_indices=dsa.miller_indices,
+        ratio_means=dsa.ratio_means,
+        ratio_stds=dsa.ratio_stds,
+        zingg_bbox=dsa.zingg_bbox,
+        constraints=dsa.distance_constraints,
     )
 
     # Initialise the crystal renderer
     renderer = CrystalRenderer(
         param_path=output_dir / 'parameters.csv',
-        dataset_args=dataset_args,
+        dataset_args=dsa,
         quiet_render=True
     )
 
@@ -102,7 +105,7 @@ def validate(
         data = {}
         for i, row in enumerate(reader):
             if (i + 1) % 100 == 0:
-                logger.info(f'Loaded {i + 1}/{dataset_args.n_samples} entries.')
+                logger.info(f'Loaded {i + 1}/{dsa.n_samples} entries.')
             idx = int(row['idx'])
             assert i == idx, f'Missing row {i}!'
             item = {}
@@ -124,14 +127,16 @@ def validate(
             item['rendering_parameters'] = renderer.rendering_params[idx]
             item['segmentation'] = renderer.segmentations[idx]
 
-            # Add the bumpmap path if it exists
-            if dataset_args.crystal_bumpmap_dim > -1:
-                bumpmap_path = output_dir / 'bumpmaps' / f'{row["image"][:-4]}.npz'
-                assert bumpmap_path.exists(), f'Bumpmap path does not exist: {bumpmap_path}'
-                item['rendering_parameters']['bumpmap'] = bumpmap_path
+            # Add textures
+            if dsa.crystal_bumpmap_dim > 0:
+                tex_path = output_dir / 'crystal_bumpmaps' / f'{row["image"][:-4]}.npz'
+                assert tex_path.exists(), f'Texture path does not exist: {tex_path}'
+                if 'textures' not in item['rendering_parameters']:
+                    item['rendering_parameters']['textures'] = {}
+                item['rendering_parameters']['crystal']['bumpmap'] = tex_path
 
             # Add the clean image if it exists
-            if dataset_args.generate_clean:
+            if dsa.generate_clean:
                 clean_img_path = output_dir / 'images_clean' / row['image']
                 assert clean_img_path.exists(), f'Clean image path does not exist: {clean_img_path}'
                 item['clean_image'] = clean_img_path
@@ -139,7 +144,7 @@ def validate(
             data[idx] = item
 
     # Pick some random indices to render
-    idxs = np.random.choice(dataset_args.n_samples, size=n_examples, replace=False)
+    idxs = np.random.choice(dsa.n_samples, size=n_examples, replace=False)
     idxs = np.sort(idxs)
 
     # Validate each random example
@@ -212,7 +217,12 @@ def generate_dataset():
     set_seed(runtime_args.seed)
     save_dir = LOGS_PATH / runtime_args.ds_name
     if save_dir.exists():
-        return resume(save_dir, runtime_args)
+        if runtime_args.overwrite_existing:
+            logger.warning(f'Overwriting existing dataset at {save_dir}.')
+            shutil.rmtree(save_dir)
+        else:
+            logger.info(f'Dataset already exists at {save_dir}. Resuming...')
+            return resume(save_dir, runtime_args)
 
     # Set a timer going to record how long this takes
     start_time = time.time()
