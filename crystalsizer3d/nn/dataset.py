@@ -546,10 +546,14 @@ class Dataset:
             self,
             outputs: Dict[str, torch.Tensor],
             idx: int = 0,
-            default_rendering_params: Optional[Dict[str, Any]] = None
+            default_rendering_params: Optional[Dict[str, Any]] = None,
+            copy_bumpmap: bool = False,
+            copy_bubbles: bool = False,
     ) -> dict:
         """
         Denormalise the rendering parameters.
+        copy_bumpmap: If True, copy the bumpmap from the default rendering parameters if it is missing.
+        copy_bubbles: If True, copy the bubbles from the default rendering parameters if they are missing.
         """
 
         def inverse_z_transform(z, k):
@@ -625,16 +629,31 @@ class Dataset:
         else:
             r_params['light_radiance'] = (0.5, 0.5, 0.5)
 
-        # Bumpmap
+        # Copy the surface bumpmap from defaults if required
         if 'bumpmap' in outputs:
             bumpmap = outputs['bumpmap']
             if bumpmap.ndim == 2:
                 bumpmap = bumpmap[idx]
             r_params['bumpmap'] = bumpmap
-        elif default_rendering_params is not None and 'bumpmap' in default_rendering_params:
+        elif (default_rendering_params is not None
+              and 'bumpmap' in default_rendering_params
+              and copy_bumpmap):
             r_params['bumpmap'] = default_rendering_params['bumpmap']
         else:
             r_params['bumpmap'] = None
+
+        # Bubbles
+        if 'bubbles' in outputs:
+            bubbles = outputs['bubbles']
+            if bubbles.ndim == 2:
+                bubbles = bubbles[idx]
+            r_params['bubbles'] = bubbles
+        elif (default_rendering_params is not None
+              and 'bubbles' in default_rendering_params
+              and copy_bubbles):
+            r_params['bubbles'] = default_rendering_params['bubbles']
+        else:
+            r_params['bubbles'] = []
 
         return r_params
 
