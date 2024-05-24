@@ -237,11 +237,6 @@ def generate_dataset():
         clean_images_dir = save_dir / 'images_clean'
         clean_images_dir.mkdir(exist_ok=True)
 
-    # Create a directory to save bumpmaps
-    if dataset_args.crystal_bumpmap_dim > -1:
-        bumpmap_dir = save_dir / 'bumpmaps'
-        bumpmap_dir.mkdir(exist_ok=True)
-
     # Save arguments to json file
     with open(save_dir / 'options.yml', 'w') as f:
         spec = {

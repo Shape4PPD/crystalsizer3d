@@ -199,7 +199,7 @@ class Dataset:
 
                 # Add the bumpmap path if required
                 if self.dataset_args.crystal_bumpmap_dim > -1:
-                    bumpmap_path = self.path / 'bumpmaps' / f'{row["image"][:-4]}.npz'
+                    bumpmap_path = self.path / 'crystal_bumpmaps' / f'{row["image"][:-4]}.npz'
                     if self.ds_args.check_image_paths:
                         assert bumpmap_path.exists(), f'Bumpmap path does not exist: {bumpmap_path}'
                     item['rendering_parameters']['bumpmap'] = bumpmap_path
