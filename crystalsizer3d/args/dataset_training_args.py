@@ -18,6 +18,7 @@ class DatasetTrainingArgs(BaseArgs):
             train_zingg: bool = True,
             train_distances: bool = True,
             train_transformation: bool = True,
+            train_3d: bool = True,
             train_material: bool = True,
             train_light: bool = True,
             train_predictor: bool = True,
@@ -41,6 +42,7 @@ class DatasetTrainingArgs(BaseArgs):
         self.train_zingg = train_zingg
         self.train_distances = train_distances
         self.train_transformation = train_transformation
+        self.train_3d = train_3d
         self.train_material = train_material
         self.train_light = train_light
         self.train_predictor = train_predictor
@@ -78,6 +80,8 @@ class DatasetTrainingArgs(BaseArgs):
                            help='Train distance parameters.')
         group.add_argument('--train-transformation', type=str2bool, default=True,
                            help='Train transformation parameters.')
+        group.add_argument('--train-3d', type=str2bool, default=True,
+                           help='Train the distance and transformation parameters using 3D comparisons.')
         group.add_argument('--train-material', type=str2bool, default=True,
                            help='Train material parameters.')
         group.add_argument('--train-light', type=str2bool, default=True,

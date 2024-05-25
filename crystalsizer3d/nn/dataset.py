@@ -422,6 +422,16 @@ class Dataset:
             ])
             params['sym_rotations'] = sym_R
 
+        # If training 3D, then instantiate the crystal here
+        if self.ds_args.train_3d:
+            crystal = self.load_crystal(
+                idx=idx,
+                r_params=r_params,
+                use_bumpmap=False,
+                merge_vertices=True
+            )
+            params['mesh_vertices'] = to_numpy(crystal.mesh_vertices)
+
         # Material parameters are z-score standardised
         if self.ds_args.train_material and len(self.labels_material_active) > 0:
             m_params = []
@@ -445,15 +455,16 @@ class Dataset:
             idx: Optional[int] = None,
             r_params: Optional[Dict[str, Any]] = None,
             zero_origin: bool = False,
-            zero_rotation: bool = False
+            zero_rotation: bool = False,
+            use_bumpmap: bool = True,
+            merge_vertices: bool = False
     ) -> Crystal:
         """
         Load the crystal for an item.
         """
         cs = self.csd_proxy.load(self.dataset_args.crystal_id)
         if idx is not None:
-            item = self.data[idx]
-            r_params = item['rendering_parameters']
+            r_params = self.data[idx]['rendering_parameters']
         else:
             assert r_params is not None, 'Need to provide either an index or parameters.'
         crystal = Crystal(
@@ -468,8 +479,9 @@ class Dataset:
             rotation_mode=self.dataset_args.rotation_mode,
             material_roughness=r_params['crystal']['material_roughness'],
             material_ior=r_params['crystal']['material_ior'],
-            use_bumpmap=self.dataset_args.crystal_bumpmap_dim > 0,
-            bumpmap_dim=self.dataset_args.crystal_bumpmap_dim
+            use_bumpmap=use_bumpmap and self.dataset_args.crystal_bumpmap_dim > 0,
+            bumpmap_dim=self.dataset_args.crystal_bumpmap_dim,
+            merge_vertices=merge_vertices,
         )
         return crystal
 
@@ -567,7 +579,7 @@ class Dataset:
         dist = outputs['distances']
         if dist.ndim == 2:
             dist = dist[idx]
-        c_params['distances'] = self.prep_distances(dist)
+        c_params['distances'] = self.prep_distances(dist).tolist()
 
         # Transformation parameters
         if 'transformation' in outputs:
@@ -672,7 +684,7 @@ class Dataset:
         distance_vals[distance_vals < 0] = 0
 
         # Put the distances into the correct order
-        distances = np.zeros(len(self.labels_distances))
+        distances = torch.zeros(len(self.labels_distances), device=distance_vals.device)
         pos_active = [self.labels_distances.index(k) for k in self.labels_distances_active]
         for i, pos in enumerate(pos_active):
             distances[pos] = distance_vals[i]
@@ -685,6 +697,6 @@ class Dataset:
 
         # Normalise the distances by the maximum
         if distances.max() > 1e-8:
-            distances /= distances.max()
+            distances = distances / distances.max()
 
         return distances

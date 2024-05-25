@@ -277,7 +277,7 @@ class Crystal(nn.Module):
             rotation: Optional[torch.Tensor] = None,
             tol: float = 1e-3,
             update_uv_map: bool = True
-    ):
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
         """
         Take the face normals and distances and calculate where the vertices and edges lie.
         """
@@ -299,8 +299,7 @@ class Crystal(nn.Module):
         all_combinations = list(combinations(range(len(self.N)), 3))
         intersection_points = []
         for combo in all_combinations:
-            idx1, idx2, idx3 = combo
-            point = self._plane_intersection(idx1, idx2, idx3)
+            point = self._plane_intersection(*combo)
             if point is not None:
                 intersection_points.append(point)
         intersection_points = torch.stack(intersection_points)
@@ -415,10 +414,10 @@ class Crystal(nn.Module):
         """
         Construct the UV map of the crystal habit.
         """
-        if self.merge_vertices:
-            raise RuntimeError('Cannot build UV map with merged vertices!')
         if not self.use_bumpmap or self.bumpmap is None:
             return
+        if self.merge_vertices:
+            raise RuntimeError('Cannot build UV map with merged vertices!')
         device = self.origin.device
 
         # Detach the faces and vertices from the computation

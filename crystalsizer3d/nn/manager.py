@@ -30,7 +30,7 @@ from crystalsizer3d.args.network_args import NetworkArgs
 from crystalsizer3d.args.optimiser_args import OptimiserArgs
 from crystalsizer3d.args.runtime_args import RuntimeArgs
 from crystalsizer3d.args.transcoder_args import TranscoderArgs
-from crystalsizer3d.crystal import ROTATION_MODE_AXISANGLE, ROTATION_MODE_QUATERNION
+from crystalsizer3d.crystal import Crystal, ROTATION_MODE_AXISANGLE, ROTATION_MODE_QUATERNION
 from crystalsizer3d.crystal_generator import CrystalGenerator
 from crystalsizer3d.crystal_renderer import CrystalRenderer
 from crystalsizer3d.nn.checkpoint import Checkpoint
@@ -81,6 +81,7 @@ class Manager:
     metric_keys: List[str]
     device: torch.device
     checkpoint: Checkpoint
+    crystal: Crystal
 
     def __init__(
             self,
@@ -162,6 +163,9 @@ class Manager:
         elif name == 'device':
             self.device = self._init_devices()
             return self.device
+        elif name == 'crystal':
+            self.crystal = self._init_crystal()
+            return self.crystal
         raise AttributeError(f"'{self.__class__.__name__}' object has no attribute '{name}'")
 
     @classmethod
@@ -624,6 +628,8 @@ class Manager:
             metric_keys.append('losses/distances')
         if self.dataset_args.train_transformation:
             metric_keys.append('losses/transformation')
+        if self.dataset_args.train_3d:
+            metric_keys.append('losses/3d')
         if self.dataset_args.train_material:
             metric_keys.append('losses/material')
         if self.dataset_args.train_light:
@@ -740,6 +746,22 @@ class Manager:
         for k, v in state.items():
             new_state[k.replace('module.', '')] = v
         return new_state
+
+    def _init_crystal(self) -> Crystal:
+        """
+        Initialise the crystal object.
+        """
+        cs = self.ds.csd_proxy.load(self.ds.dataset_args.crystal_id)
+        crystal = Crystal(
+            lattice_unit_cell=cs.lattice_unit_cell,
+            lattice_angles=cs.lattice_angles,
+            miller_indices=self.ds.dataset_args.miller_indices,
+            point_group_symbol=cs.point_group_symbol,
+            rotation_mode=self.dataset_args.rotation_mode,
+            merge_vertices=True,
+        )
+        crystal.to(self.device)
+        return crystal
 
     def _init_tb_logger(self):
         """Initialise the tensorboard writer."""
@@ -1469,6 +1491,11 @@ class Manager:
             losses.append(self.optimiser_args.w_transformation * loss_t)
             stats.update(stats_t)
 
+        if self.dataset_args.train_3d:
+            loss_3d, stats_3d = self._calculate_3d_losses(Y_pred, Y_target)
+            losses.append(self.optimiser_args.w_3d * loss_3d)
+            stats.update(stats_3d)
+
         if self.dataset_args.train_material and 'material' in Y_pred:
             loss_m, stats_m = self._calculate_material_losses(Y_pred['material'], Y_target['material'])
             losses.append(self.optimiser_args.w_material * loss_m)
@@ -1645,6 +1672,39 @@ class Manager:
 
         if self.dataset_args.rotation_mode != ROTATION_MODE_AXISANGLE:
             stats['transformation/l_preangles'] = preangles_loss.item()
+
+        return loss, stats
+
+    def _calculate_3d_losses(
+            self,
+            Y_pred: Dict[str, torch.Tensor],
+            Y_target: Dict[str, torch.Tensor]
+    ) -> Tuple[torch.Tensor, Dict[str, float]]:
+        """
+        Calculate the material properties losses.
+        """
+        bs = len(Y_pred['distances'])
+        losses = []
+        for i in range(bs):
+            try:
+                v_pred, _ = self.crystal.build_mesh(
+                    distances=self.ds.prep_distances(Y_pred['distances'][i]),
+                    origin=Y_pred['transformation'][i, :3],
+                    scale=Y_pred['transformation'][i, 3],
+                    rotation=Y_pred['transformation'][i, 4:]
+                )
+            except Exception:
+                continue
+            v_target = Y_target['mesh_vertices'][i]
+            dists = torch.cdist(v_pred, v_target)
+            min_dists = dists.amin(dim=1)
+            loss_i = min_dists.mean()
+            losses.append(loss_i)
+        if len(losses) > 0:
+            loss = torch.stack(losses).mean()
+        else:
+            loss = torch.tensor(0., device=self.device)
+        stats = {'losses/3d': loss.item()}
 
         return loss, stats
 
