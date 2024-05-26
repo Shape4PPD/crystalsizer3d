@@ -657,6 +657,30 @@ class CrystalRenderer:
         """
         Render a single crystal image from parameters.
         """
+        # Load light specular transmittance texture
+        light_st_texture = None
+        if 'light_st_texture' in params and isinstance(params['light_st_texture'], dict):
+            light_st_texture = NoiseTexture(**params['light_st_texture'])
+
+        # Load cell bumpmap
+        cell_bumpmap = None
+        if 'cell_bumpmap' in params and isinstance(params['cell_bumpmap'], dict):
+            cell_bumpmap = NormalMapNoiseTexture(**params['cell_bumpmap'])
+
+        # Load crystal bumpmap
+        crystal_bumpmap = None
+        if 'use_bumpmap' in params['crystal'] and params['crystal']['use_bumpmap']:
+            assert 'bumpmap' in params['crystal'], 'No bumpmap found for crystal!'
+            tex = params['crystal']['bumpmap']
+            if isinstance(tex, Path):
+                assert tex.exists(), f'Crystal bumpmap texture does not exist! ({tex})'
+                crystal_bumpmap = torch.from_numpy(np.load(tex)['data']).to(device)
+            elif isinstance(tex, np.ndarray):
+                crystal_bumpmap = torch.from_numpy(tex).to(device)
+            elif isinstance(tex, torch.Tensor):
+                crystal_bumpmap = tex.clone().detach().to(device)
+
+        # Create the crystal
         crystal = self._init_crystal(
             distances=params['crystal']['distances'],
             scale=params['crystal']['scale'],
@@ -664,36 +688,12 @@ class CrystalRenderer:
             rotation=params['crystal']['rotation'],
             material_roughness=params['crystal']['material_roughness'],
             material_ior=params['crystal']['material_ior'],
-            bumpmap_dim=self.dataset_args.crystal_bumpmap_dim
+            bumpmap_dim=crystal_bumpmap.shape[0] if crystal_bumpmap is not None else -1
         )
-
-        # Load light specular transmittance texture
-        if 'light_st_texture' in params and isinstance(params['light_st_texture'], dict):
-            light_st_texture = NoiseTexture(**params['light_st_texture'])
+        if crystal_bumpmap is not None:
+            crystal.bumpmap.data = crystal_bumpmap
         else:
-            light_st_texture = None
-
-        # Load cell bumpmap
-        if 'cell_bumpmap' in params and isinstance(params['cell_bumpmap'], dict):
-            cell_bumpmap = NormalMapNoiseTexture(**params['cell_bumpmap'])
-        else:
-            cell_bumpmap = None
-
-        # Load crystal bumpmap
-        if params['crystal']['use_bumpmap']:
-            tex = params['crystal']['bumpmap']
-            tex_data = None
-            if isinstance(tex, Path):
-                assert tex.exists(), f'Crystal bumpmap texture does not exist! ({tex})'
-                tex_data = torch.from_numpy(np.load(tex)['data']).to(device)
-            elif isinstance(tex, np.ndarray):
-                tex_data = torch.from_numpy(tex).to(device)
-            elif isinstance(tex, torch.Tensor):
-                tex_data = tex.clone().detach().to(device)
-            if tex_data is not None:
-                crystal.bumpmap.data = tex_data
-            else:
-                crystal.bumpmap.data.zero_()
+            crystal.bumpmap.data.zero_()
 
         # Create the bubbles
         bubbles = []
