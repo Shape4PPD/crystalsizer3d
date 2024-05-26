@@ -1697,8 +1697,9 @@ class Manager:
                 continue
             v_target = Y_target['mesh_vertices'][i]
             dists = torch.cdist(v_pred, v_target)
-            min_dists = dists.amin(dim=1)
-            loss_i = min_dists.mean()
+            min_dists0 = dists.amin(dim=0)
+            min_dists1 = dists.amin(dim=1)
+            loss_i = torch.cat([min_dists0, min_dists1]).mean()
             losses.append(loss_i)
         if len(losses) > 0:
             loss = torch.stack(losses).mean()
