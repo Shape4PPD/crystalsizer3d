@@ -1719,7 +1719,11 @@ class Manager:
                        .unsqueeze(1).expand_as(dists))
 
         # Set large distances for dummy vertices
-        dists[~mask_pred | ~mask_target] = 1e8
+        dists = torch.where(
+            mask_pred & mask_target,
+            dists,
+            torch.ones_like(dists) * 1e8
+        )
 
         # Get the minimum distances between the predicted and target vertices (in both directions)
         min_dists1 = dists.amin(dim=1)
