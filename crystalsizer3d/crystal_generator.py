@@ -22,12 +22,12 @@ def _generate_crystal(
         seed: int = 0,
         constraints: Optional[List[Tuple[int, ...]]] = None,
         asymmetry: Optional[float] = None,
-        symmetry_idx: Optional[torch.Tensor] = None,
+        symmetry_idx: Optional[List[int]] = None,
         all_miller_indices: Optional[List[Tuple[int, int, int]]] = None,
         zingg_bbox: Optional[List[float]] = None,
         idx: int = 0,
         max_attempts: int = 10000,
-) -> Tuple[torch.Tensor, np.ndarray, Trimesh]:
+) -> Tuple[np.ndarray, np.ndarray, Trimesh]:
     """
     Generate a crystal with randomised face distances.
     """
@@ -42,6 +42,7 @@ def _generate_crystal(
 
         # Generate randomised distances for the face groups
         distances = rng.normal(loc=ratio_means, scale=ratio_stds)
+        distances = np.abs(distances) / np.abs(distances).max()
 
         # Check constraints
         if constraints is not None:
@@ -56,7 +57,6 @@ def _generate_crystal(
                 continue
 
         # Face-group distances
-        distances = torch.from_numpy(distances).to(torch.float32)
         miller_idxs_active = miller_indices.copy()
 
         # Add asymmetry
@@ -65,20 +65,20 @@ def _generate_crystal(
             assert all_miller_indices is not None, 'all_miller_indices must be provided for asymmetric distances.'
             assert len(symmetry_idx) == len(all_miller_indices), \
                 'Symmetry index and all_miller_indices must have the same length.'
+            if isinstance(symmetry_idx, list):
+                symmetry_idx = np.array(symmetry_idx)
 
             # Generate asymmetric distances
             all_distances = distances[symmetry_idx]
             for i in range(len(distances)):
                 idx_i = symmetry_idx == i
-                d2 = torch.normal(mean=distances[i], std=asymmetry * distances[i], size=(idx_i.sum(),))
+                d2 = rng.normal(loc=distances[i], scale=asymmetry * distances[i], size=idx_i.sum())
                 all_distances[idx_i] = d2
 
             # Update the distances and miller indices
             distances = all_distances
+            distances = np.abs(distances) / np.abs(distances).max()
             miller_idxs_active = all_miller_indices.copy()
-
-        # Normalise the distances
-        distances = torch.abs(distances) / torch.abs(distances).max()
 
         # Build the crystal
         crystal = Crystal(
@@ -218,7 +218,7 @@ class CrystalGenerator:
             ratio_stds=self.ratio_stds,
             constraints=self.constraints,
             asymmetry=self.asymmetry,
-            symmetry_idx=self.crystal.symmetry_idx,
+            symmetry_idx=self.crystal.symmetry_idx.tolist(),
             all_miller_indices=self.crystal.all_miller_indices.tolist(),
             zingg_bbox=self.zingg_bbox,
             max_attempts=max_attempts
