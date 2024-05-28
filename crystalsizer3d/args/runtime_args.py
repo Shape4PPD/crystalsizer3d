@@ -1,6 +1,6 @@
 from argparse import ArgumentParser, _ArgumentGroup
 from pathlib import Path
-from typing import List, Union
+from typing import List, Optional, Union
 
 from crystalsizer3d import USE_CUDA
 from crystalsizer3d.args.base_args import BaseArgs
@@ -13,6 +13,7 @@ class RuntimeArgs(BaseArgs):
             resume: bool = True,
             resume_from: Union[str, Path] = 'latest',
             resume_only: bool = False,
+            seed: Optional[int] = None,
             use_gpu: bool = False,
             n_dataloader_workers: int = 4,
             batch_size: int = 32,
@@ -34,6 +35,7 @@ class RuntimeArgs(BaseArgs):
             resume_from = str(resume_from)
         self.resume_from = resume_from
         self.resume_only = resume_only
+        self.seed = seed
         self.use_gpu = use_gpu
         self.n_dataloader_workers = n_dataloader_workers
         self.batch_size = batch_size
@@ -65,6 +67,8 @@ class RuntimeArgs(BaseArgs):
                            help='Resume from a specific checkpoint id, or "latest" or "best". Default="latest".')
         group.add_argument('--resume-only', type=str2bool, default=False,
                            help='Abort if the checkpoint can\'t be loaded. Default=False.')
+        group.add_argument('--seed', type=int, default=None,
+                           help='Random seed to use for reproducibility. Omit to not set a seed.')
         parser.add_argument('--use-gpu', type=str2bool, default=USE_CUDA,
                             help='Use GPU. Defaults to environment setting.')
         group.add_argument('--n-dataloader-workers', type=int, default=4,

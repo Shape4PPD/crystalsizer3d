@@ -379,6 +379,7 @@ class Crystal(nn.Module):
         mesh_vertices = mesh_vertices @ R.T
 
         # Step 6: Apply the scaling
+        scale = scale.clip(1e-6, None)
         vertices = vertices * scale
         mesh_vertices = mesh_vertices * scale
 

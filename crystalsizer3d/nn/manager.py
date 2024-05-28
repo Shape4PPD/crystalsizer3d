@@ -54,7 +54,8 @@ from crystalsizer3d.nn.models.vitvae import ViTVAE
 from crystalsizer3d.util.ema import EMA
 from crystalsizer3d.util.geometry import geodesic_distance
 from crystalsizer3d.util.plots import plot_training_samples
-from crystalsizer3d.util.utils import is_bad
+from crystalsizer3d.util.polyhedron import calculate_polyhedral_vertices
+from crystalsizer3d.util.utils import is_bad, set_seed
 
 
 # torch.autograd.set_detect_anomaly(True)
@@ -103,6 +104,10 @@ class Manager:
 
         # Save dir
         self.save_dir = save_dir
+
+        # Seed
+        if self.runtime_args.seed is not None:
+            set_seed(self.runtime_args.seed)
 
         # Load checkpoint
         self.checkpoint = self._init_checkpoint(save_dir=save_dir)
@@ -1681,30 +1686,52 @@ class Manager:
             Y_target: Dict[str, torch.Tensor]
     ) -> Tuple[torch.Tensor, Dict[str, float]]:
         """
-        Calculate the material properties losses.
+        Calculate the distances between 3d vertices.
         """
-        bs = len(Y_pred['distances'])
-        losses = []
-        for i in range(bs):
-            try:
-                v_pred, _ = self.crystal.build_mesh(
-                    distances=self.ds.prep_distances(Y_pred['distances'][i]),
-                    origin=Y_pred['transformation'][i, :3],
-                    scale=Y_pred['transformation'][i, 3],
-                    rotation=Y_pred['transformation'][i, 4:]
-                )
-            except Exception:
-                continue
-            v_target = Y_target['mesh_vertices'][i]
-            dists = torch.cdist(v_pred, v_target)
-            min_dists0 = dists.amin(dim=0)
-            min_dists1 = dists.amin(dim=1)
-            loss_i = torch.cat([min_dists0, min_dists1]).mean()
-            losses.append(loss_i)
-        if len(losses) > 0:
-            loss = torch.stack(losses).mean()
-        else:
-            loss = torch.tensor(0., device=self.device)
+        # Calculate the polyhedral vertices for the predicted parameters
+        v_pred, nv_pred = calculate_polyhedral_vertices(
+            distances=self.ds.prep_distances(Y_pred['distances']),
+            origin=Y_pred['transformation'][:, :3],
+            scale=Y_pred['transformation'][:, 3],
+            rotation=Y_pred['transformation'][:, 4:],
+            symmetry_idx=self.crystal.symmetry_idx,
+            plane_normals=self.crystal.N,
+        )
+
+        # Pad the target vertices so they all have the same number of vertices
+        v_target = Y_target['vertices']
+        nv_target = torch.tensor([len(v) for v in v_target], device=self.device)
+        max_vertices_target = max(nv_target)
+        v_target = torch.stack([
+            torch.cat([v, torch.zeros(max_vertices_target - len(v), 3, device=self.device)])
+            for v in v_target
+        ])
+
+        # Calculate pairwise distances
+        dists = torch.cdist(v_pred, v_target)
+
+        # Create masks for valid vertices
+        mask_pred = ((torch.arange(v_pred.shape[1], device=v_pred.device)
+                      .expand(v_pred.shape[0], -1) < nv_pred.unsqueeze(1))
+                     .unsqueeze(2).expand_as(dists))
+        mask_target = ((torch.arange(v_target.shape[1], device=v_target.device)
+                        .expand(v_target.shape[0], -1) < nv_target.unsqueeze(1))
+                       .unsqueeze(1).expand_as(dists))
+
+        # Set large distances for dummy vertices
+        dists[~mask_pred | ~mask_target] = 1e8
+
+        # Get the minimum distances between the predicted and target vertices (in both directions)
+        min_dists1 = dists.amin(dim=1)
+        min_dists2 = dists.amin(dim=2)
+        d = torch.cat([min_dists1, min_dists2], dim=1)
+
+        # Ensure any dummy large distances are ignored
+        invalid_idxs = d > 1e7
+        d[invalid_idxs] = 0
+
+        # Calculate the average minimum distance per vertex
+        loss = (d.sum(dim=1) / (d > 0).sum(dim=1).clip(1)).mean()
         stats = {'losses/3d': loss.item()}
 
         return loss, stats

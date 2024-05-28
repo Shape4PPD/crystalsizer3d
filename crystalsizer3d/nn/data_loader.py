@@ -90,7 +90,7 @@ def get_data_loader(
         def collate_targets(targets):
             data = {}
             for k in targets[0].keys():
-                if k == 'sym_rotations':
+                if k in ['sym_rotations', 'vertices']:
                     data[k] = [target[k] for target in targets]
                 else:
                     data[k] = default_collate([target[k] for target in targets])

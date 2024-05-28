@@ -430,7 +430,7 @@ class Dataset:
                 use_bumpmap=False,
                 merge_vertices=True
             )
-            params['mesh_vertices'] = to_numpy(crystal.mesh_vertices)
+            params['vertices'] = to_numpy(crystal.vertices)
 
         # Material parameters are z-score standardised
         if self.ds_args.train_material and len(self.labels_material_active) > 0:
@@ -677,6 +677,11 @@ class Dataset:
         """
         Prepare the distance values.
         """
+        strip_batch = False
+        if distance_vals.ndim == 1:
+            strip_batch = True
+            distance_vals = distance_vals[None, :]
+        bs = distance_vals.shape[0]
 
         # Set distances to 0 if the switches are off or if the distance is negative
         if self.ds_args.use_distance_switches and switches is not None:
@@ -684,19 +689,26 @@ class Dataset:
         distance_vals[distance_vals < 0] = 0
 
         # Put the distances into the correct order
-        distances = torch.zeros(len(self.labels_distances), device=distance_vals.device)
+        distances = torch.zeros(bs, len(self.labels_distances), device=distance_vals.device)
         pos_active = [self.labels_distances.index(k) for k in self.labels_distances_active]
         for i, pos in enumerate(pos_active):
-            distances[pos] = distance_vals[i]
+            distances[:, pos] = distance_vals[:, i]
 
         # Add any maximum distance constraint set to one
         if self.dataset_args.distance_constraints is not None:
             largest_hkl = self.dataset_args.distance_constraints.split('>')[0]
             largest_pos = [d[-3:] for d in self.labels_distances].index(largest_hkl)
-            distances[largest_pos] = 1
+            distances[:, largest_pos] = 1
 
-        # Normalise the distances by the maximum
-        if distances.max() > 1e-8:
-            distances = distances / distances.max()
+        # Normalise the distances by the maximum (in each batch element)
+        d_max = distances.amax(dim=1,keepdim=True)
+        distances = torch.where(
+            d_max > 1e-8,
+            distances / d_max,
+            distances
+        )
+
+        if strip_batch:
+            distances = distances[0]
 
         return distances
