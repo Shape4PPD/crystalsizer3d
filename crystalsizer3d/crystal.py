@@ -318,7 +318,7 @@ class Crystal(nn.Module):
         mesh_faces = []
         v_idx = 0
         for i, on_face in enumerate(T):
-            face_vertex_idxs = torch.nonzero(on_face).squeeze()
+            face_vertex_idxs = torch.nonzero(on_face).squeeze(1)
 
             # If the face does not have enough vertices, skip it
             if len(face_vertex_idxs) < 3:
