@@ -1688,24 +1688,26 @@ class Manager:
         """
         Calculate the distances between 3d vertices.
         """
-        # Calculate the polyhedral vertices for the predicted parameters
-        v_pred, nv_pred = calculate_polyhedral_vertices(
-            distances=self.ds.prep_distances(Y_pred['distances']),
-            origin=Y_pred['transformation'][:, :3],
-            scale=Y_pred['transformation'][:, 3],
-            rotation=Y_pred['transformation'][:, 4:],
+        # Stack the parameters along the batch dimension
+        distances = torch.cat([Y_pred['distances'], Y_target['distances']], dim=0)
+        origin = torch.cat([Y_pred['transformation'][:, :3], Y_target['transformation'][:, :3]], dim=0)
+        scale = torch.cat([Y_pred['transformation'][:, 3], Y_target['transformation'][:, 3]], dim=0)
+        rotation = torch.cat([Y_pred['transformation'][:, 4:], Y_target['transformation'][:, 4:]], dim=0)
+
+        # Calculate the polyhedral vertices for the parameters
+        v, nv = calculate_polyhedral_vertices(
+            distances=self.ds.prep_distances(distances),
+            origin=origin,
+            scale=scale,
+            rotation=rotation,
             symmetry_idx=self.crystal.symmetry_idx,
             plane_normals=self.crystal.N,
         )
 
-        # Pad the target vertices so they all have the same number of vertices
-        v_target = Y_target['vertices']
-        nv_target = torch.tensor([len(v) for v in v_target], device=self.device)
-        max_vertices_target = max(nv_target)
-        v_target = torch.stack([
-            torch.cat([v, torch.zeros(max_vertices_target - len(v), 3, device=self.device)])
-            for v in v_target
-        ])
+        # Split the vertices back into the predicted and target vertices
+        bs = len(Y_pred['distances'])
+        v_pred, v_target = v[:bs], v[bs:]
+        nv_pred, nv_target = nv[:bs], nv[bs:]
 
         # Calculate pairwise distances
         dists = torch.cdist(v_pred, v_target)

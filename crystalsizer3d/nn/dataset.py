@@ -422,16 +422,6 @@ class Dataset:
             ])
             params['sym_rotations'] = sym_R
 
-        # If training 3D, then instantiate the crystal here
-        if self.ds_args.train_3d:
-            crystal = self.load_crystal(
-                idx=idx,
-                r_params=r_params,
-                use_bumpmap=False,
-                merge_vertices=True
-            )
-            params['vertices'] = to_numpy(crystal.vertices)
-
         # Material parameters are z-score standardised
         if self.ds_args.train_material and len(self.labels_material_active) > 0:
             m_params = []
