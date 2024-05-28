@@ -66,6 +66,7 @@ class DatasetSyntheticArgs(BaseArgs):
             ratio_stds: List[float] = None,
             zingg_bbox: List[float] = None,
             distance_constraints: Optional[str] = None,
+            asymmetry: Optional[float] = None,
             rotation_mode: str = ROTATION_MODE_AXISANGLE,
 
             # Crystal layout parameters
@@ -178,6 +179,11 @@ class DatasetSyntheticArgs(BaseArgs):
                     f'Zingg bounding box values must be in (min,max,min,max) form. {zingg_bbox} received.'
         self.zingg_bbox = zingg_bbox
         self.distance_constraints = distance_constraints
+        if asymmetry == 0:
+            asymmetry = None
+        elif asymmetry is not None:
+            assert asymmetry > 0, f'Asymmetric distance std must be greater than 0. {asymmetry} received.'
+        self.asymmetry = asymmetry
         assert rotation_mode in ROTATION_MODES, f'Rotation mode must be one of {ROTATION_MODES}. {rotation_mode} received.'
         self.rotation_mode = rotation_mode
 
@@ -328,6 +334,8 @@ class DatasetSyntheticArgs(BaseArgs):
                            help='Bounding box of the Zingg diagram to restrict shapes to (min_x,max_x,min_y,max_y).')
         group.add_argument('--distance-constraints', type=str, default=None,
                            help='Constraints to apply to the crystal face distances. Must be in the format "111>012>0".')
+        group.add_argument('--asymmetry', type=float, default=None,
+                           help='Standard deviation of the asymmetric distance constraint. Omit to use symmetric distances.')
         group.add_argument('--rotation-mode', type=str, default=ROTATION_MODE_AXISANGLE, choices=ROTATION_MODES,
                            help='Which angles representation to use, "axisangle" or "quaternion".')
 

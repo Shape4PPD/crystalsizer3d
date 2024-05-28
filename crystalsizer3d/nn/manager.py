@@ -230,6 +230,7 @@ class Manager:
             ratio_stds=dsa.ratio_stds,
             zingg_bbox=dsa.zingg_bbox,
             constraints=dsa.distance_constraints,
+            asymmetry=dsa.asymmetry,
         )
         return generator
 

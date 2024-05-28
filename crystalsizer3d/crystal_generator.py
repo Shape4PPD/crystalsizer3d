@@ -1,5 +1,5 @@
 from multiprocessing import Pool
-from typing import Dict, List, Optional, Tuple
+from typing import List, Optional, Tuple
 
 import numpy as np
 import torch
@@ -13,16 +13,6 @@ from crystalsizer3d.csd_proxy import CSDProxy
 from crystalsizer3d.util.utils import SEED, to_numpy
 
 
-def normalise_distances(distances: Dict[Tuple[int, ...], float]) -> Dict[Tuple[int, ...], float]:
-    """
-    Normalise the distances by the maximum.
-    """
-    dv = np.array(list(distances.values()))
-    dv /= dv.max()
-    d2 = {k: dv[i] for i, k in enumerate(distances.keys())}
-    return d2
-
-
 def _generate_crystal(
         crystal_id: str,
         miller_indices: List[Tuple[int, int, int]],
@@ -31,10 +21,13 @@ def _generate_crystal(
         rng: Optional[np.random.Generator] = None,
         seed: int = 0,
         constraints: Optional[List[Tuple[int, ...]]] = None,
+        asymmetry: Optional[float] = None,
+        symmetry_idx: Optional[torch.Tensor] = None,
+        all_miller_indices: Optional[List[Tuple[int, int, int]]] = None,
         zingg_bbox: Optional[List[float]] = None,
         idx: int = 0,
         max_attempts: int = 10000,
-) -> Tuple[np.ndarray, np.ndarray, Trimesh]:
+) -> Tuple[torch.Tensor, np.ndarray, Trimesh]:
     """
     Generate a crystal with randomised face distances.
     """
@@ -47,9 +40,8 @@ def _generate_crystal(
     while n_attempts < max_attempts:
         n_attempts += 1
 
-        # Generate randomised face distances
-        rel_distances = rng.normal(loc=ratio_means, scale=ratio_stds)
-        rel_distances = np.abs(rel_distances) / np.abs(rel_distances).max()
+        # Generate randomised distances for the face groups
+        distances = rng.normal(loc=ratio_means, scale=ratio_stds)
 
         # Check constraints
         if constraints is not None:
@@ -58,18 +50,43 @@ def _generate_crystal(
                 if constraint == 0:
                     vals.append(0)
                 else:
-                    vals.append(rel_distances[miller_indices.index(constraint)])
+                    vals.append(distances[miller_indices.index(constraint)])
             vals = np.array(vals)
             if not np.all(vals[:-1] > vals[1:]):
                 continue
+
+        # Face-group distances
+        distances = torch.from_numpy(distances).to(torch.float32)
+        miller_idxs_active = miller_indices.copy()
+
+        # Add asymmetry
+        if asymmetry is not None:
+            assert symmetry_idx is not None, 'Symmetry index must be provided for asymmetric distances.'
+            assert all_miller_indices is not None, 'all_miller_indices must be provided for asymmetric distances.'
+            assert len(symmetry_idx) == len(all_miller_indices), \
+                'Symmetry index and all_miller_indices must have the same length.'
+
+            # Generate asymmetric distances
+            all_distances = distances[symmetry_idx]
+            for i in range(len(distances)):
+                idx_i = symmetry_idx == i
+                d2 = torch.normal(mean=distances[i], std=asymmetry * distances[i], size=(idx_i.sum(),))
+                all_distances[idx_i] = d2
+
+            # Update the distances and miller indices
+            distances = all_distances
+            miller_idxs_active = all_miller_indices.copy()
+
+        # Normalise the distances
+        distances = torch.abs(distances) / torch.abs(distances).max()
 
         # Build the crystal
         crystal = Crystal(
             lattice_unit_cell=cs.lattice_unit_cell,
             lattice_angles=cs.lattice_angles,
-            miller_indices=miller_indices,
+            miller_indices=miller_idxs_active,
             point_group_symbol=cs.point_group_symbol,
-            distances=torch.from_numpy(rel_distances).to(torch.float32)
+            distances=distances
         )
         v, f = to_numpy(crystal.mesh_vertices), to_numpy(crystal.mesh_faces)
         mesh = Trimesh(vertices=v, faces=f, process=True, validate=True)
@@ -94,7 +111,7 @@ def _generate_crystal(
         raise RuntimeError(f'Failed to generate a valid crystal after {n_attempts} attempts.')
     mesh.metadata['name'] = f'{crystal_id}_{idx:06d}'
 
-    return rel_distances, np.array([si, il]), mesh
+    return distances, np.array([si, il]), mesh
 
 
 def _generate_crystal_wrapper(args):
@@ -110,6 +127,7 @@ class CrystalGenerator:
             ratio_stds: List[float],
             zingg_bbox: List[float],
             constraints: Optional[str] = None,
+            asymmetry: Optional[float] = None,
             n_workers: int = 1
     ):
         """
@@ -153,6 +171,13 @@ class CrystalGenerator:
                     constraints.append(0)
         self.constraints = constraints
 
+        # Validate the asymmetry
+        if asymmetry == 0:
+            asymmetry = None
+        elif asymmetry is not None:
+            assert asymmetry > 0, f'Asymmetric distance std must be greater than 0. {asymmetry} received.'
+        self.asymmetry = asymmetry
+
         # Number of workers
         self.n_workers = n_workers
 
@@ -192,6 +217,9 @@ class CrystalGenerator:
             ratio_means=self.ratio_means,
             ratio_stds=self.ratio_stds,
             constraints=self.constraints,
+            asymmetry=self.asymmetry,
+            symmetry_idx=self.crystal.symmetry_idx,
+            all_miller_indices=self.crystal.all_miller_indices.tolist(),
             zingg_bbox=self.zingg_bbox,
             max_attempts=max_attempts
         )
@@ -216,7 +244,7 @@ class CrystalGenerator:
             distances: List[float],
     ) -> Tuple[np.ndarray, np.ndarray, Trimesh]:
         """
-        Generate a randomised crystal.
+        Generate a crystal with the given distances.
         """
         crystal = Crystal(
             lattice_unit_cell=self.lattice_unit_cell,

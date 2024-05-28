@@ -2,6 +2,7 @@ import csv
 import json
 import multiprocessing as mp
 import os
+import re
 import shutil
 import time
 from multiprocessing import Pool
@@ -21,8 +22,8 @@ from crystalsizer3d.args.dataset_synthetic_args import DatasetSyntheticArgs
 from crystalsizer3d.crystal import Crystal
 from crystalsizer3d.csd_proxy import CSDProxy
 from crystalsizer3d.scene_components.bubble import Bubble, make_bubbles
-from crystalsizer3d.scene_components.textures import NoiseTexture, NormalMapNoiseTexture, generate_crystal_bumpmap
 from crystalsizer3d.scene_components.scene import Scene
+from crystalsizer3d.scene_components.textures import NoiseTexture, NormalMapNoiseTexture, generate_crystal_bumpmap
 from crystalsizer3d.scene_components.utils import RenderError
 from crystalsizer3d.util.utils import SEED, hash_data, to_numpy
 
@@ -439,6 +440,11 @@ class CrystalRenderer:
         self.point_group_symbol = cs.point_group_symbol
         self.miller_indices = self.dataset_args.miller_indices
 
+        # Expand the miller indices to include all faces if the distances are asymmetric
+        if self.dataset_args.asymmetry is not None:
+            crystal = self._init_crystal([1. for _ in self.miller_indices])
+            self.miller_indices = [tuple(hkl) for hkl in crystal.all_miller_indices.tolist()]
+
     def __getattr__(self, name: str):
         """
         Lazy loading of the data.
@@ -531,7 +537,7 @@ class CrystalRenderer:
         # Load the crystal parameters
         with open(self.param_path, 'r') as f:
             reader = csv.DictReader(f)
-            headers_distances = {tuple(int(hkl) for hkl in h.split('_')[1]): h
+            headers_distances = {tuple(map(int, re.findall(r'-?\d', h.split('_')[1]))): h
                                  for h in reader.fieldnames if h[0] == 'd'}
             assert all(hkl in headers_distances for hkl in self.miller_indices), 'Missing distance headers!'
             self.data = {}

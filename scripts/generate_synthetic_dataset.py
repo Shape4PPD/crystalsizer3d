@@ -253,6 +253,7 @@ def generate_dataset():
         ratio_stds=dataset_args.ratio_stds,
         zingg_bbox=dataset_args.zingg_bbox,
         constraints=dataset_args.distance_constraints,
+        asymmetry=dataset_args.asymmetry,
         n_workers=runtime_args.n_generator_workers
     )
 
@@ -264,12 +265,16 @@ def generate_dataset():
     logger.info(f'Saving crystal parameters to {param_path}.')
     with open(param_path, 'w') as f:
         headers = PARAMETER_HEADERS.copy()
-        ref_idxs = [''.join(str(i) for i in k) for k in dataset_args.miller_indices]
+        if dataset_args.asymmetry is None:
+            miller_idxs = dataset_args.miller_indices
+        else:
+            miller_idxs = generator.crystal.all_miller_indices.tolist()
+        ref_idxs = [''.join(str(i) for i in k) for k in miller_idxs]
         for i, hkl in enumerate(ref_idxs):
             headers.append(f'd{i}_{hkl}')
         writer = csv.DictWriter(f, fieldnames=headers)
         writer.writeheader()
-        for i, (rel_rates, zingg_vals, _) in enumerate(crystals):
+        for i, (distances, zingg_vals, _) in enumerate(crystals):
             entry = {
                 'crystal_id': generator.crystal_id,
                 'idx': i,
@@ -278,7 +283,7 @@ def generate_dataset():
                 'il': zingg_vals[1],
             }
             for j, hkl in enumerate(ref_idxs):
-                entry[f'd{j}_{hkl}'] = rel_rates[j]
+                entry[f'd{j}_{hkl}'] = float(distances[j])
             writer.writerow(entry)
 
     # Render the crystals

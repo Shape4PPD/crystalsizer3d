@@ -1,5 +1,6 @@
 import csv
 import json
+import re
 from itertools import product
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -205,6 +206,12 @@ class Dataset:
                     item['rendering_parameters']['bumpmap'] = bumpmap_path
 
                 self.data[idx] = item
+
+        # Set miller indices
+        self.miller_indices = self.dataset_args.miller_indices
+        if self.dataset_args.asymmetry is not None:
+            self.miller_indices = [tuple(map(int, re.findall(r'-?\d', h.split('_')[1])))
+                                   for h in self.labels_distances]
 
     def _load_ds_stats(self):
         """
@@ -460,7 +467,7 @@ class Dataset:
         crystal = Crystal(
             lattice_unit_cell=cs.lattice_unit_cell,
             lattice_angles=cs.lattice_angles,
-            miller_indices=self.dataset_args.miller_indices,
+            miller_indices=self.miller_indices,
             point_group_symbol=cs.point_group_symbol,
             scale=r_params['crystal']['scale'],
             distances=r_params['crystal']['distances'],
@@ -685,13 +692,13 @@ class Dataset:
             distances[:, pos] = distance_vals[:, i]
 
         # Add any maximum distance constraint set to one
-        if self.dataset_args.distance_constraints is not None:
+        if self.dataset_args.distance_constraints is not None and self.dataset_args.asymmetry is None:
             largest_hkl = self.dataset_args.distance_constraints.split('>')[0]
             largest_pos = [d[-3:] for d in self.labels_distances].index(largest_hkl)
             distances[:, largest_pos] = 1
 
         # Normalise the distances by the maximum (in each batch element)
-        d_max = distances.amax(dim=1,keepdim=True)
+        d_max = distances.amax(dim=1, keepdim=True)
         distances = torch.where(
             d_max > 1e-8,
             distances / d_max,

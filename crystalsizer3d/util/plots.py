@@ -348,8 +348,24 @@ def plot_distances(
     d_target = _load_single_parameter(Y_target, 'distances', idx)
     d_pred2 = _load_single_parameter(Y_pred2, 'distances', idx)
 
-    # Clip predictions to -1 to avoid large negatives skewing the plots
-    d_pred = np.clip(d_pred, a_min=-1, a_max=np.inf)
+    # Prepare the distances
+    d_pred = manager.ds.prep_distances(torch.from_numpy(d_pred))
+    d_target = manager.ds.prep_distances(torch.from_numpy(d_target))
+    if d_pred2 is not None:
+        d_pred2 = manager.ds.prep_distances(torch.from_numpy(d_pred2))
+
+    # Group asymmetric distances by face group
+    distance_groups = {}
+    grouped_order = None
+    if manager.ds.dataset_args.asymmetry is not None:
+        for i, hkl in enumerate(manager.ds.dataset_args.miller_indices):
+            group_idxs = (manager.crystal.symmetry_idx == i).nonzero().squeeze()
+            distance_groups[hkl] = group_idxs
+        grouped_order = torch.cat(list(distance_groups.values()))
+        d_pred = d_pred[grouped_order]
+        d_target = d_target[grouped_order]
+        if d_pred2 is not None:
+            d_pred2 = d_pred2[grouped_order]
 
     # Add bar chart data
     locs, bar_width, offset = _add_bars(
@@ -361,12 +377,27 @@ def plot_distances(
         colour_target=colour_target,
         colour_pred2=colour_pred2,
     )
-    locs = np.arange(len(d_pred))
-    xlabels = ['(' + ','.join(list(l[3:])) + ')' for l in manager.ds.labels_distances_active]
+
+    # Reorder labels for asymmetric distances
+    if manager.ds.dataset_args.asymmetry is not None:
+        xlabels = []
+        for i, (hkl, g) in enumerate(distance_groups.items()):
+            group_labels = [''] * len(g)
+            group_labels[len(g) // 2] = '(' + ','.join(map(str, hkl)) + ')'
+            xlabels.extend(group_labels)
+
+            # Add vertical separator lines between face groups
+            if i < len(distance_groups) - 1:
+                ax.axvline(locs[len(xlabels) - 1] + 0.5, color='black', linestyle='--', linewidth=1)
+    else:
+        xlabels = ['(' + ','.join(list(l[3:])) + ')' for l in manager.ds.labels_distances_active]
 
     if manager.dataset_args.use_distance_switches:
         s_pred = _load_single_parameter(Y_pred, 'distance_switches', idx)
         s_target = _load_single_parameter(Y_target, 'distance_switches', idx)
+        if manager.ds.dataset_args.asymmetry is not None:
+            s_pred = s_pred[grouped_order]
+            s_target = s_target[grouped_order]
         k = 2.3
         colours = []
         for i, (sp, st) in enumerate(zip(s_pred, s_target)):
@@ -377,7 +408,7 @@ def plot_distances(
             colours.append('red' if (st < 0.5 < sp) or (st > 0.5 > sp) else 'green')
         ax.scatter(locs + offset, s_pred, color=colours, marker='+', s=100, label='Switches')
 
-    if manager.ds.dataset_args.distance_constraints is not None:
+    if manager.ds.dataset_args.distance_constraints is not None and manager.ds.dataset_args.asymmetry is None:
         locs = np.concatenate([[-1], locs])
         ax.bar(-1, 1, bar_width, color='purple', label='Constraint')
         largest_hkl = '(' + ','.join([str(hkl) for hkl in manager.crystal_generator.constraints[0]]) + ')'
