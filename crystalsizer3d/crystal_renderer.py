@@ -7,7 +7,7 @@ import shutil
 import time
 from multiprocessing import Pool
 from pathlib import Path
-from typing import List, Optional
+from typing import List, Optional, Tuple, Union
 
 import cv2
 import matplotlib.pyplot as plt
@@ -216,11 +216,13 @@ def _render_batch(
     images_dir = root_dir / 'images'
     params_dir = root_dir / 'rendering_parameters'
     segmentations_dir = root_dir / 'segmentations'
+    vertices_dir = root_dir / 'vertices'
     crystal_bumpmaps_dir = root_dir / 'crystal_bumpmaps'
     clean_images_dir = root_dir / 'images_clean'
     images_dir.mkdir(exist_ok=True)
     params_dir.mkdir(exist_ok=True)
     segmentations_dir.mkdir(exist_ok=True)
+    vertices_dir.mkdir(exist_ok=True)
     if da.crystal_bumpmap_dim > 0:
         crystal_bumpmaps_dir.mkdir(exist_ok=True)
     if da.generate_clean:
@@ -240,6 +242,7 @@ def _render_batch(
     logger.info(f'Batch {batch_idx + 1}/{n_batches}: Rendering {len(param_batch)} crystals to {output_dir}.')
     rendering_params = {}
     segmentations = {}
+    vertices = {}
     scale_init = 1
     for idx, params in param_batch.items():
         try:
@@ -331,6 +334,7 @@ def _render_batch(
             if 'bubbles' in scene_params:
                 rendering_params[idx]['bubbles'] = scene_params['bubbles']
             segmentations[idx] = scene.get_crystal_image_coords().tolist()
+            vertices[idx] = scene.crystal.vertices.tolist()
 
             # Save crystal bumpmap
             if da.crystal_bumpmap_dim > 0:
@@ -380,11 +384,13 @@ def _render_batch(
     for img in clean_image_files:
         img.rename(clean_images_dir / (img.stem + '.png'))
 
-    # Write the parameters and segmentations to json files
+    # Write the parameters, segmentations and vertices to json files
     with open(params_dir / f'{worker_key}.json', 'w') as f:
         json.dump(rendering_params, f, indent=4)
     with open(segmentations_dir / f'{worker_key}.json', 'w') as f:
         json.dump(segmentations, f, indent=4)
+    with open(vertices_dir / f'{worker_key}.json', 'w') as f:
+        json.dump(vertices, f, indent=4)
 
     # Update the comlog
     comlog_lock.acquire()
@@ -426,6 +432,8 @@ class CrystalRenderer:
         self.rendering_params_path = self.root_dir / 'rendering_parameters.json'
         self.segmentations_dir = self.root_dir / 'segmentations'
         self.segmentations_path = self.root_dir / 'segmentations.json'
+        self.vertices_dir = self.root_dir / 'vertices'
+        self.vertices_path = self.root_dir / 'vertices.json'
         self.remove_mismatched = remove_mismatched
         self._init_crystal_settings()
 
@@ -449,7 +457,7 @@ class CrystalRenderer:
         """
         Lazy loading of the data.
         """
-        if name in ['rendering_params', 'segmentations', 'data']:
+        if name in ['rendering_params', 'segmentations', 'vertices', 'data']:
             self._load_parameters(remove_mismatched=self.remove_mismatched)
             return getattr(self, name)
         raise AttributeError(f"'{self.__class__.__name__}' object has no attribute '{name}'")
@@ -490,9 +498,10 @@ class CrystalRenderer:
                 json.dump(comlog, f, indent=4)
             self.comlog_lock.release()
 
-        # Load rendering parameters and segmentations if they exist
+        # Load rendering parameters, segmentations and vertices if they exist
         self.rendering_params = _load_json(self.rendering_params_path, int_keys=True)
         self.segmentations = _load_json(self.segmentations_path, int_keys=True)
+        self.vertices = _load_json(self.vertices_path, int_keys=True)
 
         # Load the comlog file if it exists to check for completed idxs
         comlog = _load_json(self.comlog_path)
@@ -502,7 +511,7 @@ class CrystalRenderer:
             completed_idxs = []
 
         # Check that the rendering parameters and segmentations match
-        logger.info('Checking segmentation and rendering parameters idxs.')
+        logger.info('Checking rendering parameters idxs match with the segmentations.')
         rp_idxs = set(self.rendering_params.keys())
         seg_idxs = set(self.segmentations.keys())
         broken_keys = rp_idxs.union(seg_idxs) - rp_idxs.intersection(seg_idxs)
@@ -549,6 +558,33 @@ class CrystalRenderer:
                     'distances': {hkl: float(row[headers_distances[hkl]]) for hkl in self.miller_indices},
                     'rendered': idx in self.rendering_params or idx in completed_idxs,
                 }
+
+        # Check the vertices match the rendering parameters
+        vert_idxs = set(self.vertices.keys())
+        if vert_idxs != rp_idxs:
+            logger.warning(f'Vertices and rendering parameters do not match! '
+                           f'(#vertices) {len(vert_idxs)} != {len(rp_idxs)} (#rendering parameters). Rebuilding the vertices.')
+            global device
+            device_og = device
+            device = torch.device('cpu')
+            vertices = {}
+            for i, idx in enumerate(rp_idxs):
+                if (i + 1) % 100 == 0:
+                    logger.info(f'Building vertices for {i + 1}/{len(rp_idxs)} crystals.')
+                if idx in self.vertices:
+                    vertices[idx] = self.vertices[idx]
+                else:
+                    r_params = self.rendering_params[idx]
+                    crystal = self._init_crystal(
+                        distances=r_params['crystal']['distances'],
+                        scale=r_params['crystal']['scale'],
+                        origin=r_params['crystal']['origin'],
+                        rotation=r_params['crystal']['rotation']
+                    )
+                    vertices[idx] = crystal.vertices.tolist()
+            _write_json(self.vertices_path, vertices)
+            device = device_og
+            return self._load_parameters()
 
     def _init_crystal(
             self,
@@ -656,10 +692,12 @@ class CrystalRenderer:
             return
         combine_json_files(self.rendering_params_path, self.rendering_params_dir)
         combine_json_files(self.segmentations_path, self.segmentations_dir)
+        combine_json_files(self.vertices_path, self.vertices_dir)
         self.comlog_lock.release()
         self._load_parameters()
 
-    def render_from_parameters(self, params: dict) -> np.ndarray:
+    def render_from_parameters(self, params: dict, return_scene: bool = False) \
+            -> Union[np.ndarray, Tuple[np.ndarray, Scene]]:
         """
         Render a single crystal image from parameters.
         """
@@ -728,6 +766,8 @@ class CrystalRenderer:
         img = scene.render(seed=params['seed'] if 'seed' in params else SEED)
         img = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)  # todo: do we need this?
 
+        if return_scene:
+            return img, scene
         return img
 
     def annotate_image(self, image_idx: int = 0):

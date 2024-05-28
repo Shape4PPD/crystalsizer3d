@@ -162,6 +162,16 @@ class Dataset:
             logger.warning(f'Rendering parameters file {r_params_file} does not exist.')
             rendering_parameters = None
 
+        # Load crystal vertices
+        vertices_file = self.path / 'vertices.json'
+        if vertices_file.exists():
+            with open(vertices_file, 'r') as f:
+                vertices = json.load(f)
+            vertices = {int(k): v for k, v in vertices.items()}
+        else:
+            logger.warning(f'Vertices file {vertices_file} does not exist.')
+            vertices = None
+
         # Load data
         with open(self.path / 'parameters.csv', 'r') as f:
             reader = csv.DictReader(f)
@@ -197,6 +207,10 @@ class Dataset:
                 # Include the rendering parameters
                 if rendering_parameters is not None:
                     item['rendering_parameters'] = rendering_parameters[idx]
+
+                # Include the crystal vertices
+                if vertices is not None:
+                    item['vertices'] = vertices[idx]
 
                 # Add the bumpmap path if required
                 if self.dataset_args.crystal_bumpmap_dim > -1:
@@ -379,30 +393,44 @@ class Dataset:
                 ])
 
         # Transformation parameters are normalised by the dataset statistics
-        if self.ds_args.train_transformation:
+        if self.ds_args.train_transformation or self.ds_args.train_3d:
             # Normalise the origin to [-1, 1] x 3, but scale together
-            location = np.array(r_params['crystal']['origin'])
+            origin = np.array(r_params['crystal']['origin'])
             l_max = np.array([self.ds_stats[xyz]['max'] for xyz in 'xyz'])
             l_min = np.array([self.ds_stats[xyz]['min'] for xyz in 'xyz'])
             ranges = l_max - l_min
             range_max = ranges.max()
-            location = 2 * (location - l_min - ranges / 2) / range_max
+            origin = 2 * (origin - l_min - ranges / 2) / range_max
 
             # Standardise the scale
             scale = z_transform(r_params['crystal']['scale'], 's')
 
-            # Rotation representation
+            # Rotation representation in the dataset
             if self.dataset_args.rotation_mode == ROTATION_MODE_QUATERNION:
                 R0 = Rotation.from_quat(r_params['crystal']['rotation'])
             else:
                 assert self.dataset_args.rotation_mode == ROTATION_MODE_AXISANGLE
                 R0 = Rotation.from_rotvec(r_params['crystal']['rotation'])
 
+            # Rotation representation to be returned
+            if self.ds_args.rotation_mode == ROTATION_MODE_QUATERNION:
+                rotation = R0.as_quat(canonical=True)[[3, 0, 1, 2]]
+            else:
+                assert self.ds_args.rotation_mode == ROTATION_MODE_AXISANGLE
+                rotation = R0.as_rotvec()
+
+            params['transformation'] = np.array([
+                *origin,
+                scale,
+                *rotation
+            ])
+
             # Apply the rotation to the symmetry group
             sym_group = self._get_symmetry_group(idx)
             sym_R = np.zeros((len(sym_group), 3, 3))
             for i, R in enumerate(sym_group):
                 sym_R[i] = (R0 * R).as_matrix()
+            params['sym_rotations'] = sym_R
 
             # # Check the symmetry group
             # mesh = self.load_mesh(idx)
@@ -415,19 +443,15 @@ class Dataset:
             #     min_vertex_dists = cd.min(axis=1)
             #     assert np.all(min_vertex_dists < 0.1), 'Symmetry group is not correct!'
 
-            # Get rotation representation
-            if self.ds_args.rotation_mode == ROTATION_MODE_QUATERNION:
-                rotation = R0.as_quat(canonical=True)[[3, 0, 1, 2]]
-            else:
-                assert self.ds_args.rotation_mode == ROTATION_MODE_AXISANGLE
-                rotation = R0.as_rotvec()
-
-            params['transformation'] = np.array([
-                *location,
-                scale,
-                *rotation
-            ])
-            params['sym_rotations'] = sym_R
+        # 3D vertices are transformed by the normalised transformation parameters
+        if self.ds_args.train_3d:
+            origin_og = np.array(r_params['crystal']['origin'])
+            scale_og = r_params['crystal']['scale']
+            origin_new = params['transformation'][:3]
+            scale_new = params['transformation'][3]
+            vertices_og = np.array(item['vertices'])
+            vertices_new = (vertices_og - origin_og) / scale_og * scale_new + origin_new
+            params['vertices'] = vertices_new
 
         # Material parameters are z-score standardised
         if self.ds_args.train_material and len(self.labels_material_active) > 0:

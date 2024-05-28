@@ -24,8 +24,9 @@ def calculate_polyhedral_vertices(
     bs = distances.shape[0]
 
     # Expand the distances to take account of symmetries
-    distances = distances.clip(0, None)
-    d = distances[:, symmetry_idx]
+    d = distances.clip(0, None)
+    if symmetry_idx is not None:
+        d = d[:, symmetry_idx]
 
     # Calculate all intersection points of all combinations of 3 planes
     all_combinations = torch.tensor(list(combinations(range(len(plane_normals)), 3)), device=device)

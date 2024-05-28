@@ -131,6 +131,9 @@ class Manager:
         """
         if name == 'ds':
             self.ds = Dataset(self.dataset_args)
+            if self.ds.dataset_args.asymmetry is not None:
+                assert self.dataset_args.check_symmetries == 0, \
+                    f'Asymmetry is set, so check_symmetries must be 0 (received {self.dataset_args.check_symmetries})'
             return self.ds
         elif name in ['train_loader', 'test_loader']:
             self.train_loader, self.test_loader = self._init_data_loaders()
@@ -1689,26 +1692,23 @@ class Manager:
         """
         Calculate the distances between 3d vertices.
         """
-        # Stack the parameters along the batch dimension
-        distances = torch.cat([Y_pred['distances'], Y_target['distances']], dim=0)
-        origin = torch.cat([Y_pred['transformation'][:, :3], Y_target['transformation'][:, :3]], dim=0)
-        scale = torch.cat([Y_pred['transformation'][:, 3], Y_target['transformation'][:, 3]], dim=0)
-        rotation = torch.cat([Y_pred['transformation'][:, 4:], Y_target['transformation'][:, 4:]], dim=0)
-
         # Calculate the polyhedral vertices for the parameters
-        v, nv = calculate_polyhedral_vertices(
-            distances=self.ds.prep_distances(distances),
-            origin=origin,
-            scale=scale,
-            rotation=rotation,
-            symmetry_idx=self.crystal.symmetry_idx,
+        v_pred, nv_pred = calculate_polyhedral_vertices(
+            distances=self.ds.prep_distances(Y_pred['distances']),
+            origin=Y_pred['transformation'][:, :3],
+            scale=Y_pred['transformation'][:, 3],
+            rotation=Y_pred['transformation'][:, 4:],
+            symmetry_idx=self.crystal.symmetry_idx if self.ds.dataset_args.asymmetry is None else None,
             plane_normals=self.crystal.N,
         )
 
-        # Split the vertices back into the predicted and target vertices
-        bs = len(Y_pred['distances'])
-        v_pred, v_target = v[:bs], v[bs:]
-        nv_pred, nv_target = nv[:bs], nv[bs:]
+        # Pad the vertices so that all batch entries have the same number of vertices
+        nv_target = torch.tensor([len(v) for v in Y_target['vertices']], device=self.device)
+        max_vertices_target = nv_target.amax()
+        v_target = torch.stack([
+            torch.cat([v, torch.zeros(max_vertices_target - len(v), 3, device=self.device)])
+            for v in Y_target['vertices']
+        ])
 
         # Calculate pairwise distances
         dists = torch.cdist(v_pred, v_target)
