@@ -74,7 +74,8 @@ def get_data_loader(
         augment: bool,
         train_or_test: str,
         batch_size: int,
-        n_workers: int
+        n_workers: int,
+        prefetch_factor: int = 1,
 ) -> DataLoader:
     """
     Get a data loader.
@@ -113,7 +114,7 @@ def get_data_loader(
         num_workers=n_workers,
         drop_last=True,
         collate_fn=collate_fn,
-        prefetch_factor=1 if n_workers > 0 else None
+        prefetch_factor=prefetch_factor if n_workers > 0 else None
     )
 
     return loader

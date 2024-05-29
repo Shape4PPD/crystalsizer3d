@@ -260,7 +260,8 @@ class Manager:
                 augment=self.dataset_args.augment,
                 train_or_test=tt,
                 batch_size=self.runtime_args.batch_size,
-                n_workers=self.runtime_args.n_dataloader_workers
+                n_workers=self.runtime_args.n_dataloader_workers,
+                prefetch_factor=self.runtime_args.prefetch_factor
             )
 
         return loaders['train'], loaders['test']
