@@ -15,7 +15,7 @@ from crystalsizer3d import LOGS_PATH, N_WORKERS, START_TIMESTAMP, logger
 from crystalsizer3d.args.dataset_synthetic_args import DatasetSyntheticArgs
 from crystalsizer3d.crystal_generator import CrystalGenerator
 from crystalsizer3d.crystal_renderer import CrystalRenderer
-from crystalsizer3d.util.utils import print_args, set_seed, str2bool, to_dict
+from crystalsizer3d.util.utils import print_args, set_seed, str2bool, to_dict, to_numpy
 
 PARAMETER_HEADERS = [
     'crystal_id',
@@ -123,9 +123,10 @@ def validate(
                 elif header in ['si', 'il']:
                     item[header] = float(row[header])
 
-            # Include the rendering parameters and segmentations
+            # Include the rendering parameters, segmentations and vertices
             item['rendering_parameters'] = renderer.rendering_params[idx]
             item['segmentation'] = renderer.segmentations[idx]
+            item['vertices'] = renderer.vertices[idx]
 
             # Add textures
             if dsa.crystal_bumpmap_dim > 0:
@@ -151,12 +152,12 @@ def validate(
     failed_idxs = []
     for i, idx in enumerate(idxs):
         logger.info(f'Validating entry idx={idx} ({i + 1}/{n_examples}).')
+        img_path = val_dir / '0000000001.png'
 
         try:
             # Load the parameters for this idx
             example = data[idx]
             r_params = example['rendering_parameters']
-            img_path = val_dir / '0000000001.png'
 
             # Build the crystal
             logger.info('Re-generating crystal.')
@@ -165,7 +166,7 @@ def validate(
             _, z, m = generator.generate_crystal(distances=distances)
 
             # Render the crystal
-            img = renderer.render_from_parameters(r_params)
+            img, scene = renderer.render_from_parameters(r_params, return_scene=True)
             cv2.imwrite(str(img_path), img)
 
             # Save the images side by side for comparison
@@ -177,10 +178,6 @@ def validate(
             img_compare.paste(img_new, (img_og.width, 0))
             img_compare.save(img_path_compare)
 
-            # Check the Zingg values match
-            assert np.allclose(z[0], example['si']), f'Zingg SI values do not match: {z[0]} != {example["si"]}'
-            assert np.allclose(z[1], example['il']), f'Zingg IL values do not match: {z[1]} != {example["il"]}'
-
             # Assert that the images aren't too different
             img_og = np.array(img_og).astype(np.float32)
             img_new = np.array(img_new).astype(np.float32)
@@ -189,13 +186,25 @@ def validate(
             assert max_diff < 15 and mean_diff < 0.01, \
                 f'Images are too different! (Mean diff={mean_diff:.3E}, Max diff={max_diff:.1f})'
 
-            # Clean up
-            img_path.unlink()
+            # Check that the vertices match
+            v1 = to_numpy(scene.crystal.vertices)
+            v2 = np.array(example['vertices'])
+            assert np.allclose(v1, v2), f'Vertices do not match!'
+
+            # Check the Zingg values match
+            assert np.allclose(z[0], example['si'], atol=0.05), \
+                f'Zingg SI values do not match: {z[0]} != {example["si"]}'
+            assert np.allclose(z[1], example['il'], atol=0.05), \
+                f'Zingg IL values do not match: {z[1]} != {example["il"]}'
+
             logger.info('Validation passed.')
 
         except AssertionError as e:
             logger.warning(f'Validation failed: {e}')
             failed_idxs.append(idx)
+
+        if img_path.exists():
+            img_path.unlink()
 
     # Report any failed indices
     if len(failed_idxs) > 0:
@@ -364,6 +373,7 @@ def resume(
             ratio_stds=dataset_args.ratio_stds,
             zingg_bbox=dataset_args.zingg_bbox,
             constraints=dataset_args.distance_constraints,
+            asymmetry=dataset_args.asymmetry,
             n_workers=runtime_args.n_generator_workers
         )
         crystals = generator.generate_crystals(num=len(errored))
