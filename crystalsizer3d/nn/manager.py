@@ -1309,7 +1309,8 @@ class Manager:
         if isinstance(Y_target, torch.Tensor):
             Y_target_vec = Y_target.to(self.device)
         else:
-            Y_target_vec = torch.cat([Yk for k, Yk in Y_target.items() if k != 'sym_rotations'], dim=1).to(self.device)
+            Y_target_vec = torch.cat([Yk for Yk in Y_target.values() if isinstance(Yk, torch.Tensor)], dim=1).to(
+                self.device)
 
         # Encode parameters into the latent space
         Z_mu_logits, Z_logvar = self.transcoder.to_latents(Y_target_vec, return_logvar=True, activate=False)
@@ -1450,7 +1451,7 @@ class Manager:
         """
         if not self.dataset_args.train_generator:
             return None
-        Y_vector = torch.cat([Yk for k, Yk in Y.items() if k != 'sym_rotations'], dim=1)
+        Y_vector = torch.cat([Yk for Yk in Y.values() if isinstance(Yk, torch.Tensor)], dim=1)
 
         # Add some noise to the input parameters during training
         if self.generator.training and self.generator_args.gen_input_noise_std > 0:
@@ -1467,8 +1468,8 @@ class Manager:
     def calculate_predictor_losses(
             self,
             Y_pred: Dict[str, torch.Tensor],
-            Y_target: Dict[str, torch.Tensor],
-            X_target: Optional[torch.Tensor]
+            Y_target: Dict[str, Union[torch.Tensor, List[torch.Tensor]]],
+            X_target: Optional[torch.Tensor],
     ) -> Tuple[torch.Tensor, Dict[str, torch.Tensor], Optional[torch.Tensor]]:
         """
         Calculate losses.
@@ -1494,9 +1495,10 @@ class Manager:
                 stats['losses/distance_switches'] = loss_s.item()
 
         if self.dataset_args.train_transformation:
+            sym_rotations = Y_target['sym_rotations'] if 'sym_rotations' in Y_target else None
             loss_t, stats_t = self._calculate_transformation_losses(Y_pred['transformation'],
                                                                     Y_target['transformation'],
-                                                                    Y_target['sym_rotations'])
+                                                                    sym_rotations)
             losses.append(self.optimiser_args.w_transformation * loss_t)
             stats.update(stats_t)
 
@@ -1611,7 +1613,7 @@ class Manager:
             self,
             t_pred: torch.Tensor,
             t_target: torch.Tensor,
-            sym_rotations: Optional[torch.Tensor] = None
+            sym_rotations: Optional[List[torch.Tensor]] = None
     ) -> Tuple[torch.Tensor, Dict[str, float]]:
         """
         Calculate the transformation losses.
@@ -1687,7 +1689,7 @@ class Manager:
     def _calculate_3d_losses(
             self,
             Y_pred: Dict[str, torch.Tensor],
-            Y_target: Dict[str, torch.Tensor]
+            Y_target: Dict[str, Union[torch.Tensor, List[torch.Tensor]]]
     ) -> Tuple[torch.Tensor, Dict[str, float]]:
         """
         Calculate the distances between 3d vertices.
@@ -1819,7 +1821,7 @@ class Manager:
             self,
             X_pred: Optional[torch.Tensor],
             X_target: Optional[torch.Tensor],
-            Y_target: Dict[str, torch.Tensor],
+            Y_target: Dict[str, Union[torch.Tensor, List[torch.Tensor]]],
             include_teacher_loss: bool = True,
             include_discriminator_loss: bool = True,
             include_transcoder_loss: bool = True,
@@ -1888,7 +1890,7 @@ class Manager:
     def _calculate_gen_teacher_losses(
             self,
             X_pred: torch.Tensor,
-            Y_target: Dict[str, torch.Tensor],
+            Y_target: Dict[str, Union[torch.Tensor, List[torch.Tensor]]],
     ) -> Tuple[torch.Tensor, Dict[str, float], Dict[str, torch.Tensor]]:
         """
         Calculate the teacher losses using the parameter network as the teacher.
@@ -1998,7 +2000,7 @@ class Manager:
 
     def calculate_vae_transcoder_losses(
             self,
-            Y_target: Dict[str, torch.Tensor],
+            Y_target: Dict[str, Union[torch.Tensor, List[torch.Tensor]]],
             Yr_mu_vec: torch.Tensor,
             Yr_mu_clean: torch.Tensor,
             Z_mu_logits: torch.Tensor,
@@ -2063,7 +2065,7 @@ class Manager:
 
     def _calculate_parameter_reconstruction_losses(
             self,
-            Y_target: Dict[str, torch.Tensor],
+            Y_target: Dict[str, Union[torch.Tensor, List[torch.Tensor]]],
             Y_pred_vec: torch.Tensor,
             check_sym_rotations: bool = False
     ):
@@ -2091,7 +2093,7 @@ class Manager:
                 stats['losses/distance_switches'] = loss_s.item()
 
         if self.dataset_args.train_transformation:
-            sym_rotations = Y_target['sym_rotations'] if check_sym_rotations else None
+            sym_rotations = Y_target['sym_rotations'] if check_sym_rotations and 'sym_rotations' in Y_target else None
             loss_t, stats_t = self._calculate_transformation_losses(Y_pred['transformation'],
                                                                     Y_target['transformation'],
                                                                     sym_rotations)
@@ -2115,12 +2117,12 @@ class Manager:
 
     def _calculate_transcoder_parameter_independence_losses(
             self,
-            Y_target: Dict[str, torch.Tensor]
+            Y_target: Dict[str, Union[torch.Tensor, List[torch.Tensor]]],
     ):
         """
         Calculate the parameter independence loss.
         """
-        Y_vector = torch.cat([Yk for k, Yk in Y_target.items() if k != 'sym_rotations'], dim=1)
+        Y_vector = torch.cat([Yk for Yk in Y_target.values() if isinstance(Yk, torch.Tensor)], dim=1)
         noise_level = 0.1
         bs = len(Y_vector)
 
@@ -2217,16 +2219,16 @@ class Manager:
     def _calculate_com_loss(
             self,
             Z: torch.Tensor,
-            Y_target: Dict[str, torch.Tensor],
+            Y_target: Dict[str, Union[torch.Tensor, List[torch.Tensor]]],
             use_sym_rotations: bool = True
     ):
         """
         Calculate the latents loss - difference between the latent Z and the target latents from the parameters.
         """
-        Y_target_vec = torch.cat([Yk for k, Yk in Y_target.items() if k != 'sym_rotations'], dim=1)
+        Y_target_vec = torch.cat([Yk for Yk in Y_target.values() if isinstance(Yk, torch.Tensor)], dim=1)
 
         # Make a new batch of Y_targets with the rotation picked to be as close to the predicted rotation as possible
-        if use_sym_rotations:
+        if use_sym_rotations and 'sym_rotations' in Y_target:
             bs = len(Y_target_vec)
             q0 = self.ds.labels.index('rw')
             for i in range(bs):

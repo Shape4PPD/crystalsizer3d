@@ -426,11 +426,12 @@ class Dataset:
             ])
 
             # Apply the rotation to the symmetry group
-            sym_group = self._get_symmetry_group(idx)
-            sym_R = np.zeros((len(sym_group), 3, 3))
-            for i, R in enumerate(sym_group):
-                sym_R[i] = (R0 * R).as_matrix()
-            params['sym_rotations'] = sym_R
+            if self.ds_args.check_symmetries > 0:
+                sym_group = self._get_symmetry_group(idx)
+                sym_R = np.zeros((len(sym_group), 3, 3))
+                for i, R in enumerate(sym_group):
+                    sym_R[i] = (R0 * R).as_matrix()
+                params['sym_rotations'] = sym_R
 
             # # Check the symmetry group
             # mesh = self.load_mesh(idx)

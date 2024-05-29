@@ -1,6 +1,7 @@
 from abc import ABC
 from typing import Dict, Tuple
 
+import numpy as np
 import torch
 from torch.utils.data import DataLoader, Dataset as DatasetTorch, default_collate
 from torchvision import transforms
@@ -52,7 +53,7 @@ class DatasetLoader(DatasetTorch, ABC):
         item, image, params = self.ds.load_item(ds_idx)
         image = to_tensor(image)
         params = {
-            k: torch.from_numpy(v).to(torch.float32)
+            k: torch.from_numpy(v).to(torch.float32) if isinstance(v, np.ndarray) else v
             for k, v in params.items()
         }
 
@@ -112,7 +113,7 @@ def get_data_loader(
         num_workers=n_workers,
         drop_last=True,
         collate_fn=collate_fn,
-        prefetch_factor=1
+        prefetch_factor=1 if n_workers > 0 else None
     )
 
     return loader
