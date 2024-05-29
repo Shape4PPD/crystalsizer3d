@@ -24,7 +24,9 @@ def calculate_polyhedral_vertices(
     bs = distances.shape[0]
 
     # Expand the distances to take account of symmetries
-    d = distances.clip(0, None)
+    d = distances.clone()
+    d[d == -1] = 1e8
+    d = d.clip(0, None)
     if symmetry_idx is not None:
         d = d[:, symmetry_idx]
 

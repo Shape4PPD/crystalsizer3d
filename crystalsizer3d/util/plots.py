@@ -408,10 +408,12 @@ def plot_distances(
             colours.append('red' if (st < 0.5 < sp) or (st > 0.5 > sp) else 'green')
         ax.scatter(locs + offset, s_pred, color=colours, marker='+', s=100, label='Switches')
 
-    if manager.ds.dataset_args.distance_constraints is not None and manager.ds.dataset_args.asymmetry is None:
+    if (manager.ds.dataset_args.asymmetry is None
+            and manager.ds.dataset_args.distance_constraints is not None
+            and len(manager.ds.dataset_args.distance_constraints) == 1):
         locs = np.concatenate([[-1], locs])
         ax.bar(-1, 1, bar_width, color='purple', label='Constraint')
-        largest_hkl = '(' + ','.join([str(hkl) for hkl in manager.crystal_generator.constraints[0]]) + ')'
+        largest_hkl = '(' + ','.join([str(hkl) for hkl in manager.crystal_generator.constraints[0][0]]) + ')'
         xlabels = [largest_hkl] + xlabels
 
     ax.set_title('Distances')

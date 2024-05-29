@@ -716,9 +716,11 @@ class Dataset:
         for i, pos in enumerate(pos_active):
             distances[:, pos] = distance_vals[:, i]
 
-        # Add any maximum distance constraint set to one
-        if self.dataset_args.distance_constraints is not None and self.dataset_args.asymmetry is None:
-            largest_hkl = self.dataset_args.distance_constraints.split('>')[0]
+        # Add any maximum distance constraint set to one if there is only one distance constraint
+        if (self.dataset_args.asymmetry is None
+                and self.dataset_args.distance_constraints is not None
+                and len(self.dataset_args.distance_constraints) == 1):
+            largest_hkl = self.dataset_args.distance_constraints[0].split('>')[0]
             largest_pos = [d[-3:] for d in self.labels_distances].index(largest_hkl)
             distances[:, largest_pos] = 1
 

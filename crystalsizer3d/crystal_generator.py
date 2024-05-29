@@ -1,5 +1,5 @@
 from multiprocessing import Pool
-from typing import List, Optional, Tuple
+from typing import List, Optional, Tuple, Union
 
 import numpy as np
 import torch
@@ -20,7 +20,7 @@ def _generate_crystal(
         ratio_stds: List[float],
         rng: Optional[np.random.Generator] = None,
         seed: int = 0,
-        constraints: Optional[List[Tuple[int, ...]]] = None,
+        constraints: Optional[List[List[Tuple[int, ...]]]] = None,
         asymmetry: Optional[float] = None,
         symmetry_idx: Optional[List[int]] = None,
         all_miller_indices: Optional[List[Tuple[int, int, int]]] = None,
@@ -46,14 +46,19 @@ def _generate_crystal(
 
         # Check constraints
         if constraints is not None:
-            vals = []
-            for constraint in constraints:
-                if constraint == 0:
-                    vals.append(0)
-                else:
-                    vals.append(distances[miller_indices.index(constraint)])
-            vals = np.array(vals)
-            if not np.all(vals[:-1] > vals[1:]):
+            passed = True
+            for c in constraints:
+                vals = []
+                for hkl in c:
+                    if hkl == 0:
+                        vals.append(0)
+                    else:
+                        vals.append(distances[miller_indices.index(hkl)])
+                vals = np.array(vals)
+                if not np.all(vals[:-1] > vals[1:]):
+                    passed = False
+                    break
+            if not passed:
                 continue
 
         # Face-group distances
@@ -111,6 +116,18 @@ def _generate_crystal(
         raise RuntimeError(f'Failed to generate a valid crystal after {n_attempts} attempts.')
     mesh.metadata['name'] = f'{crystal_id}_{idx:06d}'
 
+    # Update the distances with -1 where the face has "grown out" (then renormalise)
+    missing_faces = set(crystal.missing_faces)
+    for i in range(len(miller_indices)):
+        face_group = crystal.all_miller_indices[crystal.symmetry_idx == i]
+        grouped_miller_idxs = set(tuple(hkl.tolist()) for hkl in face_group)
+        if grouped_miller_idxs.issubset(missing_faces):
+            distances[i] = -1
+    if np.any(distances == -1):
+        is_pos = distances != -1
+        d_pos = distances[is_pos]
+        distances[is_pos] = d_pos / d_pos.max()
+
     return distances, np.array([si, il]), mesh
 
 
@@ -126,7 +143,7 @@ class CrystalGenerator:
             ratio_means: List[float],
             ratio_stds: List[float],
             zingg_bbox: List[float],
-            constraints: Optional[str] = None,
+            constraints: Optional[Union[str, List[str]]] = None,
             asymmetry: Optional[float] = None,
             n_workers: int = 1
     ):
@@ -153,23 +170,30 @@ class CrystalGenerator:
                     f'Zingg bounding box values must be in (min,max,min,max) form. {zingg_bbox} received.'
         self.zingg_bbox = zingg_bbox
 
-        # Parse the constraint string
-        if constraints == '':
+        # Parse the constraints
+        if isinstance(constraints, list) and len(constraints) == 0:
             constraints = None
+        if isinstance(constraints, str):
+            constraints = [constraints]
         if constraints is not None:
-            constraints_parts = constraints.split('>')
-            assert len(constraints_parts) > 1, f'Invalid constraint string: {constraints}.'
-            constraints = []
-            for i, k in enumerate(constraints_parts):
-                if len(k) == 3:
-                    hkl = tuple(int(idx) for idx in k)
-                    assert hkl in self.miller_indices, f'Invalid constraint key: {hkl}'
-                    constraints.append(hkl)
-                else:
-                    assert i == len(constraints_parts) - 1 and k == '0', \
-                        f'Only a 0 is allowed at the end of the constraint string. {k} received.'
-                    constraints.append(0)
-        self.constraints = constraints
+            parsed_constraints = []
+            for c in constraints:
+                constraints_parts = c.split('>')
+                assert len(constraints_parts) > 1, f'Invalid constraint string: {c}.'
+                parsed_c = []
+                for i, k in enumerate(constraints_parts):
+                    if len(k) == 3:
+                        hkl = tuple(int(idx) for idx in k)
+                        assert hkl in self.miller_indices, f'Invalid constraint key: {hkl}'
+                        parsed_c.append(hkl)
+                    else:
+                        assert i == len(constraints_parts) - 1 and k == '0', \
+                            f'Only a 0 is allowed at the end of the constraint string. {k} received.'
+                        parsed_c.append(0)
+                parsed_constraints.append(parsed_c)
+        else:
+            parsed_constraints = None
+        self.constraints = parsed_constraints
 
         # Validate the asymmetry
         if asymmetry == 0:

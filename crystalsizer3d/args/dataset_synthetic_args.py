@@ -65,7 +65,7 @@ class DatasetSyntheticArgs(BaseArgs):
             ratio_means: List[float] = None,
             ratio_stds: List[float] = None,
             zingg_bbox: List[float] = None,
-            distance_constraints: Optional[str] = None,
+            distance_constraints: Optional[List[str]] = None,
             asymmetry: Optional[float] = None,
             rotation_mode: str = ROTATION_MODE_AXISANGLE,
 
@@ -332,8 +332,9 @@ class DatasetSyntheticArgs(BaseArgs):
         group.add_argument('--zingg-bbox', type=lambda s: [float(item) for item in s.split(',')],
                            default='0.01,1.0,0.01,1.0',
                            help='Bounding box of the Zingg diagram to restrict shapes to (min_x,max_x,min_y,max_y).')
-        group.add_argument('--distance-constraints', type=str, default=None,
-                           help='Constraints to apply to the crystal face distances. Must be in the format "111>012>0".')
+        group.add_argument('--distance-constraints', type=lambda s: s.split(','), default=[],
+                           help='Constraints to apply to the crystal face distances. Must be in the format "111>012>0". '
+                                'Multiple constraints can be added with a comma, eg. "111>012>0,111>021>0".')
         group.add_argument('--asymmetry', type=float, default=None,
                            help='Standard deviation of the asymmetric distance constraint. Omit to use symmetric distances.')
         group.add_argument('--rotation-mode', type=str, default=ROTATION_MODE_AXISANGLE, choices=ROTATION_MODES,

@@ -27,7 +27,8 @@ class Crystal(nn.Module):
     all_distances: torch.Tensor
     N: torch.Tensor
     vertices: torch.Tensor
-    faces: Dict[int, torch.Tensor]
+    faces: Dict[Tuple[int, int, int], torch.Tensor]
+    missing_faces: List[Tuple[int, int, int]]
     mesh_vertices: torch.Tensor
     mesh_faces: torch.Tensor
     bumpmap: torch.Tensor
@@ -171,7 +172,7 @@ class Crystal(nn.Module):
 
     def to(self, *args, **kwargs):
         """
-        Override the to method to ensure that the uv_faces are also moved to the correct device.
+        Override the "to" method to ensure that the uv_faces are also moved to the correct device.
         """
         super().to(*args, **kwargs)
         for k, v in self.uv_faces.items():
@@ -291,7 +292,9 @@ class Crystal(nn.Module):
         if rotation is None:
             rotation = self.rotation
 
-        # Step 0: Update the distances, taking account of symmetries
+        # Step 0: Update the distances, taking account of symmetries and setting any undefined distances to large values
+        distances = distances.clone()
+        distances[distances == -1] = 1e8
         distances = torch.clip(distances, 0, None)
         self.all_distances = distances[self.symmetry_idx]
 
@@ -314,14 +317,17 @@ class Crystal(nn.Module):
         exp_dist = self.all_distances.unsqueeze(1).expand_as(R)
         T = torch.abs(R - exp_dist) <= tol
         faces = {}
+        missing_faces = []
         mesh_vertices = []
         mesh_faces = []
         v_idx = 0
-        for i, on_face in enumerate(T):
+        for hkl, on_face in zip(self.all_miller_indices, T):
+            hkl = tuple(hkl.tolist())
             face_vertex_idxs = torch.nonzero(on_face).squeeze(1)
 
             # If the face does not have enough vertices, skip it
             if len(face_vertex_idxs) < 3:
+                missing_faces.append(hkl)
                 continue
 
             # Merge nearby vertices
@@ -329,10 +335,11 @@ class Crystal(nn.Module):
             if self.merge_vertices:
                 face_vertices, _ = merge_vertices(face_vertices, tol)
             if len(face_vertices) < 3:
+                missing_faces.append(hkl)
                 continue
-            centroid = torch.mean(face_vertices, dim=0)
 
             # Calculate the angles of each vertex relative to the centroid
+            centroid = torch.mean(face_vertices, dim=0)
             angles = calculate_relative_angles(face_vertices, centroid)
 
             # Sort the vertices based on the angles
@@ -344,7 +351,7 @@ class Crystal(nn.Module):
             if torch.dot(normal, centroid) < 0:
                 sorted_idxs = sorted_idxs.flip(0)
             sorted_face_vertex_idxs = face_vertex_idxs[sorted_idxs]
-            faces[i] = sorted_face_vertex_idxs
+            faces[hkl] = sorted_face_vertex_idxs
 
             # Build the triangular faces
             mfv = torch.stack([centroid, *face_vertices[sorted_idxs]])
@@ -390,6 +397,7 @@ class Crystal(nn.Module):
         # Set properties to self
         self.vertices = vertices
         self.faces = faces
+        self.missing_faces = missing_faces
         self.mesh_vertices = mesh_vertices
         self.mesh_faces = mesh_faces
 
