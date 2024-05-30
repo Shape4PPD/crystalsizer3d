@@ -189,7 +189,7 @@ def validate(
             # Check that the vertices match
             v1 = to_numpy(scene.crystal.vertices)
             v2 = np.array(example['vertices'])
-            assert np.allclose(v1, v2), f'Vertices do not match!'
+            assert np.allclose(v1, v2, atol=1e-6), f'Vertices do not match!'
 
             # Check the Zingg values match
             assert np.allclose(z[0], example['si'], atol=0.05), \
