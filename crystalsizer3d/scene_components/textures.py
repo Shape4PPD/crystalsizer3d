@@ -177,7 +177,11 @@ def generate_crystal_bumpmap(
     device = crystal.origin.device
     bumpmap = np.zeros((dim, dim), dtype=np.float32)
 
-    for i in range(n_defects):
+    n_defects_added = 0
+    n_attempts = 0
+    while n_defects_added < n_defects and n_attempts < 1000:
+        n_attempts += 1
+
         # Pick a random face
         face_idx = np.random.randint(0, len(crystal.faces))
         centroid_uv = crystal.uv_faces[face_idx][0]
@@ -206,6 +210,8 @@ def generate_crystal_bumpmap(
             if torch.dot(intersect - midpoint, centroid_uv - midpoint) < 0:
                 continue
             max_dist = min(max_dist, (intersect - midpoint).norm().item())
+        if max_dist == np.inf:
+            continue
 
         # Pick a random perpendicular distance
         d = np.random.uniform(0, max_dist)
@@ -245,6 +251,10 @@ def generate_crystal_bumpmap(
         defect = defect * to_numpy(crystal.uv_mask)
         bumpmap += defect
         bumpmap = np.clip(bumpmap, -defect_max_z, defect_max_z)
+
+        # Reset the counter
+        n_defects_added += 1
+        n_attempts = 0
 
     return torch.from_numpy(bumpmap).to(device)
 
