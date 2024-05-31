@@ -718,7 +718,7 @@ class Dataset:
             distance_vals = distance_vals[None, :]
         bs = distance_vals.shape[0]
 
-        # Set distances to 0 if the switches are off or if the distance is negative
+        # Set distances to -1 if the switches are off or if the distance is negative
         if self.ds_args.use_distance_switches and switches is not None:
             distance_vals = torch.where(switches < .5, -1, distance_vals)
         distance_vals[distance_vals < 0] = -1
@@ -744,6 +744,9 @@ class Dataset:
             distances / d_max,
             distances
         )
+
+        # Ensure negative distances are set to -1
+        distance_vals[distance_vals < 0] = -1
 
         if strip_batch:
             distances = distances[0]

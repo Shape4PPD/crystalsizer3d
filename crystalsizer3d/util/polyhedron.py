@@ -24,7 +24,7 @@ def calculate_polyhedral_vertices(
 
     # Expand the distances to take account of symmetries
     d = distances.clone()
-    d[d == -1] = 1e8  # Set negative distances to a large value
+    d[d < 0] = 1e8  # Set negative distances to a large value
     d = d.clip(0, None)
     if symmetry_idx is not None:
         d = d[:, symmetry_idx]
@@ -42,9 +42,9 @@ def calculate_polyhedral_vertices(
     A = N[None, ...].expand(bs, *N.shape).reshape(-1, 3, 3)
     b = d[:, all_combinations[valid_combos]].reshape(-1, 3)
     intersection_points = torch.linalg.solve(A, b)
+    intersection_points = intersection_points.reshape(bs, -1, 3)
 
     # Restrict to points that are in the polyhedron and exclude any that should have grown to infinity
-    intersection_points = intersection_points.reshape(bs, -1, 3)
     T = intersection_points @ plane_normals.T
     is_interior = torch.all((T <= d[:, None] + tol) & (T.abs() < 1e4), dim=2)
 
