@@ -1,4 +1,3 @@
-from itertools import combinations
 from typing import Tuple
 
 import torch
@@ -25,13 +24,13 @@ def calculate_polyhedral_vertices(
 
     # Expand the distances to take account of symmetries
     d = distances.clone()
-    d[d == -1] = 1e8
+    d[d == -1] = 1e8  # Set negative distances to a large value
     d = d.clip(0, None)
     if symmetry_idx is not None:
         d = d[:, symmetry_idx]
 
     # Calculate all intersection points of all combinations of 3 planes
-    all_combinations = torch.tensor(list(combinations(range(len(plane_normals)), 3)), device=device)
+    all_combinations = torch.combinations(torch.arange(len(plane_normals), device=device), r=3)
     N = plane_normals[all_combinations]  # shape: (C, 3, 3)
 
     # Check if the planes form a basis in 3-space and remove any invalid combinations
@@ -44,10 +43,10 @@ def calculate_polyhedral_vertices(
     b = d[:, all_combinations[valid_combos]].reshape(-1, 3)
     intersection_points = torch.linalg.solve(A, b)
 
-    # Restrict to points that are in the polyhedron
+    # Restrict to points that are in the polyhedron and exclude any that should have grown to infinity
     intersection_points = intersection_points.reshape(bs, -1, 3)
     T = intersection_points @ plane_normals.T
-    is_interior = torch.all(T <= d[:, None] + tol, dim=2)
+    is_interior = torch.all((T <= d[:, None] + tol) & (T.abs() < 1e4), dim=2)
 
     # Pad the vertices so that all batch entries have the same number of vertices
     vertices = []

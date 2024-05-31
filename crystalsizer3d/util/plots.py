@@ -132,11 +132,11 @@ def make_3d_digital_crystal_image(
         v, f = crystal_.build_mesh()
         v, f = to_numpy(v), to_numpy(f)
         mlab.triangular_mesh(*v.T, f, figure=fig, color=to_rgb(surface_colour_), opacity=opacity)
+        tube_radius = max(0.0001, crystal_.distances[0].item() * wireframe_radius_factor)
         for fv_idxs in crystal_.faces.values():
             fv = to_numpy(crystal_.vertices[fv_idxs])
             fv = np.vstack([fv, fv[0]])  # Close the loop
-            mlab.plot3d(*fv.T, color=to_rgb(wireframe_colour_),
-                        tube_radius=crystal_.distances[0].item() * wireframe_radius_factor)
+            mlab.plot3d(*fv.T, color=to_rgb(wireframe_colour_), tube_radius=tube_radius)
         crystal_.origin.data = origin
 
     # Add crystal(s)
@@ -342,6 +342,7 @@ def plot_distances(
     """
     Plot the distances on the axis.
     """
+    ds = manager.ds
     ax_pos = ax.get_position()
     ax.set_position([ax_pos.x0, ax_pos.y0 + 0.02, ax_pos.width, ax_pos.height - 0.02])
     d_pred = _load_single_parameter(Y_pred, 'distances', idx)
@@ -349,21 +350,23 @@ def plot_distances(
     d_pred2 = _load_single_parameter(Y_pred2, 'distances', idx)
 
     # Prepare the distances
-    d_pred = manager.ds.prep_distances(torch.from_numpy(d_pred))
-    d_target = manager.ds.prep_distances(torch.from_numpy(d_target))
+    d_pred = ds.prep_distances(torch.from_numpy(d_pred))
+    if d_target is not None:
+        d_target = ds.prep_distances(torch.from_numpy(d_target))
     if d_pred2 is not None:
-        d_pred2 = manager.ds.prep_distances(torch.from_numpy(d_pred2))
+        d_pred2 = ds.prep_distances(torch.from_numpy(d_pred2))
 
     # Group asymmetric distances by face group
     distance_groups = {}
     grouped_order = None
-    if manager.ds.dataset_args.asymmetry is not None:
-        for i, hkl in enumerate(manager.ds.dataset_args.miller_indices):
+    if ds.dataset_args.asymmetry is not None:
+        for i, hkl in enumerate(ds.dataset_args.miller_indices):
             group_idxs = (manager.crystal.symmetry_idx == i).nonzero().squeeze()
             distance_groups[hkl] = group_idxs
         grouped_order = torch.cat(list(distance_groups.values()))
         d_pred = d_pred[grouped_order]
-        d_target = d_target[grouped_order]
+        if d_target is not None:
+            d_target = d_target[grouped_order]
         if d_pred2 is not None:
             d_pred2 = d_pred2[grouped_order]
 
@@ -379,7 +382,7 @@ def plot_distances(
     )
 
     # Reorder labels for asymmetric distances
-    if manager.ds.dataset_args.asymmetry is not None:
+    if ds.dataset_args.asymmetry is not None:
         xlabels = []
         for i, (hkl, g) in enumerate(distance_groups.items()):
             group_labels = [''] * len(g)
@@ -390,12 +393,12 @@ def plot_distances(
             if i < len(distance_groups) - 1:
                 ax.axvline(locs[len(xlabels) - 1] + 0.5, color='black', linestyle='--', linewidth=1)
     else:
-        xlabels = ['(' + ','.join(list(l[3:])) + ')' for l in manager.ds.labels_distances_active]
+        xlabels = ['(' + ','.join(list(l[3:])) + ')' for l in ds.labels_distances]
 
     if manager.dataset_args.use_distance_switches:
         s_pred = _load_single_parameter(Y_pred, 'distance_switches', idx)
         s_target = _load_single_parameter(Y_target, 'distance_switches', idx)
-        if manager.ds.dataset_args.asymmetry is not None:
+        if ds.dataset_args.asymmetry is not None:
             s_pred = s_pred[grouped_order]
             s_target = s_target[grouped_order]
         k = 2.3
@@ -407,14 +410,6 @@ def plot_distances(
                 ax.axvspan(i, i + k * offset, alpha=0.1, color='red' if st < 0.5 else 'green')
             colours.append('red' if (st < 0.5 < sp) or (st > 0.5 > sp) else 'green')
         ax.scatter(locs + offset, s_pred, color=colours, marker='+', s=100, label='Switches')
-
-    if (manager.ds.dataset_args.asymmetry is None
-            and manager.ds.dataset_args.distance_constraints is not None
-            and len(manager.ds.dataset_args.distance_constraints) == 1):
-        locs = np.concatenate([[-1], locs])
-        ax.bar(-1, 1, bar_width, color='purple', label='Constraint')
-        largest_hkl = '(' + ','.join([str(hkl) for hkl in manager.crystal_generator.constraints[0][0]]) + ')'
-        xlabels = [largest_hkl] + xlabels
 
     ax.set_title('Distances')
     ax.set_xticks(locs)

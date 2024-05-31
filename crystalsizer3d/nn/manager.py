@@ -1411,13 +1411,9 @@ class Manager:
 
                 # Apply the switches
                 ignore_distances = Y_switches < .5
-                Y_dists = torch.where(ignore_distances, torch.zeros_like(Y_dists), Y_dists)
-            elif (self.ds.dataset_args.distance_constraints is not None
-                  and len(self.ds.dataset_args.distance_constraints) > 0):
-                # No need to normalise if there are constraints, but no negative predictions will be present
-                Y_dists = torch.clamp(Y_dists, min=0)
-            else:
-                # Normalise the predictions by the maximum value per item
+                Y_dists = torch.where(ignore_distances, torch.ones_like(Y_dists) * -1, Y_dists)
+            elif self.ds.labels_distances == self.ds.labels_distances_active:
+                # Normalise the predictions by the maximum value per batch item
                 Ypd_max = Y_dists.amax(dim=1, keepdim=True).abs()
                 Y_dists = torch.where(Ypd_max > 0, Y_dists / Ypd_max, Y_dists)
 
@@ -1558,34 +1554,35 @@ class Manager:
     ) -> Tuple[torch.Tensor, Dict[str, float]]:
         """
         Calculate distance losses.
-        If using distance switches, ignored predicted distances have been set to 0.
+        If using distance switches, ignored predicted distances have been set to -1.
         Otherwise, assuming negative values are predicting the missing distances.
         """
+        bs = len(d_pred)
         d_pos = d_target > 0
 
         # Where there is a positive length in the target, calculate the difference
-        Y_pred_pos = d_pred.clone()
-        Y_pred_pos[d_target <= 0] = 0
+        d_pred_pos = d_pred.clone()
+        d_pred_pos[~d_pos] = 0
 
         # Calculate average error per non-zero distance per item
         n_pos = d_pos.sum(dim=1)
-        avg_errors_pos = ((Y_pred_pos - d_target)**2).sum(dim=1) / n_pos
-        l_pos = avg_errors_pos.sum() / len(d_pred)
+        avg_errors_pos = ((d_pred_pos - d_target)**2).sum(dim=1) / n_pos
+        l_pos = avg_errors_pos.sum() / bs
 
         # Where there is a missing distance in the target, penalise positive predictions
-        Y_pred_neg = d_pred.clone()
-        Y_pred_neg[d_target > 0] = 0
+        d_pred_neg = d_pred.clone()
+        d_pred_neg[d_pos] = 0
 
         # Calculate average error per non-zero distance per item
         n_neg = (~d_pos).sum(dim=1)
         avg_errors_neg = torch.where(
             n_neg > 0,
-            (Y_pred_neg**2).sum(dim=1) / n_neg,
-            torch.zeros(len(d_pred), device=self.device)
+            (d_pred_neg**2).sum(dim=1) / n_neg,
+            torch.zeros(bs, device=self.device)
         )
-        l_neg = avg_errors_neg.sum() / len(d_pred)
+        l_neg = avg_errors_neg.sum() / bs
 
-        loss = l_pos.sum() + l_neg.sum()
+        loss = l_pos + l_neg
 
         stats = {
             'distances/l_pos': l_pos.item(),
@@ -1697,7 +1694,10 @@ class Manager:
         """
         # Calculate the polyhedral vertices for the parameters
         v_pred, nv_pred = calculate_polyhedral_vertices(
-            distances=self.ds.prep_distances(Y_pred['distances']),
+            distances=self.ds.prep_distances(
+                distance_vals=Y_pred['distances'],
+                switches=Y_pred['distance_switches'] if 'distance_switches' in Y_pred else None
+            ),
             origin=Y_pred['transformation'][:, :3],
             scale=Y_pred['transformation'][:, 3],
             rotation=Y_pred['transformation'][:, 4:],

@@ -208,16 +208,16 @@ class Dataset:
                 if rendering_parameters is not None:
                     item['rendering_parameters'] = rendering_parameters[idx]
 
+                    # Add the bumpmap path if required
+                    if self.dataset_args.crystal_bumpmap_dim > -1:
+                        bumpmap_path = self.path / 'crystal_bumpmaps' / f'{row["image"][:-4]}.npz'
+                        if self.ds_args.check_image_paths:
+                            assert bumpmap_path.exists(), f'Bumpmap path does not exist: {bumpmap_path}'
+                        item['rendering_parameters']['bumpmap'] = bumpmap_path
+
                 # Include the crystal vertices
                 if vertices is not None:
                     item['vertices'] = vertices[idx]
-
-                # Add the bumpmap path if required
-                if self.dataset_args.crystal_bumpmap_dim > -1:
-                    bumpmap_path = self.path / 'crystal_bumpmaps' / f'{row["image"][:-4]}.npz'
-                    if self.ds_args.check_image_paths:
-                        assert bumpmap_path.exists(), f'Bumpmap path does not exist: {bumpmap_path}'
-                    item['rendering_parameters']['bumpmap'] = bumpmap_path
 
                 self.data[idx] = item
 
@@ -380,7 +380,7 @@ class Dataset:
                 item['il']
             ])
 
-        # Distances are always in [0, 1], where 0 indicates a collapsed face / missing distance
+        # Distances are in (0, 1] or -1 for collapsed faces / missing distances
         if self.ds_args.train_distances:
             params['distances'] = np.array([
                 item[k]
@@ -388,7 +388,7 @@ class Dataset:
             ])
             if self.ds_args.use_distance_switches:
                 params['distance_switches'] = np.array([
-                    0 if item[k] == 0 else 1
+                    0 if item[k] == -1 else 1
                     for k in self.labels_distances_active
                 ])
 
@@ -707,8 +707,8 @@ class Dataset:
 
         # Set distances to 0 if the switches are off or if the distance is negative
         if self.ds_args.use_distance_switches and switches is not None:
-            distance_vals = torch.where(switches < .5, 0, distance_vals)
-        distance_vals[distance_vals < 0] = 0
+            distance_vals = torch.where(switches < .5, -1, distance_vals)
+        distance_vals[distance_vals < 0] = -1
 
         # Put the distances into the correct order
         distances = torch.zeros(bs, len(self.labels_distances), device=distance_vals.device)
@@ -716,13 +716,13 @@ class Dataset:
         for i, pos in enumerate(pos_active):
             distances[:, pos] = distance_vals[:, i]
 
-        # Add any maximum distance constraint set to one if there is only one distance constraint
+        # Add any distances that are not in the active set
         if (self.dataset_args.asymmetry is None
-                and self.dataset_args.distance_constraints is not None
-                and len(self.dataset_args.distance_constraints) == 1):
-            largest_hkl = self.dataset_args.distance_constraints[0].split('>')[0]
-            largest_pos = [d[-3:] for d in self.labels_distances].index(largest_hkl)
-            distances[:, largest_pos] = 1
+                and self.labels_distances != self.labels_distances_active):
+            for d_lbl in self.labels_distances:
+                if d_lbl not in self.labels_distances_active:
+                    d_pos = self.labels_distances.index(d_lbl)
+                    distances[:, d_pos] = self.ds_stats[d_lbl]['mean']
 
         # Normalise the distances by the maximum (in each batch element)
         d_max = distances.amax(dim=1, keepdim=True)
