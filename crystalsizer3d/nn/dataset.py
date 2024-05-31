@@ -26,6 +26,8 @@ DATASET_TYPES = {
     DATASET_TYPE_IMAGES: 'Microscope images',
 }
 
+MIN_NORMALISED_SCALE = 1e-3  # Minimum normalised scale value as using scales <= 0 can cause issues
+
 
 def plot_symmetry_group(mesh, symm_group):
     """
@@ -370,6 +372,12 @@ class Dataset:
         def z_transform(x, k):
             return (x - self.ds_stats[k]['mean']) / np.sqrt(self.ds_stats[k]['var'])
 
+        def eps_1_normalise(x, k, eps):
+            # Normalise to [eps, 1]
+            x_min = self.ds_stats[k]['min']
+            x_max = self.ds_stats[k]['max']
+            return eps + (1 - eps) * (x - x_min) / (x_max - x_min)
+
         # Format the output vectors
         params = {}
 
@@ -402,8 +410,8 @@ class Dataset:
             range_max = ranges.max()
             origin = 2 * (origin - l_min - ranges / 2) / range_max
 
-            # Standardise the scale
-            scale = z_transform(r_params['crystal']['scale'], 's')
+            # Standardise the scale to [eps, 1]
+            scale = eps_1_normalise(r_params['crystal']['scale'], 's', MIN_NORMALISED_SCALE)
 
             # Rotation representation in the dataset
             if self.dataset_args.rotation_mode == ROTATION_MODE_QUATERNION:
@@ -593,6 +601,11 @@ class Dataset:
         def inverse_z_transform(z, k):
             return float(z * np.sqrt(self.ds_stats[k]['var']) + self.ds_stats[k]['mean'])
 
+        def inverse_eps_1_normalise(z, k, eps):
+            x_min = self.ds_stats[k]['min']
+            x_max = self.ds_stats[k]['max']
+            return x_min + (z - eps) * (x_max - x_min) / (1 - eps)
+
         r_params = {}
         c_params = {}
 
@@ -616,8 +629,8 @@ class Dataset:
             location = location * range_max / 2 + l_min + ranges / 2
             c_params['origin'] = location.tolist()
 
-            # Inverse z-transform the scale
-            c_params['scale'] = inverse_z_transform(trans[3].item(), 's')
+            # Invert the scale back to the original scale
+            c_params['scale'] = inverse_eps_1_normalise(trans[3].item(), 's', MIN_NORMALISED_SCALE)
 
             # Rotation angles
             c_params['rotation'] = trans[4:].tolist()
