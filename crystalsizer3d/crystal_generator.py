@@ -145,7 +145,7 @@ def _generate_crystal(
 
                 # Use the minimum distances
                 distances = distances_min
-        except AssertionError:
+        except (AssertionError, ValueError):
             # This shoudn't really happen, but it does sometimes so just try again
             continue
 
