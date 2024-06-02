@@ -294,8 +294,8 @@ class Crystal(nn.Module):
 
         # Step 0: Update the distances, taking account of symmetries and setting any undefined distances to large values
         distances = distances.clone()
-        distances[distances == -1] = 1e8
-        distances = torch.clip(distances, 0, None)
+        distances[distances < 0] = 1e8
+        distances = torch.clip(distances, 0, 1e8)
         self.all_distances = distances[self.symmetry_idx]
 
         # Step 1: Calculate all intersection points of all combinations of 3 planes

@@ -1562,22 +1562,22 @@ class Manager:
 
         # Where there is a positive length in the target, calculate the difference
         d_pred_pos = d_pred.clone()
-        d_pred_pos[~d_pos] = 0
+        d_pred_pos[~d_pos] = -1
 
-        # Calculate average error per non-zero distance per item
+        # Calculate average error per positive distance
         n_pos = d_pos.sum(dim=1)
         avg_errors_pos = ((d_pred_pos - d_target)**2).sum(dim=1) / n_pos
         l_pos = avg_errors_pos.sum() / bs
 
         # Where there is a missing distance in the target, penalise positive predictions
         d_pred_neg = d_pred.clone()
-        d_pred_neg[d_pos] = 0
+        d_pred_neg[d_pos] = -1
 
-        # Calculate average error per non-zero distance per item
+        # Calculate average error per negative distance
         n_neg = (~d_pos).sum(dim=1)
         avg_errors_neg = torch.where(
             n_neg > 0,
-            (d_pred_neg**2).sum(dim=1) / n_neg,
+            ((d_pred_neg + 1)**2).sum(dim=1) / n_neg,
             torch.zeros(bs, device=self.device)
         )
         l_neg = avg_errors_neg.sum() / bs
