@@ -28,6 +28,7 @@ class Crystal(nn.Module):
     N: torch.Tensor
     vertices: torch.Tensor
     faces: Dict[Tuple[int, int, int], torch.Tensor]
+    areas: Dict[Tuple[int, int, int], float]
     missing_faces: List[Tuple[int, int, int]]
     mesh_vertices: torch.Tensor
     mesh_faces: torch.Tensor
@@ -54,7 +55,8 @@ class Crystal(nn.Module):
             bumpmap_dim: int = 100,
             bumpmap: Optional[torch.Tensor] = None,
 
-            merge_vertices: bool = False
+            merge_vertices: bool = False,
+            dtype: torch.dtype = torch.float32
     ):
         """
         Set up the initial crystal and calculate the crystal habit.
@@ -65,6 +67,7 @@ class Crystal(nn.Module):
         .build_mesh() - returns triangulated mesh vertices and faces
         """
         super().__init__()
+        self.dtype = dtype
 
         # The 3D unit cell, crystallographic axes a,b,c
         assert len(lattice_unit_cell) == 3, 'Lattice unit cell must be a list of 3 floats'
@@ -83,21 +86,21 @@ class Crystal(nn.Module):
         self.point_group_symbol = point_group_symbol
 
         # Scale
-        self.scale = nn.Parameter(init_tensor(scale), requires_grad=True)
+        self.scale = nn.Parameter(init_tensor(scale, dtype), requires_grad=True)
 
         # Distances from the origin to the faces - should be equal to the number of provided miller indices
         if distances is None:
             distances = torch.ones(len(miller_indices))
         assert len(distances) == len(miller_indices), \
             'Number of distances must be equal to the number of provided miller indices!'
-        self.distances = nn.Parameter(init_tensor(distances), requires_grad=True)
+        self.distances = nn.Parameter(init_tensor(distances, dtype), requires_grad=True)
         self.distances_logvar = nn.Parameter(torch.ones_like(self.distances) * 2 * torch.log(torch.tensor(0.1)),
                                              requires_grad=True)
 
         # Origin
         if origin is None:
             origin = [0, 0, 0]
-        self.origin = nn.Parameter(init_tensor(origin), requires_grad=True)
+        self.origin = nn.Parameter(init_tensor(origin, dtype), requires_grad=True)
         self.origin_logvar = nn.Parameter(torch.ones_like(self.origin) * 2 * torch.log(torch.tensor(0.01)),
                                           requires_grad=True)
 
@@ -114,13 +117,13 @@ class Crystal(nn.Module):
         else:
             raise ValueError(f'Unsupported rotation mode: {rotation_mode}')
         self.rotation_mode = rotation_mode
-        self.rotation = nn.Parameter(init_tensor(rotation), requires_grad=True)
+        self.rotation = nn.Parameter(init_tensor(rotation, dtype), requires_grad=True)
         self.rotation_logvar = nn.Parameter(torch.ones_like(self.rotation) * 2 * torch.log(torch.tensor(0.01)),
                                             requires_grad=True)
 
         # Material
-        self.material_roughness = nn.Parameter(init_tensor(material_roughness), requires_grad=True)
-        self.material_ior = nn.Parameter(init_tensor(material_ior), requires_grad=True)
+        self.material_roughness = nn.Parameter(init_tensor(material_roughness, dtype), requires_grad=True)
+        self.material_ior = nn.Parameter(init_tensor(material_ior, dtype), requires_grad=True)
 
         # Bumpmap texture
         if bumpmap_dim == -1:
@@ -183,7 +186,7 @@ class Crystal(nn.Module):
         Clamp the parameters to a valid range.
         """
         with torch.no_grad():
-            d = torch.clamp(self.distances, 1e-1, None)
+            d = torch.clamp(self.distances, 1e-4, None)
             d = torch.sort(d, descending=True).values  # todo: parameterise or remove
             sf = 1 / d.amax()  # Fix the max distance to 1 and adjust scale
             self.distances.data = d * sf
@@ -212,7 +215,7 @@ class Crystal(nn.Module):
         self._calculate_reciprocal_lattice_vectors()
 
         # Step 3: Calculate face normal vectors
-        mi = self.all_miller_indices.to(torch.float32)
+        mi = self.all_miller_indices.to(self.dtype)
         self.N = normalise(
             torch.matmul(self.lattice_vectors_star, mi.T).T
         )
@@ -268,7 +271,7 @@ class Crystal(nn.Module):
             b * c * np.sin(alpha),
             c * a * np.sin(beta),
             a * b * np.sin(gamma)
-        ], dtype=torch.float32))
+        ], dtype=self.dtype))
 
     def build_mesh(
             self,
@@ -292,9 +295,8 @@ class Crystal(nn.Module):
         if rotation is None:
             rotation = self.rotation
 
-        # Step 0: Update the distances, taking account of symmetries and setting any undefined distances to large values
+        # Step 0: Update the distances, taking account of symmetries
         distances = distances.clone()
-        distances[distances < 0] = 1e8
         distances = torch.clip(distances, 0, 1e8)
         self.all_distances = distances[self.symmetry_idx]
 
@@ -317,7 +319,7 @@ class Crystal(nn.Module):
         exp_dist = self.all_distances.unsqueeze(1).expand_as(R)
         T = torch.abs(R - exp_dist) <= tol
         faces = {}
-        missing_faces = []
+        areas = {}
         mesh_vertices = []
         mesh_faces = []
         v_idx = 0
@@ -327,7 +329,7 @@ class Crystal(nn.Module):
 
             # If the face does not have enough vertices, skip it
             if len(face_vertex_idxs) < 3:
-                missing_faces.append(hkl)
+                areas[hkl] = 0
                 continue
 
             # Merge nearby vertices
@@ -335,7 +337,7 @@ class Crystal(nn.Module):
             if self.merge_vertices:
                 face_vertices, _ = merge_vertices(face_vertices, tol)
             if len(face_vertices) < 3:
-                missing_faces.append(hkl)
+                areas[hkl] = 0
                 continue
 
             # Calculate the angles of each vertex relative to the centroid
@@ -358,6 +360,15 @@ class Crystal(nn.Module):
             N = len(face_vertices)
             jdx = torch.arange(N, device=device)
             mfi = torch.stack([torch.zeros(N, device=device, dtype=torch.int64), jdx % N + 1, (jdx + 1) % N + 1])
+
+            # Calculate the face area from the triangular faces
+            simplices = mfv[mfi.T]
+            s1 = simplices[:, 1] - simplices[:, 0]
+            s2 = simplices[:, 2] - simplices[:, 0]
+            cp = torch.cross(s1, s2)
+            areas[hkl] = (0.5 * torch.norm(cp, dim=-1)).sum().item()
+
+            # Update the vertex index to continue from the last face
             mfi = mfi + v_idx
             v_idx += N + 1
             mesh_vertices.append(mfv)
@@ -375,8 +386,9 @@ class Crystal(nn.Module):
 
         # Step 5: Apply the rotation
         if self.rotation_mode == ROTATION_MODE_AXISANGLE:
-            if torch.allclose(rotation, torch.zeros(3, device=device)):
-                rotation = rotation + torch.randn(3, device=device) * 1e-8
+            tensor_args = dict(device=device, dtype=rotation.dtype)
+            if torch.allclose(rotation, torch.zeros(3, **tensor_args)):
+                rotation = rotation + torch.randn(3, **tensor_args) * 1e-8
             R = axis_angle_to_rotation_matrix(rotation[None, :]).squeeze(0)
         elif self.rotation_mode == ROTATION_MODE_QUATERNION:
             R = quaternion_to_rotation_matrix(rotation[None, :]).squeeze(0)
@@ -397,7 +409,8 @@ class Crystal(nn.Module):
         # Set properties to self
         self.vertices = vertices
         self.faces = faces
-        self.missing_faces = missing_faces
+        self.areas = areas
+        self.missing_faces = [tuple(hkl) for hkl in self.all_miller_indices.tolist() if tuple(hkl) not in faces]
         self.mesh_vertices = mesh_vertices
         self.mesh_faces = mesh_faces
 

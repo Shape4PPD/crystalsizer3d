@@ -202,7 +202,7 @@ def _build_crystal(
         growth_rates = manager.crystal_generator.get_expanded_growth_rates(distances)
         morph = VisualHabitMorphology.from_growth_rates(manager.crystal_generator.crystal,
                                                         growth_rates)
-        _, _, mesh = manager.crystal_generator.generate_crystal(distances=distances)
+        _, _, _, mesh = manager.crystal_generator.generate_crystal(distances=distances)
         return morph, mesh
     except Exception as e:
         raise RuntimeError(f'Failed to build crystal:\n{e}')

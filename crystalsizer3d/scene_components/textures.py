@@ -187,12 +187,17 @@ def generate_crystal_bumpmap(
         centroid_uv = crystal.uv_faces[face_idx][0]
         face_uv = crystal.uv_faces[face_idx][1:]
 
+        # Merge nearby uv coordinates
+        face_uv = torch.unique(face_uv, dim=0)
+
         # Pick two random adjacent vertices
         v0_idx = np.random.randint(0, len(face_uv))
         v1_idx = (v0_idx + 1) % len(face_uv)
         v0 = face_uv[v0_idx]
         v1 = face_uv[v1_idx]
         edge = v1 - v0
+        if edge.norm() < 1e-6:
+            continue
         midpoint = (v0 + v1) / 2
 
         # Find where a perpendicular line from the middle of this edge would intersect another edge
@@ -210,7 +215,7 @@ def generate_crystal_bumpmap(
             if torch.dot(intersect - midpoint, centroid_uv - midpoint) < 0:
                 continue
             max_dist = min(max_dist, (intersect - midpoint).norm().item())
-        if max_dist == np.inf:
+        if max_dist == np.inf or max_dist == 0:
             continue
 
         # Pick a random perpendicular distance

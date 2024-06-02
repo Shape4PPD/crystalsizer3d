@@ -10,6 +10,7 @@ from crystalsizer3d import logger
 from crystalsizer3d.args.dataset_synthetic_args import CRYSTAL_IDS
 from crystalsizer3d.crystal import Crystal
 from crystalsizer3d.csd_proxy import CSDProxy
+from crystalsizer3d.util.geometry import merge_vertices
 from crystalsizer3d.util.utils import SEED, to_numpy
 
 
@@ -27,7 +28,7 @@ def _generate_crystal(
         zingg_bbox: Optional[List[float]] = None,
         idx: int = 0,
         max_attempts: int = 10000,
-) -> Tuple[np.ndarray, np.ndarray, Trimesh]:
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray, Trimesh]:
     """
     Generate a crystal with randomised face distances.
     """
@@ -35,6 +36,13 @@ def _generate_crystal(
         rng = default_rng(seed)
     csd = CSDProxy()
     cs = csd.load(crystal_id)
+    crystal_args = dict(
+        lattice_unit_cell=cs.lattice_unit_cell,
+        lattice_angles=cs.lattice_angles,
+        miller_indices=miller_indices,
+        point_group_symbol=cs.point_group_symbol,
+        dtype=torch.float64
+    )
 
     n_attempts = 0
     while n_attempts < max_attempts:
@@ -61,9 +69,6 @@ def _generate_crystal(
             if not passed:
                 continue
 
-        # Face-group distances
-        miller_idxs_active = miller_indices.copy()
-
         # Add asymmetry
         if asymmetry is not None:
             assert symmetry_idx is not None, 'Symmetry index must be provided for asymmetric distances.'
@@ -83,16 +88,9 @@ def _generate_crystal(
             # Update the distances and miller indices
             distances = all_distances
             distances = np.abs(distances) / np.abs(distances).max()
-            miller_idxs_active = all_miller_indices.copy()
 
         # Build the crystal
-        crystal = Crystal(
-            lattice_unit_cell=cs.lattice_unit_cell,
-            lattice_angles=cs.lattice_angles,
-            miller_indices=miller_idxs_active,
-            point_group_symbol=cs.point_group_symbol,
-            distances=distances
-        )
+        crystal = Crystal(distances=distances, **crystal_args)
         v, f = to_numpy(crystal.mesh_vertices), to_numpy(crystal.mesh_faces)
         mesh = Trimesh(vertices=v, faces=f, process=True, validate=True)
         mesh.fix_normals()
@@ -108,6 +106,49 @@ def _generate_crystal(
                 and not (zingg_bbox[0] <= si <= zingg_bbox[1] and zingg_bbox[2] <= il <= zingg_bbox[3])):
             continue
 
+        # Check that all planes are touching the polyhedron
+        distances_min = (crystal.N @ crystal.vertices.T).amax(dim=1)[:len(miller_indices)]
+        distances_min = to_numpy(distances_min)
+
+        try:
+            # If the distances haven't changed then all faces should be present
+            if np.allclose(distances, distances_min):
+                assert len(crystal.missing_faces) == 0, f'Expected no missing faces, but found {crystal.missing_faces}.'
+                assert all([a > 0 for a in crystal.areas.values()]), f'Expected all faces to have positive area.'
+
+            # If the distances have changed then there were some missing faces
+            else:
+                assert len(crystal.missing_faces) > 0, 'Expected some missing faces, but none found.'
+
+                # Check that the new distances give the same shape
+                crystal_min = Crystal(distances=distances_min, **crystal_args, merge_vertices=True)
+                v1, _ = merge_vertices(crystal.vertices, epsilon=1e-2)
+                v2, _ = merge_vertices(crystal_min.vertices, epsilon=1e-2)
+                assert np.allclose(np.sort(v1, axis=0), np.sort(v2, axis=0), atol=1e-4), \
+                    'Invalid minimum distances - vertices have changed.'
+                assert np.allclose(list(crystal.areas.values()), list(crystal_min.areas.values()), atol=1e-6), \
+                    'Invalid minimum distances - areas have changed.'
+
+                # Check that if we reduce the distance of any face with no area then it will appear with non-zero area
+                eps = 1e-5
+                missing_faces = set(crystal.missing_faces)
+                for i in range(len(miller_indices)):
+                    face_group = set(
+                        tuple(hkl.tolist()) for hkl in crystal.all_miller_indices[crystal.symmetry_idx == i])
+                    if face_group.issubset(missing_faces):
+                        distances_sub_min = distances_min.copy()
+                        distances_sub_min[i] -= eps
+                        crystal_sub_min = Crystal(distances=distances_sub_min, **crystal_args)
+                        for hkl in face_group:
+                            assert crystal_sub_min.areas[hkl] > 0, \
+                                f'Face {hkl} has no area even after reducing the minimum distance.'
+
+                # Use the minimum distances
+                distances = distances_min
+        except AssertionError:
+            # This shoudn't really happen, but it does sometimes so just try again
+            continue
+
         # Centre the mesh at the origin
         mesh.vertices -= mesh.center_mass
         break
@@ -116,19 +157,13 @@ def _generate_crystal(
         raise RuntimeError(f'Failed to generate a valid crystal after {n_attempts} attempts.')
     mesh.metadata['name'] = f'{crystal_id}_{idx:06d}'
 
-    # Update the distances with -1 where the face has "grown out" (then renormalise)
-    missing_faces = set(crystal.missing_faces)
-    for i in range(len(miller_indices)):
-        face_group = crystal.all_miller_indices[crystal.symmetry_idx == i]
-        grouped_miller_idxs = set(tuple(hkl.tolist()) for hkl in face_group)
-        if grouped_miller_idxs.issubset(missing_faces):
-            distances[i] = -1
-    if np.any(distances == -1):
-        is_pos = distances != -1
-        d_pos = distances[is_pos]
-        distances[is_pos] = d_pos / d_pos.max()
+    # Renormalise the distances and rebuild crystal to get the correct areas
+    distances = distances / distances.max()
+    if not np.allclose(distances, to_numpy(crystal.distances)):
+        crystal = Crystal(distances=distances, **crystal_args, merge_vertices=True)
+    areas = np.array([crystal.areas[hkl] for hkl in miller_indices])
 
-    return distances, np.array([si, il]), mesh
+    return distances, areas, np.array([si, il]), mesh
 
 
 def _generate_crystal_wrapper(args):
@@ -231,7 +266,7 @@ class CrystalGenerator:
             self,
             num: int = 1,
             max_attempts: int = 10000
-    ) -> List[Tuple[np.ndarray, np.ndarray, Trimesh]]:
+    ) -> List[Tuple[np.ndarray, np.ndarray, np.ndarray, Trimesh]]:
         """
         Generate a list of randomised crystals.
         """
@@ -258,15 +293,15 @@ class CrystalGenerator:
         else:
             crystals = []
             for i in range(num):
-                r, z, m = _generate_crystal(idx=i, rng=self.rng, **shared_args)
-                crystals.append((r, z, m))
+                d, a, z, m = _generate_crystal(idx=i, rng=self.rng, **shared_args)
+                crystals.append((d, a, z, m))
 
         return crystals
 
     def generate_crystal(
             self,
             distances: List[float],
-    ) -> Tuple[np.ndarray, np.ndarray, Trimesh]:
+    ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, Trimesh]:
         """
         Generate a crystal with the given distances.
         """
@@ -289,12 +324,15 @@ class CrystalGenerator:
         # Centre the mesh at the origin
         mesh.vertices -= mesh.center_mass
 
-        return distances, np.array([si, il]), mesh
+        # Calculate areas
+        areas = np.array([crystal.areas[hkl] for hkl in crystal.miller_indices])
+
+        return distances, areas, np.array([si, il]), mesh
 
 
 if __name__ == '__main__':
     print('Generating...')
-    rr_, z_, mesh_ = _generate_crystal(
+    d_, a_, z_, mesh_ = _generate_crystal(
         crystal_id='LGLUAC11',
         miller_indices=[(1, 0, 1), (0, 2, 1), (0, 1, 0)],
         ratio_means=[1, 1, 1],

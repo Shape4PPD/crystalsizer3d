@@ -53,6 +53,7 @@ class DatasetTrainingArgs(BaseArgs):
         self.train_combined = train_combined
         assert rotation_mode in ROTATION_MODES, f'Invalid rotation mode {rotation_mode}, must be one of {ROTATION_MODES}'
         self.rotation_mode = rotation_mode
+        assert not use_distance_switches, 'Distance switches are now disabled.'
         self.use_distance_switches = use_distance_switches
         self.add_coord_grid = add_coord_grid
         self.check_symmetries = check_symmetries

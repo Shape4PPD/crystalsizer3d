@@ -100,8 +100,8 @@ def _build_crystal(
         growth_rates = manager.crystal_generator.get_expanded_growth_rates(distances)
         morph = VisualHabitMorphology.from_growth_rates(manager.crystal_generator.crystal,
                                                         growth_rates)
-        _, _, mesh = manager.crystal_generator.generate_crystal(distances=distances,
-                                                                validate=False)
+        _, _, _, mesh = manager.crystal_generator.generate_crystal(distances=distances,
+                                                                   validate=False)
         return morph, mesh
     except Exception as e:
         raise RuntimeError(f'Failed to build crystal:\n{e}')
@@ -400,7 +400,7 @@ def _make_parameter_vector(
         assert not torch.all(dists == 0), 'Some distances must be non-zero.'
         dists /= dists.max()
         try:
-            rel_rates2, zingg, _ = manager.crystal_generator.generate_crystal(
+            rel_rates2, _, zingg, _ = manager.crystal_generator.generate_crystal(
                 distances=to_numpy(dists).astype(float),
             )
             dists = torch.from_numpy(rel_rates2)

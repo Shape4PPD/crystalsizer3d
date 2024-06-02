@@ -163,7 +163,7 @@ def validate(
             logger.info('Re-generating crystal.')
             ref_idxs = [''.join(str(i) for i in k) for k in generator.miller_indices]
             distances = np.array([example[f'd{i}_{k}'] for i, k in enumerate(ref_idxs)])
-            _, z, m = generator.generate_crystal(distances=distances)
+            _, _, z, m = generator.generate_crystal(distances=distances)
 
             # Render the crystal
             img, scene = renderer.render_from_parameters(r_params, return_scene=True)
@@ -281,9 +281,11 @@ def generate_dataset():
         ref_idxs = [''.join(str(i) for i in k) for k in miller_idxs]
         for i, hkl in enumerate(ref_idxs):
             headers.append(f'd{i}_{hkl}')
+        for i, hkl in enumerate(ref_idxs):
+            headers.append(f'a{i}_{hkl}')
         writer = csv.DictWriter(f, fieldnames=headers)
         writer.writeheader()
-        for i, (distances, zingg_vals, _) in enumerate(crystals):
+        for i, (distances, areas, zingg_vals, _) in enumerate(crystals):
             entry = {
                 'crystal_id': generator.crystal_id,
                 'idx': i,
@@ -293,6 +295,7 @@ def generate_dataset():
             }
             for j, hkl in enumerate(ref_idxs):
                 entry[f'd{j}_{hkl}'] = float(distances[j])
+                entry[f'a{j}_{hkl}'] = float(areas[j])
             writer.writerow(entry)
 
     # Render the crystals
