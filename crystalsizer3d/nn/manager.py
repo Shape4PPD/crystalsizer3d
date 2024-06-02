@@ -1411,14 +1411,14 @@ class Manager:
 
                 # Apply the switches
                 ignore_distances = Y_switches < .5
-                Y_dists = torch.where(ignore_distances, torch.ones_like(Y_dists) * -1, Y_dists)
+                Y_dists = torch.where(ignore_distances, torch.ones_like(Y_dists) * 100, Y_dists)
             elif self.ds.labels_distances == self.ds.labels_distances_active:
                 # Normalise the predictions by the maximum value per batch item
                 Ypd_max = Y_dists.amax(dim=1, keepdim=True).abs()
                 Y_dists = torch.where(Ypd_max > 0, Y_dists / Ypd_max, Y_dists)
 
-            # Clip negative predictions to -1
-            Y_dists = Y_dists.clamp(min=-1)
+            # Don't allow negative distances
+            Y_dists = Y_dists.clamp(min=0)
 
             output['distances'] = Y_dists
 
@@ -1554,39 +1554,10 @@ class Manager:
     ) -> Tuple[torch.Tensor, Dict[str, float]]:
         """
         Calculate distance losses.
-        If using distance switches, ignored predicted distances have been set to -1.
-        Otherwise, assuming negative values are predicting the missing distances.
         """
-        bs = len(d_pred)
-        d_pos = d_target > 0
-
-        # Where there is a positive length in the target, calculate the difference
-        d_pred_pos = d_pred.clone()
-        d_pred_pos[~d_pos] = -1
-
-        # Calculate average error per positive distance
-        n_pos = d_pos.sum(dim=1)
-        avg_errors_pos = ((d_pred_pos - d_target)**2).sum(dim=1) / n_pos
-        l_pos = avg_errors_pos.sum() / bs
-
-        # Where there is a missing distance in the target, penalise positive predictions
-        d_pred_neg = d_pred.clone()
-        d_pred_neg[d_pos] = -1
-
-        # Calculate average error per negative distance
-        n_neg = (~d_pos).sum(dim=1)
-        avg_errors_neg = torch.where(
-            n_neg > 0,
-            ((d_pred_neg + 1)**2).sum(dim=1) / n_neg,
-            torch.zeros(bs, device=self.device)
-        )
-        l_neg = avg_errors_neg.sum() / bs
-
-        loss = l_pos + l_neg
-
+        loss = ((d_pred - d_target)**2).mean()
+        # todo - relax exact assignments for asymmetric distances
         stats = {
-            'distances/l_pos': l_pos.item(),
-            'distances/l_neg': l_neg.item(),
             'losses/distances': loss.item()
         }
 
@@ -1692,12 +1663,14 @@ class Manager:
         """
         Calculate the distances between 3d vertices.
         """
+        distances = self.ds.prep_distances(
+            distance_vals=Y_pred['distances'],
+            switches=Y_pred['distance_switches'] if 'distance_switches' in Y_pred else None
+        )
+
         # Calculate the polyhedral vertices for the parameters
         v_pred, nv_pred = calculate_polyhedral_vertices(
-            distances=self.ds.prep_distances(
-                distance_vals=Y_pred['distances'],
-                switches=Y_pred['distance_switches'] if 'distance_switches' in Y_pred else None
-            ),
+            distances=distances,
             origin=Y_pred['transformation'][:, :3],
             scale=Y_pred['transformation'][:, 3],
             rotation=Y_pred['transformation'][:, 4:],
@@ -1741,8 +1714,24 @@ class Manager:
         d[invalid_idxs] = 0
 
         # Calculate the average minimum distance per vertex
-        loss = (d.sum(dim=1) / (d > 0).sum(dim=1).clip(1)).mean()
-        stats = {'losses/3d': loss.item()}
+        l_vertices = (d.sum(dim=1) / (d > 0).sum(dim=1).clip(1)).mean()
+
+        # Regularise the distances so all planes are touching the polyhedron
+        N_dot_v = torch.einsum('pi,bvi->bpv', self.crystal.N, v_pred)
+        distances_min = N_dot_v.amax(dim=-1)[:, :len(self.crystal.miller_indices)]
+        overshoot = distances - distances_min
+        l_overshoot = torch.where(
+            overshoot > 0,
+            overshoot**2,
+            torch.zeros_like(overshoot)
+        ).mean()
+
+        loss = l_vertices + l_overshoot
+        stats = {
+            '3d/l_vertices': l_vertices.item(),
+            '3d/l_overshoot': l_overshoot.item(),
+            'losses/3d': loss.item()
+        }
 
         return loss, stats
 

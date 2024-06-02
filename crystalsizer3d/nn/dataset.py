@@ -203,6 +203,8 @@ class Dataset:
                             item['image_clean'] = clean_image_path
                     elif header[0] == 'd':
                         item[header] = float(row[header])
+                    elif header[0] == 'a':
+                        item[header] = float(row[header])
                     elif header in ['si', 'il']:
                         item[header] = float(row[header])
 
@@ -388,7 +390,7 @@ class Dataset:
                 item['il']
             ])
 
-        # Distances are in (0, 1] or -1 for collapsed faces / missing distances
+        # Distances are in (0, 1]
         if self.ds_args.train_distances:
             params['distances'] = np.array([
                 item[k]
@@ -396,8 +398,8 @@ class Dataset:
             ])
             if self.ds_args.use_distance_switches:
                 params['distance_switches'] = np.array([
-                    0 if item[k] == -1 else 1
-                    for k in self.labels_distances_active
+                    0 if item[k] == 0 else 1
+                    for k in [k.replace('d', 'a') for k in self.labels_distances_active]
                 ])
 
         # Transformation parameters are normalised by the dataset statistics
@@ -708,6 +710,7 @@ class Dataset:
             self,
             distance_vals: torch.Tensor,
             switches: Optional[torch.Tensor] = None,
+            missing_distance_val: float = 100.
     ) -> torch.Tensor:
         """
         Prepare the distance values.
@@ -718,10 +721,10 @@ class Dataset:
             distance_vals = distance_vals[None, :]
         bs = distance_vals.shape[0]
 
-        # Set distances to -1 if the switches are off or if the distance is negative
+        # Set distances to something large if the switches are off or if the distance is negative
         if self.ds_args.use_distance_switches and switches is not None:
-            distance_vals = torch.where(switches < .5, -1, distance_vals)
-        distance_vals[distance_vals < 0] = -1
+            distance_vals = torch.where(switches < .5, missing_distance_val, distance_vals)
+        distance_vals[distance_vals < 0] = missing_distance_val
 
         # Put the distances into the correct order
         distances = torch.zeros(bs, len(self.labels_distances), device=distance_vals.device)
@@ -745,8 +748,8 @@ class Dataset:
             distances
         )
 
-        # Ensure negative distances are set to -1
-        distance_vals[distance_vals < 0] = -1
+        # Ensure negative distances are set to the missing value
+        distance_vals[distance_vals < 0] = missing_distance_val
 
         if strip_batch:
             distances = distances[0]
