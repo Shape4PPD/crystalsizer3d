@@ -1555,8 +1555,25 @@ class Manager:
         """
         Calculate distance losses.
         """
-        loss = ((d_pred - d_target)**2).mean()
-        # todo - relax exact assignments for asymmetric distances
+        if self.ds.dataset_args.asymmetry is not None:
+            loss = torch.tensor(0., device=self.device)
+
+            # Group asymmetric distances by face group
+            for i, hkl in enumerate(self.ds.dataset_args.miller_indices):
+                # Collect the distances for this face group
+                group_idxs = (self.crystal.symmetry_idx == i).nonzero().squeeze()
+                d_pred_i = d_pred[:, group_idxs]
+                d_target_i = d_target[:, group_idxs]
+
+                # Sort them
+                d_pred_i, _ = d_pred_i.sort(dim=1)
+                d_target_i, _ = d_target_i.sort(dim=1)
+
+                # Calculate losses between the sorted distances
+                loss = loss + ((d_pred_i - d_target_i)**2).mean()
+        else:
+            loss = ((d_pred - d_target)**2).mean()
+
         stats = {
             'losses/distances': loss.item()
         }
@@ -1718,7 +1735,7 @@ class Manager:
 
         # Regularise the distances so all planes are touching the polyhedron
         N_dot_v = torch.einsum('pi,bvi->bpv', self.crystal.N, v_pred)
-        distances_min = N_dot_v.amax(dim=-1)[:, :len(self.crystal.miller_indices)]
+        distances_min = N_dot_v.amax(dim=-1)[:, :distances.shape[1]]
         overshoot = distances - distances_min
         l_overshoot = torch.where(
             overshoot > 0,
