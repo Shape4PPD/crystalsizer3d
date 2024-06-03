@@ -104,11 +104,12 @@ def _generate_crystal(
         si = bbox_lengths[0] / bbox_lengths[1]  # Small/Intermediate
         il = bbox_lengths[1] / bbox_lengths[2]  # Intermediate/Large
         if (zingg_bbox is not None
-                and not (zingg_bbox[0] <= si <= zingg_bbox[1] and zingg_bbox[2] <= il <= zingg_bbox[3])):
+                and not (zingg_bbox[0] <= si <= zingg_bbox[1]
+                         and zingg_bbox[2] <= il <= zingg_bbox[3])):
             continue
 
         # Check that all planes are touching the polyhedron
-        distances_min = (crystal.N @ crystal.vertices.T).amax(dim=1)[:len(miller_indices)]
+        distances_min = (crystal.N @ crystal.vertices.T).amax(dim=1)[:len(crystal_args['miller_indices'])]
         distances_min = to_numpy(distances_min)
 
         try:
