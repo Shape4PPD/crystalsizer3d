@@ -88,7 +88,8 @@ def _generate_crystal(
             # Update the distances and miller indices
             distances = all_distances
             distances = np.abs(distances) / np.abs(distances).max()
-            crystal_args['miller_indices'] = all_miller_indices
+            miller_indices = [tuple(hkl) for hkl in all_miller_indices]
+            crystal_args['miller_indices'] = miller_indices
 
         # Build the crystal
         crystal = Crystal(distances=distances, **crystal_args)
@@ -109,7 +110,7 @@ def _generate_crystal(
             continue
 
         # Check that all planes are touching the polyhedron
-        distances_min = (crystal.N @ crystal.vertices.T).amax(dim=1)[:len(crystal_args['miller_indices'])]
+        distances_min = (crystal.N @ crystal.vertices.T).amax(dim=1)[:len(miller_indices)]
         distances_min = to_numpy(distances_min)
 
         try:
@@ -132,7 +133,7 @@ def _generate_crystal(
                     'Invalid minimum distances - areas have changed.'
 
                 # Check that if we reduce the distance of any face with no area then it will appear with non-zero area
-                eps = 1e-5
+                eps = 1e-3
                 missing_faces = set(crystal.missing_faces)
                 for i in range(len(miller_indices)):
                     face_group = set(
@@ -140,7 +141,7 @@ def _generate_crystal(
                     if face_group.issubset(missing_faces):
                         distances_sub_min = distances_min.copy()
                         distances_sub_min[i] -= eps
-                        crystal_sub_min = Crystal(distances=distances_sub_min, **crystal_args)
+                        crystal_sub_min = Crystal(distances=distances_sub_min, **crystal_args, merge_vertices=True)
                         for hkl in face_group:
                             assert crystal_sub_min.areas[hkl] > 0, \
                                 f'Face {hkl} has no area even after reducing the minimum distance.'
