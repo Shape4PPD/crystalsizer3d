@@ -88,6 +88,7 @@ def _generate_crystal(
             # Update the distances and miller indices
             distances = all_distances
             distances = np.abs(distances) / np.abs(distances).max()
+            crystal_args['miller_indices'] = all_miller_indices
 
         # Build the crystal
         crystal = Crystal(distances=distances, **crystal_args)
@@ -146,7 +147,7 @@ def _generate_crystal(
                 # Use the minimum distances
                 distances = distances_min
         except (AssertionError, ValueError):
-            # This shoudn't really happen, but it does sometimes so just try again
+            # This shouldn't really happen, but it does sometimes so just try again
             continue
 
         # Centre the mesh at the origin
