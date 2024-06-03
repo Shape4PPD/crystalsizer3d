@@ -15,15 +15,8 @@ from crystalsizer3d import LOGS_PATH, N_WORKERS, START_TIMESTAMP, logger
 from crystalsizer3d.args.dataset_synthetic_args import DatasetSyntheticArgs
 from crystalsizer3d.crystal_generator import CrystalGenerator
 from crystalsizer3d.crystal_renderer import CrystalRenderer
+from crystalsizer3d.nn.dataset import PARAMETER_HEADERS
 from crystalsizer3d.util.utils import print_args, set_seed, str2bool, to_dict, to_numpy
-
-PARAMETER_HEADERS = [
-    'crystal_id',
-    'idx',
-    'image',
-    'si',
-    'il'
-]
 
 
 def parse_args(printout: bool = True) -> Tuple[DatasetSyntheticArgs, Namespace]:
@@ -42,6 +35,9 @@ def parse_args(printout: bool = True) -> Tuple[DatasetSyntheticArgs, Namespace]:
                         help='Set the number of workers to use for generating crystals.')
     parser.add_argument('--n-renderer-workers', type=int, default=1,
                         help='Set the number of workers to use for rendering images.')
+    parser.add_argument('--migrate-distances', type=str2bool, default=True,
+                        help='Migrate the distances to the new format if resuming from the old format.'
+                             'That is, positive minimum distances only and save face areas.')
 
     # Do the parsing
     args = parser.parse_args()
@@ -55,7 +51,8 @@ def parse_args(printout: bool = True) -> Tuple[DatasetSyntheticArgs, Namespace]:
         overwrite_existing=args.overwrite_existing,
         seed=args.seed,
         n_generator_workers=args.n_generator_workers,
-        n_renderer_workers=args.n_renderer_workers
+        n_renderer_workers=args.n_renderer_workers,
+        migrate_distances=args.migrate_distances
     )
 
     return dataset_args, runtime_args
@@ -63,6 +60,7 @@ def parse_args(printout: bool = True) -> Tuple[DatasetSyntheticArgs, Namespace]:
 
 def validate(
         output_dir: Path,
+        runtime_args: Namespace
 ):
     """
     Render a few examples from the parameters to check that they match.
@@ -88,13 +86,16 @@ def validate(
         ratio_stds=dsa.ratio_stds,
         zingg_bbox=dsa.zingg_bbox,
         constraints=dsa.distance_constraints,
+        asymmetry=dsa.asymmetry,
+        n_workers=runtime_args.n_generator_workers
     )
 
     # Initialise the crystal renderer
     renderer = CrystalRenderer(
         param_path=output_dir / 'parameters.csv',
         dataset_args=dsa,
-        quiet_render=True
+        quiet_render=True,
+        migrate_distances=False
     )
 
     # Load data
@@ -161,7 +162,7 @@ def validate(
 
             # Build the crystal
             logger.info('Re-generating crystal.')
-            ref_idxs = [''.join(str(i) for i in k) for k in generator.miller_indices]
+            ref_idxs = [''.join(str(i) for i in k) for k in renderer.miller_indices]
             distances = np.array([example[f'd{i}_{k}'] for i, k in enumerate(ref_idxs)])
             _, _, z, m = generator.generate_crystal(distances=distances)
 
@@ -318,7 +319,7 @@ def generate_dataset():
         renderer.annotate_image()
 
     # Re-generate a few images from the parameters to check that they match
-    validate(output_dir=save_dir)
+    validate(output_dir=save_dir, runtime_args=runtime_args)
 
     # Show how long this took, formatted nicely
     elapsed_time = time.time() - start_time
@@ -430,7 +431,8 @@ def resume(
         dataset_args=dataset_args,
         quiet_render=True,
         n_workers=runtime_args.n_renderer_workers,
-        remove_mismatched=True
+        remove_mismatched=True,
+        migrate_distances=runtime_args.migrate_distances
     )
     renderer.render()
 
@@ -444,7 +446,7 @@ def resume(
 
     # Re-generate a few images from the parameters to check that they match
     if revalidate:
-        validate(output_dir=save_dir)
+        validate(output_dir=save_dir, runtime_args=runtime_args)
 
     # Show how long this took, formatted nicely
     elapsed_time = time.time() - start_time

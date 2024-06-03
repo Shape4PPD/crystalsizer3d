@@ -17,14 +17,16 @@ import torch
 from PIL import Image
 from filelock import SoftFileLock as FileLock, Timeout
 
-from crystalsizer3d import MI_CPU_VARIANT, USE_CUDA, logger
+from crystalsizer3d import MI_CPU_VARIANT, START_TIMESTAMP, USE_CUDA, logger
 from crystalsizer3d.args.dataset_synthetic_args import DatasetSyntheticArgs
 from crystalsizer3d.crystal import Crystal
 from crystalsizer3d.csd_proxy import CSDProxy
+from crystalsizer3d.nn.dataset import PARAMETER_HEADERS
 from crystalsizer3d.scene_components.bubble import Bubble, make_bubbles
 from crystalsizer3d.scene_components.scene import Scene
 from crystalsizer3d.scene_components.textures import NoiseTexture, NormalMapNoiseTexture, generate_crystal_bumpmap
 from crystalsizer3d.scene_components.utils import RenderError
+from crystalsizer3d.util.geometry import merge_vertices
 from crystalsizer3d.util.utils import SEED, hash_data, to_numpy
 
 if USE_CUDA:
@@ -419,6 +421,7 @@ class CrystalRenderer:
             quiet_render: bool = False,
             n_workers: int = 1,
             remove_mismatched: bool = False,
+            migrate_distances: bool = True,
     ):
         self.dataset_args = dataset_args
         self.quiet_render = quiet_render
@@ -435,6 +438,7 @@ class CrystalRenderer:
         self.vertices_dir = self.root_dir / 'vertices'
         self.vertices_path = self.root_dir / 'vertices.json'
         self.remove_mismatched = remove_mismatched
+        self.migrate_distances = migrate_distances
         self._init_crystal_settings()
 
     def _init_crystal_settings(self):
@@ -466,6 +470,7 @@ class CrystalRenderer:
         """
         Load the crystal parameters from the parameter file.
         """
+        global device
         assert self.param_path.exists(), f'Parameter file "{self.param_path}" does not exist.'
         logger.info(f'Loading crystal parameters from {self.param_path} and {self.rendering_params_path}.')
 
@@ -549,6 +554,18 @@ class CrystalRenderer:
             headers_distances = {tuple(map(int, re.findall(r'-?\d', h.split('_')[1]))): h
                                  for h in reader.fieldnames if h[0] == 'd'}
             assert all(hkl in headers_distances for hkl in self.miller_indices), 'Missing distance headers!'
+
+            include_areas = True
+            needs_migrating = False
+            headers_areas = {tuple(map(int, re.findall(r'-?\d', h.split('_')[1]))): h
+                             for h in reader.fieldnames if h[0] == 'a'}
+            if not all(hkl in headers_areas for hkl in self.miller_indices):
+                if self.migrate_distances:
+                    needs_migrating = True
+                else:
+                    logger.warning('Missing area parameters (not migrating).')
+                include_areas = False
+
             self.data = {}
             for i, row in enumerate(reader):
                 idx = int(row['idx'])
@@ -556,15 +573,18 @@ class CrystalRenderer:
                 self.data[idx] = {
                     'image': row['image'],
                     'distances': {hkl: float(row[headers_distances[hkl]]) for hkl in self.miller_indices},
+                    'si': float(row['si']),
+                    'il': float(row['il']),
                     'rendered': idx in self.rendering_params or idx in completed_idxs,
                 }
+                if include_areas:
+                    self.data[idx]['areas'] = {hkl: float(row[headers_areas[hkl]]) for hkl in self.miller_indices}
 
         # Check the vertices match the rendering parameters
         vert_idxs = set(self.vertices.keys())
         if vert_idxs != rp_idxs:
             logger.warning(f'Vertices and rendering parameters do not match! '
                            f'(#vertices) {len(vert_idxs)} != {len(rp_idxs)} (#rendering parameters). Rebuilding the vertices.')
-            global device
             device_og = device
             device = torch.device('cpu')
             vertices = {}
@@ -584,6 +604,87 @@ class CrystalRenderer:
                     vertices[idx] = crystal.vertices.tolist()
             _write_json(self.vertices_path, vertices)
             device = device_og
+            return self._load_parameters()
+
+        # Migrate if required
+        if needs_migrating:
+            logger.info('Migrating distances to the new format.')
+            device_og = device
+            device = torch.device('cpu')
+            n_changed = 0
+            for i, (idx, params) in enumerate(self.data.items()):
+                if (i + 1) % 100 == 0:
+                    logger.info(f'Migrating crystal {i + 1}/{len(self.data)}.')
+                distances_og = np.array(list(params['distances'].values()))
+                distances_og[distances_og < 0] = 1e8
+                crystal_og = self._init_crystal(distances_og)
+                r_params = self.rendering_params[idx]
+
+                # Check that all planes are touching the polyhedron
+                distances_min = (crystal_og.N @ crystal_og.vertices.T).amax(dim=1)[:len(self.miller_indices)]
+                distances_min = to_numpy(distances_min)
+
+                # Renormalise the minimum distances and update scale
+                if distances_min.max() < 1:
+                    sf = 1 / distances_min.max()
+                    distances_min *= sf
+                    r_params['crystal']['scale'] /= sf
+
+                # Rebuild crystal to get the correct areas
+                if (not np.allclose(distances_min, to_numpy(crystal_og.distances), atol=1e-3)
+                        or 'areas' not in params
+                        or not np.allclose(params['areas'], to_numpy(crystal_og.areas), atol=1e-3)):
+                    # Update distances and areas
+                    crystal_min = self._init_crystal(distances_min)
+                    self.data[idx]['distances'] = {hkl: crystal_min.distances[j].item() for j, hkl in
+                                                   enumerate(self.miller_indices)}
+                    self.data[idx]['areas'] = {hkl: crystal_min.areas[hkl] for hkl in self.miller_indices}
+                    r_params['crystal']['distances'] = distances_min.tolist()
+
+                    # Check that the vertices match (or thereabouts)
+                    crystal_new = self._init_crystal(
+                        distances=r_params['crystal']['distances'],
+                        scale=r_params['crystal']['scale'],
+                        origin=r_params['crystal']['origin'],
+                        rotation=r_params['crystal']['rotation']
+                    )
+                    vertices_og = merge_vertices(torch.tensor(self.vertices[idx]))[0]
+                    vertices_new = merge_vertices(crystal_new.vertices)[0]
+                    v_dists = torch.cdist(vertices_og, vertices_new)
+                    tol = vertices_og.abs().mean() * 1e-2
+                    assert v_dists.amin(dim=0).max() < tol and v_dists.amin(dim=1).max() < tol, \
+                        f'Vertices do not match for crystal {idx}!'
+                    n_changed += 1
+            device = device_og
+            logger.info('Backing up the old parameters.')
+            suffix = f'.backup_{START_TIMESTAMP}'
+            self.param_path.rename(self.param_path.with_suffix(suffix))
+            self.rendering_params_path.rename(self.rendering_params_path.with_suffix(suffix))
+            logger.info('Updating the parameters.')
+            with open(self.param_path, 'w') as f:
+                headers = PARAMETER_HEADERS.copy()
+                ref_idxs = [''.join(str(i) for i in k) for k in self.miller_indices]
+                for i, hkl in enumerate(ref_idxs):
+                    headers.append(f'd{i}_{hkl}')
+                for i, hkl in enumerate(ref_idxs):
+                    headers.append(f'a{i}_{hkl}')
+                writer = csv.DictWriter(f, fieldnames=headers)
+                writer.writeheader()
+                for i, (idx, params) in enumerate(self.data.items()):
+                    entry = {
+                        'crystal_id': self.dataset_args.crystal_id,
+                        'idx': idx,
+                        'image': f'{i:010d}.png',
+                        'si': params['si'],
+                        'il': params['il'],
+                    }
+                    for j, (hkl_str, hkl) in enumerate(zip(ref_idxs, self.miller_indices)):
+                        entry[f'd{j}_{hkl_str}'] = float(params['distances'][hkl])
+                        entry[f'a{j}_{hkl_str}'] = float(params['areas'][hkl])
+                    writer.writerow(entry)
+            _write_json(self.rendering_params_path, self.rendering_params)
+
+            logger.info(f'Migration complete. Changed {n_changed} distances.')
             return self._load_parameters()
 
     def _init_crystal(

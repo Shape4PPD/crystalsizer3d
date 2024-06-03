@@ -308,10 +308,14 @@ class CrystalGenerator:
         """
         Generate a crystal with the given distances.
         """
+        if self.asymmetry is not None:
+            miller_indices = [tuple(hkl) for hkl in self.crystal.all_miller_indices.tolist()]
+        else:
+            miller_indices = self.miller_indices
         crystal = Crystal(
             lattice_unit_cell=self.lattice_unit_cell,
             lattice_angles=self.lattice_angles,
-            miller_indices=self.miller_indices,
+            miller_indices=miller_indices,
             point_group_symbol=self.point_group_symbol,
             distances=torch.from_numpy(distances).to(torch.float32)
         )

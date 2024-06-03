@@ -26,6 +26,14 @@ DATASET_TYPES = {
     DATASET_TYPE_IMAGES: 'Microscope images',
 }
 
+PARAMETER_HEADERS = [
+    'crystal_id',
+    'idx',
+    'image',
+    'si',
+    'il'
+]
+
 MIN_NORMALISED_SCALE = 1e-3  # Minimum normalised scale value as using scales <= 0 can cause issues
 
 
