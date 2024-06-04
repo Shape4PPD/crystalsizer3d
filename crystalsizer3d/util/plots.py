@@ -358,17 +358,29 @@ def plot_distances(
 
     # Group asymmetric distances by face group
     distance_groups = {}
-    grouped_order = None
     if ds.dataset_args.asymmetry is not None:
+        grouped_order_pred = []
+        grouped_order_target = []
+        grouped_order_pred2 = []
         for i, hkl in enumerate(ds.dataset_args.miller_indices):
             group_idxs = (manager.crystal.symmetry_idx == i).nonzero().squeeze()
             distance_groups[hkl] = group_idxs
-        grouped_order = torch.cat(list(distance_groups.values()))
-        d_pred = d_pred[grouped_order]
+            dpi = d_pred[group_idxs].argsort()
+            grouped_order_pred.append(group_idxs[dpi])
+            if d_target is not None:
+                dti = d_target[group_idxs].argsort()
+                grouped_order_target.append(group_idxs[dti])
+            if d_pred2 is not None:
+                dp2i = d_pred2[group_idxs].argsort()
+                grouped_order_pred2.append(group_idxs[dp2i])
+        grouped_order_pred = torch.cat(grouped_order_pred)
+        d_pred = d_pred[grouped_order_pred]
         if d_target is not None:
-            d_target = d_target[grouped_order]
+            grouped_order_target = torch.cat(grouped_order_target)
+            d_target = d_target[grouped_order_target]
         if d_pred2 is not None:
-            d_pred2 = d_pred2[grouped_order]
+            grouped_order_pred2 = torch.cat(grouped_order_pred2)
+            d_pred2 = d_pred2[grouped_order_pred2]
 
     # Add bar chart data
     locs, bar_width, offset = _add_bars(
@@ -399,8 +411,8 @@ def plot_distances(
         s_pred = _load_single_parameter(Y_pred, 'distance_switches', idx)
         s_target = _load_single_parameter(Y_target, 'distance_switches', idx)
         if ds.dataset_args.asymmetry is not None:
-            s_pred = s_pred[grouped_order]
-            s_target = s_target[grouped_order]
+            s_pred = s_pred[grouped_order_pred]
+            s_target = s_target[grouped_order_target]
         k = 2.3
         colours = []
         for i, (sp, st) in enumerate(zip(s_pred, s_target)):
