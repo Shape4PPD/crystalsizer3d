@@ -453,12 +453,12 @@ class Crystal(nn.Module):
         rows = [[] for _ in range(grid_dim)]
         row_heights = [0] * grid_dim
         col_widths = [0] * grid_dim
-        col_idxs = torch.stack([torch.arange(4)] * 4)
+        col_idxs = torch.stack([torch.arange(grid_dim)] * grid_dim)
         row_idxs = col_idxs.T
         sorted_idxs = torch.argsort((row_idxs**2 + col_idxs**2).flatten())
         positions = torch.zeros_like(sorted_idxs)
         positions[sorted_idxs] = torch.arange(len(positions))
-        positions = positions.reshape(4, 4)
+        positions = positions.reshape(grid_dim, grid_dim)
 
         # Calculate the planar coordinates for each face
         for i, c_idx in enumerate(centroid_idxs):

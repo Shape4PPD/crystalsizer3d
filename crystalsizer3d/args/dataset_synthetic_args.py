@@ -1,3 +1,4 @@
+import re
 from argparse import ArgumentParser
 from typing import List, Optional, Tuple
 
@@ -323,8 +324,9 @@ class DatasetSyntheticArgs(BaseArgs):
         # Crystal parameters
         group.add_argument('--crystal-id', type=str, default='LGLUAC01',
                            help='Crystal ID to generate images for.')
-        group.add_argument('--miller-indices', type=lambda s: [tuple(int(i) for i in item) for item in s.split(',')],
-                           default='101,021,010', help='Miller indices of the canonical distances.')
+        group.add_argument('--miller-indices',
+                           type=lambda s: [tuple(map(int, re.findall(r'-?\d{1}', item))) for item in s.split(',')],
+                           default='101,021,010,-1-1-1', help='Miller indices of the canonical distances.')
         group.add_argument('--ratio-means', type=lambda s: [float(item) for item in s.split(',')],
                            default='1,1,1', help='Means of the ratios of growth rates.')
         group.add_argument('--ratio-stds', type=lambda s: [float(item) for item in s.split(',')],

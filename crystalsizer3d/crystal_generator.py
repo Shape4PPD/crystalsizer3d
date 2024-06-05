@@ -1,3 +1,4 @@
+import re
 from multiprocessing import Pool
 from typing import List, Optional, Tuple, Union
 
@@ -220,14 +221,14 @@ class CrystalGenerator:
                 assert len(constraints_parts) > 1, f'Invalid constraint string: {c}.'
                 parsed_c = []
                 for i, k in enumerate(constraints_parts):
-                    if len(k) == 3:
-                        hkl = tuple(int(idx) for idx in k)
+                    if k == '0':
+                        assert i == len(constraints_parts) - 1, \
+                            'A "0" is only allowed at the end of the constraint string.'
+                        parsed_c.append(0)
+                    else:
+                        hkl = tuple(map(int, re.findall(r'-?\d{1}', k)))
                         assert hkl in self.miller_indices, f'Invalid constraint key: {hkl}'
                         parsed_c.append(hkl)
-                    else:
-                        assert i == len(constraints_parts) - 1 and k == '0', \
-                            f'Only a 0 is allowed at the end of the constraint string. {k} received.'
-                        parsed_c.append(0)
                 parsed_constraints.append(parsed_c)
         else:
             parsed_constraints = None
