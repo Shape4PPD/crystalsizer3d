@@ -397,7 +397,7 @@ def plot_distances(
         xlabels = []
         for i, (hkl, g) in enumerate(distance_groups.items()):
             group_labels = [''] * len(g)
-            group_labels[len(g) // 2] = '(' + ','.join(map(str, hkl)) + ')'
+            group_labels[len(g) // 2] = '(' + ''.join(map(str, hkl)) + ')'
             xlabels.extend(group_labels)
 
             # Add vertical separator lines between face groups
@@ -428,6 +428,8 @@ def plot_distances(
     ax.set_title('Distances')
     ax.set_xticks(locs)
     ax.set_xticklabels(xlabels)
+    if len(xlabels) > 5:
+        ax.tick_params(axis='x', labelsize='small')
     ax.set_ylim(0, 1)
     ax.set_yticks([0, 0.5, 1])
     ax.set_yticklabels(['0', '', '1'])
@@ -518,6 +520,8 @@ def plot_areas(
     ax.set_title('Face areas')
     ax.set_xticks(locs)
     ax.set_xticklabels(xlabels)
+    if len(xlabels) > 5:
+        ax.tick_params(axis='x', labelsize='small')
     _shared_ax_legend(share_ax, ax, 'areas')
 
 
