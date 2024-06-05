@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from typing import Any, Dict, List, Optional, TYPE_CHECKING, Tuple, Union
 
 import cv2
@@ -343,8 +344,6 @@ def plot_distances(
     Plot the distances on the axis.
     """
     ds = manager.ds
-    ax_pos = ax.get_position()
-    ax.set_position([ax_pos.x0, ax_pos.y0 + 0.02, ax_pos.width, ax_pos.height - 0.02])
     d_pred = _load_single_parameter(Y_pred, 'distances', idx)
     d_target = _load_single_parameter(Y_target, 'distances', idx)
     d_pred2 = _load_single_parameter(Y_pred2, 'distances', idx)
@@ -405,7 +404,10 @@ def plot_distances(
             if i < len(distance_groups) - 1:
                 ax.axvline(locs[len(xlabels) - 1] + 0.5, color='black', linestyle='--', linewidth=1)
     else:
-        xlabels = ['(' + ','.join(list(l[3:])) + ')' for l in ds.labels_distances]
+        xlabels = ['(' + ''.join(list(l[3:])) + ')' for l in ds.labels_distances]
+
+    # Replace -X with \bar{X} in labels
+    xlabels = [re.sub(r'-(\d)', r'$\\bar{\1}$', label) for label in xlabels]
 
     if manager.dataset_args.use_distance_switches:
         s_pred = _load_single_parameter(Y_pred, 'distance_switches', idx)
@@ -430,6 +432,93 @@ def plot_distances(
     ax.set_yticks([0, 0.5, 1])
     ax.set_yticklabels(['0', '', '1'])
     _shared_ax_legend(share_ax, ax, 'distances')
+
+
+def plot_areas(
+        ax: Axes,
+        manager: Manager,
+        crystal_pred: Crystal,
+        Y_pred: Dict[str, torch.Tensor],
+        crystal_target: Optional[Crystal] = None,
+        Y_target: Optional[Dict[str, torch.Tensor]] = None,
+        idx: int = 0,
+        colour_pred: str = 'cornflowerblue',
+        colour_target: str = 'darkorange',
+        share_ax: Optional[Dict[str, Axes]] = None,
+        **kwargs
+):
+    """
+    Plot the face areas on the axis.
+    """
+    ds = manager.ds
+
+    # Load the area values from the crystal
+    a_pred = np.array(list(crystal_pred.areas.values()))
+    if crystal_target is not None:
+        a_target = np.array(list(crystal_target.areas.values()))
+    else:
+        a_target = None
+
+    # Load the distances for sorting the areas in the same way
+    d_pred = _load_single_parameter(Y_pred, 'distances', idx)
+    d_target = _load_single_parameter(Y_target, 'distances', idx)
+    d_pred = ds.prep_distances(torch.from_numpy(d_pred))
+    if d_target is not None:
+        d_target = ds.prep_distances(torch.from_numpy(d_target))
+
+    # Group asymmetric distances by face group
+    distance_groups = {}
+    if ds.dataset_args.asymmetry is not None:
+        grouped_order_pred = []
+        grouped_order_target = []
+        for i, hkl in enumerate(ds.dataset_args.miller_indices):
+            group_idxs = (manager.crystal.symmetry_idx == i).nonzero().squeeze()
+            distance_groups[hkl] = group_idxs
+            dpi = d_pred[group_idxs].argsort()
+            grouped_order_pred.append(group_idxs[dpi])
+            if d_target is not None:
+                dti = d_target[group_idxs].argsort()
+                grouped_order_target.append(group_idxs[dti])
+        grouped_order_pred = torch.cat(grouped_order_pred)
+        a_pred = a_pred[grouped_order_pred]
+        if d_target is not None:
+            grouped_order_target = torch.cat(grouped_order_target)
+            a_target = a_target[grouped_order_target]
+    else:
+        a_pred = a_pred[:len(d_pred)]
+        if a_target is not None:
+            a_target = a_target[:len(d_target)]
+
+    # Add bar chart data
+    locs, bar_width, offset = _add_bars(
+        ax=ax,
+        pred=a_pred,
+        target=a_target,
+        colour_pred=colour_pred,
+        colour_target=colour_target,
+    )
+
+    # Reorder labels for asymmetric distances
+    if ds.dataset_args.asymmetry is not None:
+        xlabels = []
+        for i, (hkl, g) in enumerate(distance_groups.items()):
+            group_labels = [''] * len(g)
+            group_labels[len(g) // 2] = '(' + ''.join(map(str, hkl)) + ')'
+            xlabels.extend(group_labels)
+
+            # Add vertical separator lines between face groups
+            if i < len(distance_groups) - 1:
+                ax.axvline(locs[len(xlabels) - 1] + 0.5, color='black', linestyle='--', linewidth=1)
+    else:
+        xlabels = ['(' + l[3:] + ')' for l in ds.labels_distances]
+
+    # Replace -X with \bar{X} in labels
+    xlabels = [re.sub(r'-(\d)', r'$\\bar{\1}$', label) for label in xlabels]
+
+    ax.set_title('Face areas')
+    ax.set_xticks(locs)
+    ax.set_xticklabels(xlabels)
+    _shared_ax_legend(share_ax, ax, 'areas')
 
 
 def plot_transformation(
@@ -609,17 +698,18 @@ def plot_training_samples(
         Y_pred2 = None
     n_rows = 4 \
              + int(dsa.train_zingg) \
-             + int(dsa.train_distances) \
+             + 2 * int(dsa.train_distances) \
              + int(dsa.train_transformation) \
              + int(dsa.train_material and len(manager.ds.labels_material_active) > 0) \
              + int(dsa.train_light) \
              + int(dsa.train_generator) * 2
 
-    height_ratios = [1.2, 1.2, 1, 1]  # images and 3d plots
+    height_ratios = [1.3, 1.3, 1.1, 1.1]  # images and 3d plots
     if dsa.train_zingg:
         height_ratios.append(0.5)
     if dsa.train_distances:
-        height_ratios.append(1)
+        height_ratios.append(0.8)
+        height_ratios.append(0.7)
     if dsa.train_transformation:
         height_ratios.append(0.7)
     if dsa.train_material and len(manager.ds.labels_material_active) > 0:
@@ -630,7 +720,7 @@ def plot_training_samples(
         height_ratios.insert(0, 1.2)
         height_ratios.insert(0, 1.2)
 
-    fig = plt.figure(figsize=(n_examples * 2.6, n_rows * 2.4))
+    fig = plt.figure(figsize=(n_examples * 2.7, n_rows * 2.3))
     gs = GridSpec(
         nrows=n_rows,
         ncols=n_examples,
@@ -715,6 +805,9 @@ def plot_training_samples(
             row_idx += 1
         if dsa.train_distances:
             plot_distances(fig.add_subplot(gs[row_idx, i]), **shared_args)
+            row_idx += 1
+            plot_areas(fig.add_subplot(gs[row_idx, i]),
+                       crystal_pred=crystal_pred, crystal_target=crystal_target, **shared_args)
             row_idx += 1
         if dsa.train_transformation:
             plot_transformation(fig.add_subplot(gs[row_idx, i]), **shared_args)
