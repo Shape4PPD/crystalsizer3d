@@ -1743,7 +1743,7 @@ class Manager:
             torch.zeros_like(overshoot)
         ).mean()
 
-        loss = l_vertices + l_overshoot
+        loss = l_vertices + self.optimiser_args.w_3d_overshoot * l_overshoot
         stats = {
             '3d/l_vertices': l_vertices.item(),
             '3d/l_overshoot': l_overshoot.item(),

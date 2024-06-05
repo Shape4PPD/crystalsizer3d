@@ -50,6 +50,7 @@ class OptimiserArgs(BaseArgs):
             w_distances: float = 1.0,
             w_transformation: float = 1.0,
             w_3d: float = 1.0,
+            w_3d_overshoot: float = 0.,
             w_material: float = 1.0,
             w_light: float = 1.0,
             w_generator: float = 1.0,
@@ -130,6 +131,7 @@ class OptimiserArgs(BaseArgs):
         self.w_distances = w_distances
         self.w_transformation = w_transformation
         self.w_3d = w_3d
+        self.w_3d_overshoot = w_3d_overshoot
         self.w_material = w_material
         self.w_light = w_light
         self.w_generator = w_generator
@@ -213,6 +215,8 @@ class OptimiserArgs(BaseArgs):
                            help='Weight for transformation loss.')
         group.add_argument('--w-3d', type=float, default=1.0,
                            help='Weight for 3D loss.')
+        group.add_argument('--w-3d-overshoot', type=float, default=0.,
+                           help='Weight for overshoot component of the 3D loss (gets applied to the 3d loss before w_3d applied to the whole 3d loss).')
         group.add_argument('--w-material', type=float, default=1.0,
                            help='Weight for material loss.')
         group.add_argument('--w-light', type=float, default=1.0,
