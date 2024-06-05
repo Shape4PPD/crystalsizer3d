@@ -328,9 +328,9 @@ class DatasetSyntheticArgs(BaseArgs):
                            type=lambda s: [tuple(map(int, re.findall(r'-?\d{1}', item))) for item in s.split(',')],
                            default='101,021,010,-1-1-1', help='Miller indices of the canonical distances.')
         group.add_argument('--ratio-means', type=lambda s: [float(item) for item in s.split(',')],
-                           default='1,1,1', help='Means of the ratios of growth rates.')
+                           default='1,1,1,1', help='Means of the ratios of growth rates.')
         group.add_argument('--ratio-stds', type=lambda s: [float(item) for item in s.split(',')],
-                           default='0.5,0.5,0.5', help='Standard deviations of the growth rates.')
+                           default='0.5,0.5,0.5,0.5', help='Standard deviations of the growth rates.')
         group.add_argument('--zingg-bbox', type=lambda s: [float(item) for item in s.split(',')],
                            default='0.01,1.0,0.01,1.0',
                            help='Bounding box of the Zingg diagram to restrict shapes to (min_x,max_x,min_y,max_y).')
