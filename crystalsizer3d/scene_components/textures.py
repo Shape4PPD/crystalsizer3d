@@ -2,10 +2,11 @@ import cv2
 import numpy as np
 import pyfastnoisesimd as fns
 import torch
+from torch.nn.functional import interpolate
 
 from crystalsizer3d.crystal import Crystal
 from crystalsizer3d.util.geometry import line_equation_coefficients, line_intersection, normalise
-from crystalsizer3d.util.utils import SEED, to_dict, to_numpy
+from crystalsizer3d.util.utils import SEED, is_power_of_two, to_dict, to_numpy
 
 
 class NoiseTexture:
@@ -105,26 +106,38 @@ def generate_noise_map(
         max_amplitude: float = 1.0,
         zero_centred: bool = False,
         seed: int = SEED,
-        device=torch.device('cpu')
+        device: torch.device = torch.device('cpu')
 ) -> torch.Tensor:
     """
     Generate a composite noise map.
     """
+    args = dict(
+        dim=dim,
+        perlin_freq=perlin_freq,
+        perlin_octaves=perlin_octaves,
+        white_noise_scale=white_noise_scale,
+        max_amplitude=max_amplitude,
+        zero_centred=zero_centred,
+        seed=seed,
+        device=device
+    )
+
+    # Stack multiple channels of noise
     if channels > 1:
         noise_channels = []
         for c in range(channels):
-            noise = generate_noise_map(
-                dim=dim,
-                perlin_freq=perlin_freq,
-                perlin_octaves=perlin_octaves,
-                white_noise_scale=white_noise_scale,
-                max_amplitude=max_amplitude,
-                zero_centred=zero_centred,
-                seed=seed + c,
-                device=device
-            )
+            args['seed'] = seed + c
+            noise = generate_noise_map(**args)
             noise_channels.append(noise)
         return torch.stack(noise_channels, axis=-1)
+
+    # If the dimension is not a power of two, generate at a higher dimension and then downsample
+    if not is_power_of_two(dim):
+        dim_tmp = 1 << (dim - 1).bit_length()
+        args['dim'] = dim_tmp
+        noise = generate_noise_map(**args)
+        noise = interpolate(noise[None, None, ...], size=dim, mode='bilinear', align_corners=False).squeeze()
+        return noise
 
     # Normalise the perlin frequency
     perlin_freq = perlin_freq / dim
