@@ -1746,7 +1746,7 @@ class Manager:
         # Check for undershoot (planes that should be missing but are present)
         eps = 1e-4
         missing_faces: torch.BoolTensor = Y_target['face_areas'] < eps
-        undershoot = distances - farthest_dists
+        undershoot = distances - farthest_dists[:, :distances.shape[1]]
         l_undershoot = torch.where(
             missing_faces,
             undershoot**2,
