@@ -1686,7 +1686,7 @@ class Manager:
         )
 
         # Calculate the polyhedral vertices for the parameters
-        v_pred, nv_pred = calculate_polyhedral_vertices(
+        v_pred, v_pred_og, nv_pred, farthest_dists = calculate_polyhedral_vertices(
             distances=distances,
             origin=Y_pred['transformation'][:, :3],
             scale=Y_pred['transformation'][:, 3],
@@ -1734,7 +1734,7 @@ class Manager:
         l_vertices = (d.sum(dim=1) / (d > 0).sum(dim=1).clip(1)).mean()
 
         # Regularise the distances so all planes are touching the polyhedron
-        N_dot_v = torch.einsum('pi,bvi->bpv', self.crystal.N, v_pred)
+        N_dot_v = torch.einsum('pi,bvi->bpv', self.crystal.N, v_pred_og)
         distances_min = N_dot_v.amax(dim=-1)[:, :distances.shape[1]]
         overshoot = distances - distances_min
         l_overshoot = torch.where(
@@ -1743,10 +1743,24 @@ class Manager:
             torch.zeros_like(overshoot)
         ).mean()
 
-        loss = l_vertices + self.optimiser_args.w_3d_overshoot * l_overshoot
+        # Check for undershoot (planes that should be missing but are present)
+        eps = 1e-4
+        missing_faces: torch.BoolTensor = Y_target['face_areas'] < eps
+        undershoot = distances - farthest_dists
+        l_undershoot = torch.where(
+            missing_faces,
+            undershoot**2,
+            torch.zeros_like(undershoot)
+        ).mean()
+
+        loss = l_vertices \
+               + self.optimiser_args.w_3d_overshoot * l_overshoot \
+               + self.optimiser_args.w_3d_undershoot * l_undershoot
+
         stats = {
             '3d/l_vertices': l_vertices.item(),
             '3d/l_overshoot': l_overshoot.item(),
+            '3d/l_undershoot': l_undershoot.item(),
             'losses/3d': loss.item()
         }
 

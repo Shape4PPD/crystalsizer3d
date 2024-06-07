@@ -472,6 +472,12 @@ class Dataset:
             vertices_new = (vertices_og - origin_og) / scale_og * scale_new + origin_new
             params['vertices'] = vertices_new
 
+            # Include the face areas for the 3D loss
+            params['face_areas'] = np.array([
+                item[k]
+                for k in [k.replace('d', 'a') for k in self.labels_distances_active]
+            ])
+
         # Material parameters are z-score standardised
         if self.ds_args.train_material and len(self.labels_material_active) > 0:
             m_params = []

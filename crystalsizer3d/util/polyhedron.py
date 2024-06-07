@@ -14,7 +14,7 @@ def calculate_polyhedral_vertices(
         symmetry_idx: torch.Tensor,
         plane_normals: torch.Tensor,
         tol: float = 1e-3,
-) -> Tuple[torch.Tensor, torch.Tensor]:
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     """
     Take the face normals and distances and calculate where the vertices and edges lie.
     """
@@ -47,6 +47,10 @@ def calculate_polyhedral_vertices(
     T = intersection_points @ plane_normals.T
     is_interior = torch.all(T <= d[:, None] + tol, dim=2)
 
+    # Save the farthest distances for each plane
+    batch_indices = torch.arange(bs, device=device)[:, None]
+    farthest_dists = intersection_points[batch_indices, T.argmax(dim=1)].norm(dim=-1)
+
     # Pad the vertices so that all batch entries have the same number of vertices
     vertices = []
     for i in range(bs):
@@ -59,6 +63,9 @@ def calculate_polyhedral_vertices(
         torch.cat([v, torch.zeros(max_vertices - len(v), 3, device=device)])
         for v in vertices
     ])
+
+    # Save the non-transformed vertices
+    vertices_og = vertices.clone()
 
     # Apply the rotation
     if rotation.shape[-1] == 3:
@@ -86,4 +93,4 @@ def calculate_polyhedral_vertices(
     # then move these vertices very slightly towards the origin.
     # This will ensure all planes/distances are contributing to the polyhedron.
 
-    return vertices, n_vertices
+    return vertices, vertices_og, n_vertices, farthest_dists
