@@ -18,6 +18,14 @@ ROOT_PATH = Path(__file__).parent.parent
 # Load environment variables from .env file
 dotenv.load_dotenv(ROOT_PATH / '.env')
 
+# Set script path
+cwd = Path.cwd()
+dir_name = os.path.dirname(sys.argv[0]).replace(str(cwd), '').lstrip('/')
+SCRIPT_PATH = (cwd / dir_name).resolve()
+if not SCRIPT_PATH.is_relative_to(ROOT_PATH):
+    ROOT_PATH = SCRIPT_PATH
+    dotenv.load_dotenv(ROOT_PATH / '.env')
+
 
 def _load_env_path(k: str, default: Path):
     ep = os.getenv(k)
@@ -46,12 +54,8 @@ CSD_PROXY_PATH = _load_env_path('CSD_PROXY_PATH', ROOT_PATH / 'data' / 'csd_prox
 # Use mlab?
 USE_MLAB = bool(os.getenv('USE_MLAB', '1').lower() in ['1', 'true', 'yes', 'y'])
 
-
 # || -------------------------------- LOGS --------------------------------- ||
 
-cwd = Path.cwd()
-dir_name = os.path.dirname(sys.argv[0]).replace(str(cwd), '').lstrip('/')
-SCRIPT_PATH = (cwd / dir_name).resolve()
 LOGS_PATH = ROOT_PATH / 'logs' / SCRIPT_PATH.relative_to(ROOT_PATH) / Path(sys.argv[0]).stem
 LOG_LEVEL = os.getenv('LOG_LEVEL', 'INFO')
 WRITE_LOG_FILES = os.getenv('WRITE_LOG_FILES', False)
