@@ -1,4 +1,4 @@
-from typing import Optional, Tuple, Union
+from typing import List, Optional, Tuple, Union
 
 import numpy as np
 import torch
@@ -78,6 +78,18 @@ def line_intersection(
     y = (-a1 * c2 + a2 * c1) / det
 
     return torch.stack([x, y])
+
+
+def is_point_in_bounds(p: torch.Tensor, bounds: List[torch.Tensor], eps: float = 1e-6) -> bool:
+    """
+    Check if point p lies within the bounds defined by bounds.
+    """
+    min_x = min([b[0].item() for b in bounds])
+    max_x = max([b[0].item() for b in bounds])
+    min_y = min([b[1].item() for b in bounds])
+    max_y = max([b[1].item() for b in bounds])
+    return (min_x - eps <= p[0] <= max_x + eps) \
+        and (min_y - eps <= p[1] <= max_y + eps)
 
 
 def geodesic_distance(R1: torch.Tensor, R2: torch.Tensor, EPS: float = 1e-4) -> torch.Tensor:

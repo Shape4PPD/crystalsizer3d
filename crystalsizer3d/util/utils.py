@@ -78,7 +78,12 @@ def to_uint8(arr: np.ndarray) -> np.ndarray:
     return uint8_array
 
 
-def init_tensor(tensor: Union[torch.Tensor, np.ndarray, List[float], float, int], dtype=torch.float32) -> torch.Tensor:
+def init_tensor(
+        tensor: Union[torch.Tensor,
+        np.ndarray, List[float], float, int],
+        dtype: torch.dtype = torch.float32,
+        device: Optional[torch.device] = None
+) -> torch.Tensor:
     """
     Create a clone of a tensor or numpy array.
     """
@@ -86,7 +91,10 @@ def init_tensor(tensor: Union[torch.Tensor, np.ndarray, List[float], float, int]
         tensor = torch.from_numpy(tensor)
     if isinstance(tensor, list) or isinstance(tensor, float) or isinstance(tensor, int):
         tensor = torch.tensor(tensor)
-    return tensor.to(dtype).detach().clone()
+    tensor = tensor.to(dtype).detach().clone()
+    if device is not None:
+        tensor = tensor.to(device)
+    return tensor
 
 
 class NumpyCompatibleJSONEncoder(JSONEncoder):

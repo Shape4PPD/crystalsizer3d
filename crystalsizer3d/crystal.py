@@ -75,6 +75,8 @@ class Crystal(nn.Module):
 
         # The angles alpha, beta, gamma within the unit cell
         assert len(lattice_angles) == 3, 'Lattice angles must be a list of 3 floats'
+        if not all(0 < a < np.pi for a in lattice_angles):
+            lattice_angles = [np.deg2rad(a) for a in lattice_angles]
         self.lattice_angles = lattice_angles
 
         # Miller indices should be a list of tuples
@@ -258,7 +260,7 @@ class Crystal(nn.Module):
         Calculate the reciprocal lattice vectors.
         """
         a, b, c = self.lattice_unit_cell
-        alpha, beta, gamma = np.radians(self.lattice_angles)
+        alpha, beta, gamma = self.lattice_angles
 
         # Calculate volume of the unit cell
         volume = (a * b * c
