@@ -4,7 +4,6 @@ import drjit as dr
 import mitsuba as mi
 import numpy as np
 import torch
-from pytorch3d.utils import ico_sphere
 from torch import nn
 
 from crystalsizer3d import MI_CPU_VARIANT, USE_CUDA
@@ -23,6 +22,7 @@ def load_ico_sphere(level: int = 0):
     """
     Load an icosphere from the cache, generating it if necessary.
     """
+    from pytorch3d.utils import ico_sphere
     if level not in ico_sphere_cache:
         ico_sphere_cache[level] = ico_sphere(level=level)
     return ico_sphere_cache[level].clone()
