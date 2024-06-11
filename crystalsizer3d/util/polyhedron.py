@@ -48,8 +48,7 @@ def calculate_polyhedral_vertices(
     is_interior = torch.all(T <= d[:, None] + tol, dim=2)
 
     # Save the farthest distances for each plane
-    batch_indices = torch.arange(bs, device=device)[:, None]
-    farthest_dists = intersection_points[batch_indices, T.argmax(dim=1)].norm(dim=-1)
+    farthest_dists = T.amax(dim=1)
 
     # Pad the vertices so that all batch entries have the same number of vertices
     vertices = []
