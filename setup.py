@@ -30,7 +30,6 @@ setup(
         'python-dotenv >= 1.0, < 1.1',
         'python-fcl >= 0.7, < 0.8',
         'pytorch-minimize >= 0.0.2, < 0.1',
-        'pytorch3d >= 0.7.5, < 0.8',
         'pyyaml >= 6.0, < 6.1',
         'rtree >= 1.2, < 1.3',
         'shapely >= 2.0, < 2.1',
