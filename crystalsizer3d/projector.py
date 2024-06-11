@@ -109,7 +109,7 @@ class Projector:
         self.colour_facing_away = init_tensor(colour_facing_away, device=self.device)
 
         # Create blank canvas image
-        self.canvas_image = torch.ones(3, *image_size, device=self.device)
+        self.canvas_image = torch.zeros(3, *image_size, device=self.device)
 
         # Set the image boundary lines
         h, w = image_size
