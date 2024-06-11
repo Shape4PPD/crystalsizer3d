@@ -16,6 +16,7 @@ setup(
         'ffmpeg-python >= 0.2, < 0.3',
         'gigagan-pytorch >= 0.2, < 0.3',
         'gpytoolbox >= 0.2, < 0.3',
+        'kornia >= 0.7, < 0.8',
         'manifold3d >= 2.4, < 2.5',
         'matplotlib >= 3.8, < 3.9',
         'mayavi >= 4.8, < 4.9',

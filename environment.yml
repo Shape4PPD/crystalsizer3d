@@ -15,25 +15,26 @@ dependencies:
   - numpy = 1.26
   - pillow = 9.5
   - python-dotenv = 1.0
-  - pytorch = 2.1
+  - pytorch = 2.3
   - pytorch3d = 0.7
   - pyyaml = 6.0
   - rtree = 1.2
   - shapely = 2.0
   - tensorboard = 2.15
   - timm = 0.9
-  - torchvision = 0.16
+  - torchvision = 0.18
   - trimesh = 4.1
   - pip
   - pip:
     - cholespy == >= 1.0, < 1.1
     - gigagan-pytorch >= 0.2, < 0.3
     - gpytoolbox >= 0.2, < 0.3
+    - kornia >= 0.7, < 0.8
     - manifold3d >= 2.4, < 2.5
     - mitsuba >= 3.5, < 3.6
     - opencv-python >= 4.9, < 5.0
     - parti-pytorch >= 0.2, < 0.3
     - pyfastnoisesimd >= 0.4, < 0.5
-    - pymatgen >= 2024.5, < 2024.6
+    - pymatgen >= 2024.8, < 2024.9
     - python-fcl >= 0.7, < 0.8
     - pytorch-minimize >= 0.0.2, < 0.1
