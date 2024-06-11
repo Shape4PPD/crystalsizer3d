@@ -66,9 +66,10 @@ class Projector:
             self,
             crystal: Crystal,
             image_size: Tuple[int, int] = (1000, 1000),
-            camera_axis: List[int] = [0, 0, 1],
+            camera_axis: List[int] = [0, 0, -1],
             zoom: float = 1.,
             background_image: np.ndarray = None,
+            external_ior: float = 1.333,  # water
             colour_facing_towards: List[float] = [1, 0, 0],
             colour_facing_away: List[float] = [0, 0, 1]
     ):
@@ -77,6 +78,7 @@ class Projector:
         """
         self.crystal = crystal
         self.device = crystal.origin.device
+        self.external_ior = external_ior
 
         # Set image size and aspect ratio
         self.image_size = image_size
@@ -195,9 +197,10 @@ class Projector:
         Refract the crystal vertices in the plane given by the normal and the distance.
         """
         # Calculate the (negative) unit vector of the refracted direction
-        eta = 1 / self.crystal.material_ior
+        eta = self.external_ior / self.crystal.material_ior
         cross = torch.cross(-normal, self.view_axis, dim=-1)
-        direction = normal * torch.sqrt(1 - eta**2 * cross.norm()) - eta * torch.cross(normal, cross)
+        direction = normal * torch.sqrt(1 - eta**2 * cross.norm()**2) \
+                    - eta * torch.cross(normal, cross, dim=-1)
 
         # Calculate the refracted vertices
         points = self.vertices
@@ -258,7 +261,7 @@ class Projector:
             image = image[0]  # Remove batch dimension
 
         def in_frame(p):
-            return 0 <= p[0] < w and 0 <= p[1] < h
+            return 1 <= p[0] < w - 1 and 1 <= p[1] < h - 1
 
         # Refract the vertices in every face
         for face, normal in zip(self.faces, self.face_normals):
