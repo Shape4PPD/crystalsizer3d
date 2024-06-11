@@ -196,7 +196,7 @@ class Projector:
         """
         # Calculate the (negative) unit vector of the refracted direction
         eta = 1 / self.crystal.material_ior
-        cross = torch.cross(-normal, self.view_axis)
+        cross = torch.cross(-normal, self.view_axis, dim=-1)
         direction = normal * torch.sqrt(1 - eta**2 * cross.norm()) - eta * torch.cross(normal, cross)
 
         # Calculate the refracted vertices
