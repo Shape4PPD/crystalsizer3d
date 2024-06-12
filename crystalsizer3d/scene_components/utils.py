@@ -107,20 +107,3 @@ def get_projection_components(mi_scene: mi.Scene) -> Tuple[torch.Tensor, int]:
         projection_components_cache[mi_scene.ptr] = (torch.tensor((prj @ wti).matrix)[0], film.crop_size())
 
     return projection_components_cache[mi_scene.ptr]
-
-
-def render_crystal_scene(
-        crystal: Optional[Crystal] = None,
-        scene: Optional['Scene'] = None,
-        **kwargs
-) -> np.ndarray:
-    """
-    Render a crystal scene.
-    """
-    from crystalsizer3d.scene_components.scene import Scene
-    assert not (crystal is None and scene is None), 'Either a crystal or scene must be provided.'
-    assert not (crystal is not None and scene is not None), 'Only one of a crystal or scene can be provided.'
-    if crystal is not None:
-        scene = Scene(crystal=crystal, **kwargs)
-    img = scene.render()
-    return img

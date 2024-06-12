@@ -74,10 +74,6 @@ class DatasetSyntheticArgs(BaseArgs):
             crystal_area_min: float = 0.05,
             crystal_area_max: float = 0.5,
             centre_crystals: bool = False,
-            crystal_min_x: float = -10.,
-            crystal_max_x: float = 10.,
-            crystal_min_y: float = -10.,
-            crystal_max_y: float = 10.,
 
             # Crystal material properties
             min_ior: float = 1.1,
@@ -96,10 +92,6 @@ class DatasetSyntheticArgs(BaseArgs):
             # Bubble properties
             min_bubbles: int = 0,
             max_bubbles: int = 0,
-            bubbles_min_x: float = -25.,
-            bubbles_max_x: float = 25.,
-            bubbles_min_y: float = -25.,
-            bubbles_max_y: float = 25.,
             bubbles_min_scale: float = 0.01,
             bubbles_max_scale: float = 0.4,
             bubbles_min_roughness: float = 0.05,
@@ -195,10 +187,6 @@ class DatasetSyntheticArgs(BaseArgs):
         assert crystal_area_max > crystal_area_min, f'Maximum area must be greater than minimum area. {crystal_area_max} received.'
         assert crystal_area_max < 1, f'Maximum area must be less than 1. {crystal_area_max} received.'
         self.crystal_area_max = crystal_area_max
-        self.crystal_min_x = crystal_min_x
-        self.crystal_max_x = crystal_max_x
-        self.crystal_min_y = crystal_min_y
-        self.crystal_max_y = crystal_max_y
 
         # Crystal material properties
         self.min_ior = min_ior
@@ -217,10 +205,6 @@ class DatasetSyntheticArgs(BaseArgs):
         # Bubble properties
         self.min_bubbles = min_bubbles
         self.max_bubbles = max_bubbles
-        self.bubbles_min_x = bubbles_min_x
-        self.bubbles_max_x = bubbles_max_x
-        self.bubbles_min_y = bubbles_min_y
-        self.bubbles_max_y = bubbles_max_y
         self.bubbles_min_scale = bubbles_min_scale
         self.bubbles_max_scale = bubbles_max_scale
         self.bubbles_min_roughness = bubbles_min_roughness
@@ -349,14 +333,6 @@ class DatasetSyntheticArgs(BaseArgs):
                            help='Minimum area of the image covered by the crystal.')
         group.add_argument('--crystal-area-max', type=float, default=0.3,
                            help='Maximum area of the image covered by the crystal.')
-        group.add_argument('--crystal-min-x', type=float, default=-5.0,
-                           help='Minimum x-coordinate of the crystal origin.')
-        group.add_argument('--crystal-max-x', type=float, default=5.0,
-                           help='Maximum x-coordinate of the crystal origin.')
-        group.add_argument('--crystal-min-y', type=float, default=-5.0,
-                           help='Minimum y-coordinate of the crystal origin.')
-        group.add_argument('--crystal-max-y', type=float, default=5.0,
-                           help='Maximum y-coordinate of the crystal origin.')
 
         # Crystal material properties
         group.add_argument('--min-ior', type=float, default=1.0,
@@ -387,14 +363,6 @@ class DatasetSyntheticArgs(BaseArgs):
                            help='Minimum number of bubbles.')
         group.add_argument('--max-bubbles', type=int, default=10,
                            help='Maximum number of bubbles.')
-        group.add_argument('--bubbles-min-x', type=float, default=-25.,
-                           help='Minimum x-coordinate of the bubble origin.')
-        group.add_argument('--bubbles-max-x', type=float, default=25.,
-                           help='Maximum x-coordinate of the bubble origin.')
-        group.add_argument('--bubbles-min-y', type=float, default=-25.,
-                           help='Minimum y-coordinate of the bubble origin.')
-        group.add_argument('--bubbles-max-y', type=float, default=25.,
-                           help='Maximum y-coordinate of the bubble origin.')
         group.add_argument('--bubbles-min-scale', type=float, default=0.01,
                            help='Minimum scale of the bubble.')
         group.add_argument('--bubbles-max-scale', type=float, default=0.4,

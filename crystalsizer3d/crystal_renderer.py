@@ -301,17 +301,9 @@ def _render_batch(
                     min_area=da.crystal_area_min,
                     max_area=da.crystal_area_max,
                     centre_crystal=da.centre_crystals,
-                    min_x=da.crystal_min_x,
-                    max_x=da.crystal_max_x,
-                    min_y=da.crystal_min_y,
-                    max_y=da.crystal_max_y,
                     rebuild_scene=False,
                 )
                 scene.place_bubbles(
-                    min_x=da.bubbles_min_x,
-                    max_x=da.bubbles_max_x,
-                    min_y=da.bubbles_min_y,
-                    max_y=da.bubbles_max_y,
                     min_scale=da.bubbles_min_scale,
                     max_scale=da.bubbles_max_scale,
                     rebuild_scene=False,
