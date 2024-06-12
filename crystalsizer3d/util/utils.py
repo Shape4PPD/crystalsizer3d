@@ -32,6 +32,10 @@ def set_seed(seed: Optional[int] = None):
     SEED = seed
 
 
+def get_seed() -> int:
+    return SEED
+
+
 def to_numpy(t: torch.Tensor) -> np.ndarray:
     """Converts a torch tensor to a numpy array."""
     return t.detach().cpu().numpy()

@@ -1,3 +1,5 @@
+from typing import Optional
+
 import cv2
 import numpy as np
 import pyfastnoisesimd as fns
@@ -6,7 +8,7 @@ from torch.nn.functional import interpolate
 
 from crystalsizer3d.crystal import Crystal
 from crystalsizer3d.util.geometry import line_equation_coefficients, line_intersection, normalise
-from crystalsizer3d.util.utils import SEED, is_power_of_two, to_dict, to_numpy
+from crystalsizer3d.util.utils import get_seed, is_power_of_two, to_dict, to_numpy
 
 
 class NoiseTexture:
@@ -20,7 +22,7 @@ class NoiseTexture:
             max_amplitude: float = 1.0,
             zero_centred: bool = False,
             shift: float = 0.0,
-            seed: int = SEED
+            seed: Optional[int] = None
     ):
         self.dim = dim
         self.channels = channels
@@ -30,6 +32,8 @@ class NoiseTexture:
         self.max_amplitude = max_amplitude
         self.zero_centred = zero_centred
         self.shift = shift
+        if seed is None:
+            seed = get_seed()
         self.seed = seed
 
     def build(self, device: torch.device = torch.device('cpu')) -> torch.Tensor:
@@ -61,7 +65,7 @@ class NormalMapNoiseTexture(NoiseTexture):
             perlin_octaves: int = 5,
             white_noise_scale: float = 0.1,
             max_amplitude: float = 0.5,
-            seed: int = SEED
+            seed: Optional[int] = None
     ):
         super().__init__(
             dim=dim,
@@ -105,12 +109,14 @@ def generate_noise_map(
         white_noise_scale: float = 0.2,
         max_amplitude: float = 1.0,
         zero_centred: bool = False,
-        seed: int = SEED,
+        seed: Optional[int] = None,
         device: torch.device = torch.device('cpu')
 ) -> torch.Tensor:
     """
     Generate a composite noise map.
     """
+    if seed is None:
+        seed = get_seed()
     args = dict(
         dim=dim,
         perlin_freq=perlin_freq,
@@ -283,12 +289,14 @@ def generate_surface_normalmap(
         perlin_octaves: int = 5,
         white_noise_scale: float = 0.1,
         max_amplitude: float = 0.5,
-        seed: int = SEED,
+        seed: Optional[int] = None,
         device=torch.device('cpu')
 ) -> torch.Tensor:
     """
     Generate a randomised surface normal map.
     """
+    if seed is None:
+        seed = get_seed()
     spherical_angles = []
     for i in range(2):
         theta_phi = generate_noise_map(
