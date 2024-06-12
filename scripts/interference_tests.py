@@ -11,7 +11,7 @@ from crystalsizer3d.csd_proxy import CSDProxy
 from crystalsizer3d.scene_components.bubble import make_bubbles
 from crystalsizer3d.scene_components.textures import NoiseTexture, NormalMapNoiseTexture, generate_crystal_bumpmap, \
     generate_noise_map
-from crystalsizer3d.util.utils import to_numpy
+from crystalsizer3d.util.utils import set_seed, to_numpy
 
 if USE_CUDA:
     device = torch.device('cuda')
@@ -27,6 +27,7 @@ def _generate_crystal(
         scale: float = 10.,
         origin: List[float] = [0, 0, 20],
         rotvec: List[float] = [0, 0, 0],
+        align_to_floor: bool = True
 ) -> Crystal:
     """
     Generate a beta-form LGA crystal.
@@ -51,13 +52,14 @@ def _generate_crystal(
     )
     crystal.to(device)
 
+    if align_to_floor:
+        crystal.origin.data[2] -= crystal.vertices[:, 2].min()
+
     # Rebuild the mesh
     crystal.build_mesh()
     # v2, f2 = crystal.build_mesh()
     # mesh = Trimesh(vertices=to_numpy(v2), faces=to_numpy(f2))
-    # mesh_uv = mesh.unwrap()
-    # mesh2.show()
-    # exit()
+    # mesh.show()
 
     return crystal
 
@@ -82,22 +84,17 @@ def plot_scene():
     """
     Plot the scene with some interference patterns.
     """
+    set_seed(10)
     spp = 2**9
 
     # Bubble parameters
-    n_bubbles = 0
-    bubbles_min_x = -20
-    bubbles_max_x = 20
-    bubbles_min_y = -20
-    bubbles_max_y = 20
-    bubbles_min_z = 0
-    bubbles_max_z = 20
+    n_bubbles = 50
     bubbles_min_scale = 0.001
-    bubbles_max_scale = 1
+    bubbles_max_scale = 0.1
     bubbles_min_roughness = 0.05
     bubbles_max_roughness = 0.2
-    bubbles_min_ior = 1.1
-    bubbles_max_ior = 1.8
+    bubbles_min_ior = 1.3
+    bubbles_max_ior = 2.3
 
     # Bumpmap defects
     n_defects = 5
@@ -108,21 +105,33 @@ def plot_scene():
     # Create the crystal
     crystal = _generate_crystal(
         distances=[1.0, 0.5, 0.2],
-        scale=10,
-        origin=[0, 0, 20],
-        rotvec=[np.pi / 5, 0, np.pi / 4],
+        scale=1,
+        origin=[0, 0, 0],
+        rotvec=[-np.pi / 2, 0, np.pi / 2],
     )
+
+    # Cuboid test
+    # crystal = Crystal(
+    #     lattice_unit_cell=[1, 1, 1],
+    #     lattice_angles=[90, 90, 90],
+    #     miller_indices=[(1, 0, 0), (0, 1, 0), (0, 0, 1)],
+    #     point_group_symbol='222',
+    #     scale=5,
+    #     origin=[0, 0, 1],
+    #     distances=[1., 1., 0.1],
+    #     rotation=[0, 0.4, 0.5],
+    #     material_roughness=0.05,
+    #     material_ior=2
+    # )
+    # crystal.origin.data[2] -= crystal.vertices[:, 2].min()
+    # crystal.build_mesh()
+    # crystal.to(device)
+    # print(crystal.vertices)
 
     # Create some bubbles
     if n_bubbles > 0:
         bubbles = make_bubbles(
             n_bubbles=n_bubbles,
-            min_x=bubbles_min_x,
-            max_x=bubbles_max_x,
-            min_y=bubbles_min_y,
-            max_y=bubbles_max_y,
-            min_z=bubbles_min_z,
-            max_z=bubbles_max_z,
             min_scale=bubbles_min_scale,
             max_scale=bubbles_max_scale,
             min_roughness=bubbles_min_roughness,
@@ -150,7 +159,7 @@ def plot_scene():
         perlin_octaves=5,
         white_noise_scale=0.1,
         max_amplitude=0.5,
-        seed=0
+        # max_amplitude=10
     )
 
     # Generate a light radiance texture
@@ -162,8 +171,7 @@ def plot_scene():
         white_noise_scale=0.2,
         max_amplitude=0.5,
         zero_centred=True,
-        shift=1,
-        seed=0,
+        shift=1
     )
 
     # Render the scene
@@ -171,17 +179,53 @@ def plot_scene():
         crystal=crystal,
         bubbles=bubbles,
         spp=spp,
+        remesh_max_edge=None,
+        # remesh_max_edge=0.05,
+
+        camera_distance=32.,
+        focus_distance=30.,
+        # focal_length=29.27,
+        camera_fov=10.2,
+        aperture_radius=0.3,
+
+        light_z_position=-5.1,
+        light_scale=10.,
         light_radiance=(0.6, 0.5, 0.3),
+
+        cell_z_positions=[-5, 0., 5., 10.],
+        cell_surface_scale=5.7 / 2,
+        cell_render_blanks=False,
+
         light_st_texture=light_radiance_texture,
         cell_bumpmap=cell_bumpmap
     )
+    # scene.place_crystal(
+    #     min_area=0.1,
+    #     max_area=0.3,
+    #     centre_crystal=False,
+    # )
+    print(crystal.vertices)
+    scene.place_bubbles(
+        min_scale=bubbles_min_scale,
+        max_scale=bubbles_max_scale
+    )
     image = scene.render()
 
-    # Plot it
+    # Plot just the rendered image
+    fig, ax = plt.subplots(figsize=(10, 10))
+    ax.imshow(image)
+    ax.axis('off')
+    fig.tight_layout()
+    if save_plots:
+        LOGS_PATH.mkdir(parents=True, exist_ok=True)
+        plt.savefig(LOGS_PATH / f'{START_TIMESTAMP}_bubbles={n_bubbles}_defects={n_defects}_spp={spp}.png')
+    if show_plots:
+        plt.show()
+
+    # Plot all the components
     fig, axes = plt.subplots(2, 2, figsize=(10, 10))
     ax = axes[0, 0]
     ax.imshow(image)
-    ax.axis('off')
 
     ax = axes[0, 1]
     ax.set_title('Crystal bumpmap')
@@ -198,10 +242,9 @@ def plot_scene():
     ax.axis('off')
 
     fig.tight_layout()
-
     if save_plots:
         LOGS_PATH.mkdir(parents=True, exist_ok=True)
-        plt.savefig(LOGS_PATH / f'{START_TIMESTAMP}_bubbles={n_bubbles}_defects={n_defects}_spp={spp}.png')
+        plt.savefig(LOGS_PATH / f'{START_TIMESTAMP}_bubbles={n_bubbles}_defects={n_defects}_spp={spp}_components.png')
     if show_plots:
         plt.show()
 
