@@ -46,6 +46,7 @@ class Scene:
 
             spp: int = 256,
             res: int = 400,
+            remesh_max_edge: Optional[float] = None,
 
             integrator_max_depth: int = 64,
             integrator_rr_depth: int = 5,
@@ -81,6 +82,7 @@ class Scene:
         # Rendering settings
         self.spp = spp
         self.res = res
+        self.remesh_max_edge = remesh_max_edge
 
         # Integrator parameters
         self.integrator_max_depth = integrator_max_depth
@@ -120,6 +122,7 @@ class Scene:
         spec = {
             'spp': self.spp,
             'res': self.res,
+            'remesh_max_edge': self.remesh_max_edge,
 
             'integrator_max_depth': self.integrator_max_depth,
             'integrator_rr_depth': self.integrator_rr_depth,
@@ -314,6 +317,7 @@ class Scene:
                 material_bsdf=self.crystal_material_bsdf,
                 shape_name=self.SHAPE_NAME,
                 bsdf_key=self.BSDF_KEY,
+                remesh_max_edge=self.remesh_max_edge
             )
 
         # Add bubbles

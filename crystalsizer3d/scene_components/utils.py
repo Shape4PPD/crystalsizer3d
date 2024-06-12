@@ -2,10 +2,12 @@ from typing import Optional, Tuple
 
 import drjit as dr
 import mitsuba as mi
-import numpy as np
 import torch
+import trimesh.remesh
+from trimesh import Trimesh
 
 from crystalsizer3d.crystal import Crystal
+from crystalsizer3d.util.utils import to_numpy
 
 
 class RenderError(RuntimeError):
@@ -19,12 +21,20 @@ def build_crystal_mesh(
         material_bsdf: dict,
         shape_name: str = 'crystal',
         bsdf_key: str = 'crystal.bsdf',
+        remesh_max_edge: Optional[float] = None
 ) -> mi.Mesh:
     """
     Convert the Crystal object into a Mitsuba mesh.
     """
-    # Build the mesh in pytorch and convert the parameters to Mitsuba format
     vertices, faces = crystal.build_mesh()
+
+    # Remesh if required
+    if remesh_max_edge is not None:
+        m = Trimesh(vertices=to_numpy(vertices), faces=to_numpy(faces))
+        v2, f2 = trimesh.remesh.subdivide_to_size(m.vertices, m.faces, max_edge=remesh_max_edge)
+        vertices = torch.from_numpy(v2).to(torch.float32).to(vertices.device)
+        faces = torch.from_numpy(f2).to(vertices.device)
+
     nv, nf = len(vertices), len(faces)
     vertices = mi.TensorXf(vertices)
     faces = mi.TensorXi64(faces)
