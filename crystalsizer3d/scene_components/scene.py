@@ -14,7 +14,7 @@ from crystalsizer3d.scene_components.bubble import Bubble
 from crystalsizer3d.scene_components.textures import NoiseTexture, NormalMapNoiseTexture
 from crystalsizer3d.scene_components.utils import RenderError, build_crystal_mesh, project_to_image
 from crystalsizer3d.util.geometry import normalise
-from crystalsizer3d.util.utils import hash_data, init_tensor, to_numpy
+from crystalsizer3d.util.utils import hash_data, to_numpy
 
 if USE_CUDA:
     if 'cuda_ad_rgb' not in mi.variants():
@@ -336,10 +336,16 @@ class Scene:
         img = np.array(mi.util.convert_to_bitmap(img))
         return img
 
-    def get_xy_bounds(self, z: float = 0, verify: bool = True) -> Tuple[Tuple[float, float], Tuple[float, float]]:
+    def get_xy_bounds(
+            self,
+            z: float = 0,
+            z_precision: float = 1e-2,
+            verify: bool = True
+    ) -> Tuple[Tuple[float, float], Tuple[float, float]]:
         """
         Get the 3D x and y coordinates that map to the edges of the image at the given z position.
         """
+        z = round(z / z_precision) * z_precision
         if self.hash_id not in self.xy_bounds or z not in self.xy_bounds[self.hash_id]:
             pts = torch.tensor([[-1, -1, z], [1, 1, z]], device=device)
             uv_pts = project_to_image(self.mi_scene, pts)
@@ -421,7 +427,7 @@ class Scene:
             min_uv = uv_points.argmin(dim=0)
             max_uv = uv_points.argmax(dim=0)
             z = torch.cat([self.crystal.vertices[min_uv, 2], self.crystal.vertices[max_uv, 2]]).amax()
-            (min_x, max_x), (min_y, max_y) = self.get_xy_bounds(z=z)
+            (min_x, max_x), (min_y, max_y) = self.get_xy_bounds(z=z.item())
             min_x -= self.crystal.vertices[:, 0].min()
             max_x -= self.crystal.vertices[:, 0].max()
             min_y -= self.crystal.vertices[:, 1].min()
@@ -429,10 +435,7 @@ class Scene:
             self.crystal.origin.data[:2] = torch.tensor([
                 min_x + torch.rand(1) * (max_x - min_x),
                 min_y + torch.rand(1) * (max_y - min_y),
-                ])
-
-        # Put crystal back on the original device
-        self.crystal.to(device_og)
+            ])
 
         # Rebuild the scene with the new crystal position
         self.crystal.build_mesh()
@@ -441,6 +444,7 @@ class Scene:
         #             uv_points[:, 1].min() < 0 or uv_points[:, 1].max() > self.res or
         #             self.crystal.vertices[:, 2].min() < self.cell_z_positions[1] or
         #             self.crystal.vertices[:, 2].max() > self.cell_z_positions[2]), 'Crystal out of bounds!'
+        self.crystal.to(device_og)
         if rebuild_scene:
             self.build_mi_scene()
 
@@ -455,7 +459,7 @@ class Scene:
         assert torch.allclose(self.crystal.origin, torch.zeros(3))
         self.crystal.build_mesh(update_uv_map=False)
         scale_og = self.crystal.scale.clone().detach()
-        scale_new = scale_og.clone().detach()
+        scale_new = scale_og.clone().detach().clamp(min=1e-3)
         origin_new = self.crystal.origin.clone().detach()
         vertices_og = self.crystal.vertices.clone().detach()
         vertices_new = vertices_og.clone()
@@ -500,6 +504,7 @@ class Scene:
 
         def _loss(x):
             scale_new.data = torch.tensor(x[0], dtype=self.crystal.scale.dtype)
+            scale_new.clamp_(min=1e-3)
             _update_vertices()
             uv_points = project_to_image(self.mi_scene, vertices_new)
             projected_area = _projected_area(uv_points)
