@@ -282,8 +282,8 @@ class DatasetSyntheticArgs(BaseArgs):
                            help='Maximum noise amplitude.')
 
         # Growth cell parameters
-        group.add_argument('--cell-z-positions', type=float, nargs='+', default=[-10., 0., 50., 60.],
-                           help='Cell z-positions.')
+        group.add_argument('--cell-z-positions', type=lambda s: [float(item) for item in s.split(',')],
+                           default='-10.,0.,50.,60.', help='Cell z-positions.')
         group.add_argument('--cell-surface-scale', type=float, default=100.,
                            help='Cell surface scale.')
         group.add_argument('--cell-bumpmap-dim', type=int, default=1000,

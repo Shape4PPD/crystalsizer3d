@@ -346,11 +346,10 @@ class Scene:
             zoom = torch.abs(uv_pts[0] - uv_pts[1]) / self.res
             bounds = torch.tensor([[-1 / zoom[0], -1 / zoom[1], z], [1 / zoom[0], 1 / zoom[1], z]], device=device)
 
-            # To verify, check that the projected points are at the corners of the image
+            # To verify, check that the projected bound points appear at the corners of the image
             if verify:
-                uv_pts2 = project_to_image(self.mi_scene, bounds)  # these should appear at the corners of the image
-                assert torch.allclose(uv_pts2[0], init_tensor([0, self.res], device=device), atol=1e-3)
-                assert torch.allclose(uv_pts2[1], init_tensor([self.res, 0], device=device), atol=1e-3)
+                uv_pts2 = project_to_image(self.mi_scene, bounds)
+                assert torch.allclose(uv_pts2, torch.tensor([[0., self.res], [self.res, 0.]], device=device), atol=1e-3)
 
             min_x, max_x = bounds[0, 0].item(), bounds[1, 0].item()
             min_y, max_y = bounds[0, 1].item(), bounds[1, 1].item()
@@ -382,26 +381,13 @@ class Scene:
         assert self.crystal is not None, 'No crystal object provided.'
         device_og = self.crystal.origin.device
         self.crystal.to(torch.device('cpu'))
-        (min_x, max_x), (min_y, max_y) = self.get_xy_bounds(z=self.cell_z_positions[1])
+        self.crystal.origin.data.zero_()
 
-        # Keep trying to place the crystal until the projected area is close to the target
-        is_placed = False
+        # Keep rotating and scaling until the projected area is close to the target
+        is_scaled = False
         n_placement_attempts = 0
-        while not is_placed and n_placement_attempts < max_placement_attempts:
+        while not is_scaled and n_placement_attempts < max_placement_attempts:
             n_placement_attempts += 1
-
-            # Sample a target area for how much of the image should be covered by the crystal
-            target_area = np.random.uniform(min_area, max_area)
-
-            # Place the crystal
-            if centre_crystal:
-                self.crystal.origin.data.zero_()
-            else:
-                self.crystal.origin.data = torch.tensor([
-                    min_x + torch.rand(1) * (max_x - min_x),
-                    min_y + torch.rand(1) * (max_y - min_y),
-                    0
-                ])
 
             # Apply random rotation
             if self.crystal.rotation_mode == ROTATION_MODE_AXISANGLE:
@@ -409,15 +395,16 @@ class Scene:
             else:
                 self.crystal.rotation.data = normalise(torch.rand(4) * 2 * math.pi)
 
-            # Optimise the crystal placement
-            is_placed = self._optimise_crystal_placement(target_area, centre_crystal)
+            # Sample a target area for how much of the image should be covered by the crystal
+            target_area = np.random.uniform(min_area, max_area)
 
-        # Put crystal back on the original device
-        self.crystal.to(device_og)
+            # Optimise the crystal scaling to match the target area
+            is_scaled = self._optimise_crystal_scaling(target_area)
 
-        if not is_placed:
-            # Try again with a slightly smaller target area
+        # Try again with a slightly smaller target area
+        if not is_scaled:
             if min_area > 0.01:
+                self.crystal.to(device_og)
                 return self.place_crystal(
                     min_area=min_area - 0.01,
                     max_area=max_area - 0.01,
@@ -427,55 +414,63 @@ class Scene:
                 )
             raise RenderError('Failed to place crystal!')
 
+        # Place the crystal
+        if not centre_crystal:
+            self.crystal.build_mesh(update_uv_map=False)
+            uv_points = project_to_image(self.mi_scene, self.crystal.vertices)
+            min_uv = uv_points.argmin(dim=0)
+            max_uv = uv_points.argmax(dim=0)
+            z = torch.cat([self.crystal.vertices[min_uv, 2], self.crystal.vertices[max_uv, 2]]).amax()
+            (min_x, max_x), (min_y, max_y) = self.get_xy_bounds(z=z)
+            min_x -= self.crystal.vertices[:, 0].min()
+            max_x -= self.crystal.vertices[:, 0].max()
+            min_y -= self.crystal.vertices[:, 1].min()
+            max_y -= self.crystal.vertices[:, 1].max()
+            self.crystal.origin.data[:2] = torch.tensor([
+                min_x + torch.rand(1) * (max_x - min_x),
+                min_y + torch.rand(1) * (max_y - min_y),
+                ])
+
+        # Put crystal back on the original device
+        self.crystal.to(device_og)
+
         # Rebuild the scene with the new crystal position
         self.crystal.build_mesh()
+        # uv_points = project_to_image(self.mi_scene, self.crystal.vertices)
+        # assert not (uv_points[:, 0].min() < 0 or uv_points[:, 0].max() > self.res or
+        #             uv_points[:, 1].min() < 0 or uv_points[:, 1].max() > self.res or
+        #             self.crystal.vertices[:, 2].min() < self.cell_z_positions[1] or
+        #             self.crystal.vertices[:, 2].max() > self.cell_z_positions[2]), 'Crystal out of bounds!'
         if rebuild_scene:
             self.build_mi_scene()
 
-    def _optimise_crystal_placement(
+    def _optimise_crystal_scaling(
             self,
             target_area: float,
-            centre_crystal: bool = False,
             tol: float = 1e-3,
     ):
         """
-        Optimise the crystal placement.
+        Optimise the crystal scaling.
         """
-        cell_height = self.cell_z_positions[2] - self.cell_z_positions[1]
-        (min_x, max_x), (min_y, max_y) = self.get_xy_bounds(z=self.cell_z_positions[1])
+        assert torch.allclose(self.crystal.origin, torch.zeros(3))
         self.crystal.build_mesh(update_uv_map=False)
+        scale_og = self.crystal.scale.clone().detach()
+        scale_new = scale_og.clone().detach()
+        origin_new = self.crystal.origin.clone().detach()
         vertices_og = self.crystal.vertices.clone().detach()
         vertices_new = vertices_og.clone()
-        origin_og = self.crystal.origin.clone().detach()
-        origin_new = origin_og.clone()
-        scale_og = self.crystal.scale.clone().detach()
-        scale_new = scale_og.clone()
 
         def _update_vertices():
-            nonlocal vertices_new, origin_new
-            vertices_new = (vertices_og - origin_og) / scale_og * scale_new + origin_new
-
-            # Adjust so that the vertices are in the xy bounds
-            (v_min_x, v_min_y), (v_max_x, v_max_y) = vertices_new[:, :2].amin(dim=0), vertices_new[:, :2].amax(dim=0)
-            adj = torch.tensor([0, 0, self.cell_z_positions[1] - vertices_new[:, 2].min()])
-            if v_min_x < min_x:
-                adj[0] = min_x - v_min_x
-            if v_max_x > max_x:
-                adj[0] = max_x - v_max_x
-            if v_min_y < min_y:
-                adj[1] = min_y - v_min_y
-            if v_max_y > max_y:
-                adj[1] = max_y - v_max_y
-            vertices_new += adj[None, ...]
-            origin_new += adj
-            if centre_crystal:
-                origin_new[:2].zero_()
+            nonlocal vertices_new
+            vertices_new = vertices_og / scale_og * scale_new
+            z_adj = self.cell_z_positions[1] - vertices_new[:, 2].min()
+            vertices_new[:, 2] += z_adj
+            origin_new[2] = z_adj
 
         def _in_bounds(img_points):
-            z_min, z_max = vertices_new[:, 2].min(), vertices_new[:, 2].max()
             return not (img_points[:, 0].min() < 0 or img_points[:, 0].max() > self.res or
                         img_points[:, 1].min() < 0 or img_points[:, 1].max() > self.res or
-                        z_max - z_min > cell_height)
+                        vertices_new[:, 2].max() > self.cell_z_positions[2])
 
         def _projected_area(img_points):
             # Check the area of the convex hull of the projected points
@@ -485,7 +480,7 @@ class Scene:
             ch = ConvexHull(to_numpy(img_points))
             return ch.volume / self.res**2  # Note - volume not area (area is perimeter)
 
-        # Ensure the initial guess falls in the bounds by scaling and translating it until it must
+        # Ensure the initial guess falls in the bounds by scaling until it must
         oob = True
         n_fails = 0
         while oob:
@@ -495,22 +490,16 @@ class Scene:
                 oob = False
             else:
                 scale_new *= 0.9
-                origin_new[:2] *= 0.8
                 n_fails += 1
                 if n_fails > 100:
                     return False
         assert _in_bounds(uv_points)
 
-        # Set up parameters and bounds
-        if centre_crystal:
-            x0 = np.array([scale_new, ])
-        else:
-            x0 = np.array([scale_new, *origin_new[:2]])
+        # Set up parameters
+        x0 = np.array([scale_new, ])
 
         def _loss(x):
             scale_new.data = torch.tensor(x[0], dtype=self.crystal.scale.dtype)
-            if not centre_crystal:
-                origin_new.data[:2] = torch.tensor([x[1], x[2]], dtype=self.crystal.origin.dtype)
             _update_vertices()
             uv_points = project_to_image(self.mi_scene, vertices_new)
             projected_area = _projected_area(uv_points)
@@ -519,7 +508,7 @@ class Scene:
                 loss += 100
             return loss
 
-        # Find optimal placement
+        # Find optimal scaling
         res = minimize(
             _loss,
             x0=x0,
