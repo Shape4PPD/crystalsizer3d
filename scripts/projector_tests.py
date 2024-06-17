@@ -13,7 +13,22 @@ from crystalsizer3d.scene_components.scene import Scene
 from crystalsizer3d.scene_components.utils import project_to_image
 from crystalsizer3d.util.utils import init_tensor, to_numpy
 
+# device = torch.device('cpu')
+device = torch.device('cuda')
+
 TEST_CRYSTALS = {
+    'cube': {
+        'lattice_unit_cell': [1, 1, 1],
+        'lattice_angles': [np.pi / 2, np.pi / 2, np.pi / 2],
+        'miller_indices': [(1, 0, 0), (0, 1, 0), (0, 0, 1)],
+        'point_group_symbol': '222',
+        'scale': 1,
+        'origin': [0.5, 0, 0],
+        'distances': [1., 1., 1.],
+        'rotation': [0.2, -2.2, 0.2],
+        'material_ior': 1.8,
+        'material_roughness': 0.01
+    },
     'alpha': {
         'lattice_unit_cell': [7.068, 10.277, 8.755],
         'lattice_angles': [np.pi / 2, np.pi / 2, np.pi / 2],
@@ -45,7 +60,9 @@ TEST_CRYSTALS = {
                            [0, -1, 1], [0, -1, -1]],
         'distances': [1.0, 1.0, 1.8, 1.8, 1.8, 1.8, 1.8, 1.8, 1.8, 1.8, 2.0, 2.0, 2.0, 2.0, 1.8, 1.8],
         'point_group_symbol': '1',
-        'scale': 3,
+        'scale': 0.5,
+        'material_ior': 1.5,
+        'material_roughness': 0.001
         # 'origin': [-2.2178, -0.9920,  5.7441],
         # 'rotation': [0.6168,  0.3305, -0.4568],
     },
@@ -61,10 +78,12 @@ TEST_CRYSTALS = {
                       0.7356109023094177, 0.7443752884864807, 0.6985854506492615, 0.6237171292304993,
                       0.9178063273429871, 0.8962163925170898, 0.9747581481933594],
         'point_group_symbol': '1',
-        'scale': 12.155928582311665,
+        'scale': 1,
         # 'origin': [-2.8313868045806885, -0.6120783090591431, 18.232881367206573],
-        'rotation': [1.2772717475891113, 0.77781081199646, 1.0901552438735962],
-        'material_ior': 1.7,
+        # 'origin': [0, 0, 18.232881367206573],
+        # 'rotation': [1.2772717475891113, 0.77781081199646, 1.0901552438735962],
+        'rotation': [0, 0.1, 0.2],
+        'material_ior': 1.8,
         'material_roughness': 0.01
     },
     'beta': {
@@ -77,25 +96,12 @@ TEST_CRYSTALS = {
     },
 }
 
-# device = torch.device('cpu')
-device = torch.device('cuda')
-
 
 def cube_test():
     """
     A cube with distances of 1 between origin and each face should entirely fill the image.
     """
-    cube = Crystal(
-        lattice_unit_cell=[1, 1, 1],
-        lattice_angles=[90, 90, 90],
-        miller_indices=[(1, 0, 0), (0, 1, 0), (0, 0, 1)],
-        point_group_symbol='222',
-        origin=[0.5, 0, 0],
-        distances=[1., 1., 1.],
-        rotation=[0.2, -2.2, 0.2],
-        material_roughness=0.05,
-        material_ior=2
-    )
+    cube = Crystal(**TEST_CRYSTALS['cube'])
     cube.to(device)
     v, f = cube.build_mesh()
     m = Trimesh(vertices=to_numpy(v), faces=to_numpy(f))
@@ -114,44 +120,113 @@ def show_projected_image(which='alpha'):
     image_size = (1000, 1000)
     assert which in TEST_CRYSTALS
     crystal = Crystal(**TEST_CRYSTALS[which])
-    if which == 'alpha':
-        zoom = 0.1
-    elif which == 'alpha2' or which == 'alpha3':
-        zoom = 0.1
-    else:
+    if which == 'beta':
         zoom = 0.001
+    else:
+        zoom = 0.1
     crystal.to(device)
     # v, f = crystal.build_mesh()
     # m = Trimesh(vertices=to_numpy(v), faces=to_numpy(f))
     # m.show()
-    projector = Projector(crystal, image_size=image_size, zoom=zoom)
+    projector = Projector(crystal, external_ior=1., image_size=image_size, zoom=zoom, camera_axis=[0, 0, 1])
+    projector.image[:, projector.image.sum(dim=0) == 0] = 1
     plt.imshow(tensor_to_image(projector.image))
+    plt.show()
+
+
+def check_bounds():
+    res = 400
+    crystal = Crystal(**TEST_CRYSTALS['cube'])
+    crystal.origin.data[2] -= crystal.vertices[:, 2].min()
+    crystal.build_mesh()
+    crystal.to(device)
+    # print(crystal.vertices)
+
+    # Create and render a scene
+    scene = Scene(
+        crystal=crystal,
+        res=res,
+
+        camera_distance=32.,
+        focus_distance=30.,
+        # focal_length=29.27,
+        camera_fov=10.2,
+        aperture_radius=0.3,
+
+        light_z_position=-5.1,
+        light_scale=5.,
+
+        cell_z_positions=[-5, 0., 5., 10.],
+        cell_surface_scale=3,
+    )
+    img = scene.render()
+    img = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
+
+    # Check the scaling
+    for i in range(4):
+        z = scene.cell_z_positions[i]
+        _, (min_y, max_y) = scene.get_xy_bounds(z)
+        zoom = 2 / (max_y - min_y)
+        logger.info(f'Estimated zoom factor for z={z}: {zoom:.3f}')
+        pts = torch.tensor([[-1 / zoom, -1 / zoom, z], [1 / zoom, 1 / zoom, z]], device=device)
+        uv_pts = project_to_image(scene.mi_scene, pts)
+        assert torch.allclose(uv_pts[0], init_tensor([0, res], device=device), atol=1e-3)
+        assert torch.allclose(uv_pts[1], init_tensor([res, 0], device=device), atol=1e-3)
+
+    # Save the original image with projected overlay
+    projector = Projector(
+        crystal=crystal,
+        external_ior=1.333,
+        image_size=(res, res),
+        zoom=zoom,
+        background_image=img,
+        camera_axis=[0, 0, -1]
+    )
+    img_overlay = to_numpy(projector.image * 255).astype(np.uint8).squeeze().transpose(1, 2, 0)
+    fig, ax = plt.subplots(figsize=(8, 8))
+    ax.imshow(img_overlay)
+    # ax.imshow(img)
+    # uv_crystal = to_numpy(scene.get_crystal_image_coords())
+    # ax.scatter(uv_crystal[:, 0], uv_crystal[:, 1], marker='x', c='r', s=50)
+    # uv_pts = to_numpy(uv_pts)
+    # ax.scatter(uv_pts[:, 0], uv_pts[:, 1], marker='o', c='g', s=100)
+    # uv_pts2 = to_numpy(uv_pts2)
+    # ax.scatter(uv_pts2[:, 0], uv_pts2[:, 1], marker='o', c='purple', s=100)
+    fig.tight_layout()
     plt.show()
 
 
 def match_to_scene():
     res = 400
-    crystal = Crystal(**TEST_CRYSTALS['alpha4'])
+    crystal = Crystal(**TEST_CRYSTALS['alpha3'])
+    crystal.origin.data[2] -= crystal.vertices[:, 2].min()
+    crystal.build_mesh()
     crystal.to(device)
 
     # Create and render a scene
     scene = Scene(
         crystal=crystal,
         res=res,
-        camera_distance=10000,
-        camera_fov=0.2,
-        focus_distance=9990,
+
+        camera_distance=32.,
+        focus_distance=30.,
+        # focal_length=29.27,
+        camera_fov=10.2,
+        aperture_radius=0.3,
+
+        light_z_position=-5.1,
+        light_scale=5.,
+
+        cell_z_positions=[-5, 0., 5., 10.],
+        cell_surface_scale=3,
     )
     img = scene.render()
     img = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)  # todo: do we need this?
 
-    # Estimate the unit scale factor
-    z = crystal.vertices[:, 2].mean()
-    pts = torch.tensor([[0, -1, z], [0, 1, z]], device=device)
-    uv_pts = project_to_image(scene.mi_scene, pts)
-
-    # Use the y-axis for the scale factor as this is fixed to [-1, 1] in the projector
-    zoom = torch.abs(uv_pts[0, 1] - uv_pts[1, 1]) / res
+    # Get the unit scale factor
+    z = crystal.vertices[:, 2].mean().item()
+    _, (min_y, max_y) = scene.get_xy_bounds(z)
+    zoom = 2 / (max_y - min_y)
     logger.info(f'Estimated zoom factor: {zoom:.3f}')
     pts2 = torch.tensor([[0, 1 / zoom, z], [0, -1 / zoom, z]], device=device)
     uv_pts2 = project_to_image(scene.mi_scene, pts2)  # these should appear at the top and bottom of the image
@@ -159,18 +234,18 @@ def match_to_scene():
     # Save the original image with projected overlay
     projector = Projector(
         crystal=crystal,
-        external_ior=1.,
+        external_ior=1.333,
         image_size=(res, res),
         zoom=zoom,
-        background_image=img
+        background_image=img,
+        camera_axis=[0, 0, -1]
     )
     img_overlay = to_numpy(projector.image * 255).astype(np.uint8).squeeze().transpose(1, 2, 0)
     fig, ax = plt.subplots(figsize=(8, 8))
     ax.imshow(img_overlay)
+    ax.imshow(img)
     uv_crystal = to_numpy(scene.get_crystal_image_coords())
     ax.scatter(uv_crystal[:, 0], uv_crystal[:, 1], marker='x', c='r', s=50)
-    uv_pts = to_numpy(uv_pts)
-    ax.scatter(uv_pts[:, 0], uv_pts[:, 1], marker='o', c='g', s=100)
     uv_pts2 = to_numpy(uv_pts2)
     ax.scatter(uv_pts2[:, 0], uv_pts2[:, 1], marker='o', c='purple', s=100)
     fig.tight_layout()
