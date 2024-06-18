@@ -196,18 +196,22 @@ class Projector:
         """
         # Calculate the (negative) unit vector of the refracted direction
         eta = 1 / self.crystal.material_ior
-        cross = torch.cross(-normal, self.view_axis)
-        direction = normal * torch.sqrt(1 - eta**2 * cross.norm()) - eta * torch.cross(normal, cross)
 
         # Calculate the refracted vertices
         points = self.vertices
+        incident = self.view_axis/self.view_axis.norm()
+        theta_inc = -normal @ incident / normal.norm()
+        cos_theta_t = torch.sqrt(1 - (eta**2) * ( 1 - torch.cos(theta_inc)**2 ))
+        
+        T = eta*incident + ( eta*torch.cos(theta_inc) - cos_theta_t) * normal / normal.norm()
+        
         dot_product = points @ normal
 
         # Calculate the distance from each point to the plane
-        d = torch.abs(dot_product - distance) / torch.norm(normal)
-
-        # Add distance from plane
-        points = points + d[:, None] * direction
+        d = torch.abs(dot_product - distance*self.crystal.scale) / torch.norm(normal)
+        
+        # add distance to plane
+        points = points + (d[:, None] / cos_theta_t ) *T / T.norm()
 
         return points
 
