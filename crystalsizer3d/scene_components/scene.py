@@ -472,15 +472,19 @@ class Scene:
         #             uv_points[:, 1].min() < 0 or uv_points[:, 1].max() > self.res or
         #             self.crystal.vertices[:, 2].min() < self.cell_z_positions[1] or
         #             self.crystal.vertices[:, 2].max() > self.cell_z_positions[2]), 'Crystal out of bounds!'
-        self.crystal.to(device_og)
 
         # Update the crystal seed
         if self.crystal_seed is not None:
+            seed_device_og = self.crystal_seed.origin.device
+            self.crystal_seed.to(torch.device('cpu'))
             self.crystal_seed.scale.data *= self.crystal.scale
             self.crystal_seed.origin.data = self.crystal.origin + self.crystal_seed.origin.data * self.crystal.scale
             self.crystal_seed.rotation.data = self.crystal.rotation
             self.crystal_seed.build_mesh()
+            self.crystal_seed.to(seed_device_og)
 
+        # Rebuild the scene
+        self.crystal.to(device_og)
         if rebuild_scene:
             self.build_mi_scene()
 
@@ -669,5 +673,6 @@ class Scene:
         if self.crystal is not None:
             self.crystal.use_bumpmap = False
             self.crystal.bumpmap = None
+        self.crystal_seed = None
         self.bubbles = []
         self.build_mi_scene()
