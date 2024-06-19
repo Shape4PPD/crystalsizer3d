@@ -227,6 +227,7 @@ class Projector:
         """
         x_min, x_max = self.x_range
         y_max, y_min = self.y_range  # Flip the y-axis to match the image coordinates
+        # y_min, y_max = self.y_range
 
         x_scale = (x_max - x_min) / self.image_size[1]
         y_scale = (y_max - y_min) / self.image_size[0]

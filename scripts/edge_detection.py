@@ -5,6 +5,7 @@ import numpy as np
 import torch
 import yaml
 from PIL import Image
+from scipy.ndimage import distance_transform_edt
 from torchvision.transforms.functional import to_tensor
 
 from crystalsizer3d import LOGS_PATH, ROOT_PATH, START_TIMESTAMP, USE_CUDA, logger
@@ -105,12 +106,25 @@ def generate_edge_images():
     for i, feature_map in enumerate(feature_maps):
         feature_map = to_numpy(feature_map).squeeze()
         feature_map = (feature_map - feature_map.min()) / (feature_map.max() - feature_map.min())
-        feature_map = (feature_map * 255).astype(np.uint8)
         if i == len(feature_maps) - 1:
             name = 'fused'
         else:
             name = f'feature_map_{i + 1}'
-        Image.fromarray(feature_map).save(save_dir / f'{name}.png')
+        img = Image.fromarray((feature_map * 255).astype(np.uint8))
+        img.save(save_dir / f'{name}.png')
+
+        # Save the distance transform
+        # feature_map[feature_map < 0.2] = 0
+        img = img.resize((200, 200))
+        img = np.array(img).astype(np.float32)/255
+        img = (img - img.min()) / (img.max() - img.min())
+        thresh = 0.5
+        img[img < thresh] = 0
+        img[img >= thresh] = 1
+        dist = distance_transform_edt(1-img)  #, metric='taxicab')
+        dist = dist.astype(np.float32)
+        dist = (dist - dist.min()) / (dist.max() - dist.min())
+        Image.fromarray((dist * 255).astype(np.uint8)).save(save_dir / f'dists_{name}.png')
 
 
 if __name__ == '__main__':

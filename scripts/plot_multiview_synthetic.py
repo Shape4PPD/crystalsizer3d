@@ -28,7 +28,7 @@ else:
 from mitsuba import ScalarTransform4f as T
 
 # Off-screen rendering
-mlab.options.offscreen = True
+mlab.options.offscreen = False
 
 SHAPE_NAME = 'crystal'
 VERTEX_KEY = SHAPE_NAME + '.vertex_positions'
@@ -76,6 +76,31 @@ def get_args() -> Namespace:
 
     return args
 
+
+# def _generate_crystal(
+#         distances: List[float] = [1.0, 0.5, 0.2],
+#         origin: List[float] = [0, 0, 20],
+#         rotvec: List[float] = [0, 0, 0],
+# ) -> Crystal:
+#     """
+#     Generate a beta-form LGA crystal.
+#     """
+#     csd_proxy = CSDProxy()
+#     cs = csd_proxy.load('LGLUAC11')
+#     miller_indices = [(1, 0, 1), (0, 2, 1), (0, 1, 0)]
+#
+#     crystal = Crystal(
+#         lattice_unit_cell=cs.lattice_unit_cell,
+#         lattice_angles=cs.lattice_angles,
+#         miller_indices=miller_indices,
+#         point_group_symbol=cs.point_group_symbol,
+#         distances=distances,
+#         origin=origin,
+#         rotation=rotvec
+#     )
+#     crystal.to(device)
+#
+#     return crystal
 
 def _generate_crystal(
         distances: List[float] = [1.0, 0.5, 0.2],
@@ -224,8 +249,8 @@ def _plot_digital_crystal(
     # print(mlab.roll())
     # exit()
 
-    # mlab.show()
-    # exit()
+    mlab.show()
+    exit()
 
     # fig.scene.render()
     frame = mlab.screenshot(mode='rgba', antialiased=True, figure=fig)
@@ -282,7 +307,7 @@ def plot_views():
     _plot_digital_crystal(crystal, args, output_dir)
 
     # Make perspective renderings
-    _plot_perspectives(crystal, args, output_dir)
+    # _plot_perspectives(crystal, args, output_dir)
 
 
 if __name__ == '__main__':

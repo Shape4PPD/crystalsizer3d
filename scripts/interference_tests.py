@@ -171,39 +171,59 @@ def plot_scene():
         crystal=crystal,
         bubbles=bubbles,
         spp=spp,
+        remesh_max_edge=None,
+        # remesh_max_edge=0.05,
+
+        camera_distance=32.,
+        focus_distance=30.,
+        # focal_length=29.27,
+        camera_fov=10.2,
+        aperture_radius=0.3,
+
+        light_z_position=-5.1,
+        light_scale=8,
         light_radiance=(0.6, 0.5, 0.3),
         light_st_texture=light_radiance_texture,
         cell_bumpmap=cell_bumpmap
     )
     image = scene.render()
 
-    # Plot it
-    fig, axes = plt.subplots(2, 2, figsize=(10, 10))
-    ax = axes[0, 0]
+    # Plot just the rendered image
+    fig, ax = plt.subplots(figsize=(10, 10))
     ax.imshow(image)
     ax.axis('off')
-
-    ax = axes[0, 1]
-    ax.set_title('Crystal bumpmap')
-    ax.imshow(to_numpy(crystal.bumpmap - crystal.uv_mask.to(torch.float32)), cmap='gray')
-
-    ax = axes[1, 0]
-    ax.set_title('Cell bumpmap')
-    ax.imshow(to_numpy(cell_bumpmap.build()))
-    ax.axis('off')
-
-    ax = axes[1, 1]
-    ax.set_title('Light radiance texture')
-    ax.imshow(to_numpy(light_radiance_texture.build()))
-    ax.axis('off')
-
     fig.tight_layout()
-
     if save_plots:
         LOGS_PATH.mkdir(parents=True, exist_ok=True)
         plt.savefig(LOGS_PATH / f'{START_TIMESTAMP}_bubbles={n_bubbles}_defects={n_defects}_spp={spp}.png')
     if show_plots:
         plt.show()
+
+    # # Plot all the components
+    # fig, axes = plt.subplots(2, 2, figsize=(10, 10))
+    # ax = axes[0, 0]
+    # ax.imshow(image)
+    #
+    # ax = axes[0, 1]
+    # ax.set_title('Crystal bumpmap')
+    # ax.imshow(to_numpy(crystal.bumpmap - crystal.uv_mask.to(torch.float32)), cmap='gray')
+    #
+    # ax = axes[1, 0]
+    # ax.set_title('Cell bumpmap')
+    # ax.imshow(to_numpy(cell_bumpmap.build()))
+    # ax.axis('off')
+    #
+    # ax = axes[1, 1]
+    # ax.set_title('Light radiance texture')
+    # ax.imshow(to_numpy(light_radiance_texture.build()))
+    # ax.axis('off')
+    #
+    # fig.tight_layout()
+    # if save_plots:
+    #     LOGS_PATH.mkdir(parents=True, exist_ok=True)
+    #     plt.savefig(LOGS_PATH / f'{START_TIMESTAMP}_bubbles={n_bubbles}_defects={n_defects}_spp={spp}_components.png')
+    # if show_plots:
+    #     plt.show()
 
 
 if __name__ == '__main__':
