@@ -84,11 +84,11 @@ def plot_scene():
     """
     Plot the scene with some interference patterns.
     """
-    set_seed(10)
+    set_seed(1)
     spp = 2**9
 
     # Bubble parameters
-    n_bubbles = 50
+    n_bubbles = 10
     bubbles_min_scale = 0.001
     bubbles_max_scale = 0.1
     bubbles_min_roughness = 0.05
@@ -110,23 +110,30 @@ def plot_scene():
         rotvec=[-np.pi / 2, 0, np.pi / 2],
     )
 
-    # Cuboid test
-    # crystal = Crystal(
-    #     lattice_unit_cell=[1, 1, 1],
-    #     lattice_angles=[90, 90, 90],
-    #     miller_indices=[(1, 0, 0), (0, 1, 0), (0, 0, 1)],
-    #     point_group_symbol='222',
-    #     scale=5,
-    #     origin=[0, 0, 1],
-    #     distances=[1., 1., 0.1],
-    #     rotation=[0, 0.4, 0.5],
-    #     material_roughness=0.05,
-    #     material_ior=2
-    # )
-    # crystal.origin.data[2] -= crystal.vertices[:, 2].min()
-    # crystal.build_mesh()
-    # crystal.to(device)
-    # print(crystal.vertices)
+    # Generate a defect bumpmap
+    crystal.bumpmap.data = generate_crystal_bumpmap(
+        crystal=crystal,
+        n_defects=n_defects,
+        defect_min_width=defect_min_width,
+        defect_max_width=defect_max_width,
+        defect_max_z=defect_max_z,
+    )
+
+    # Create the crystal seed
+    crystal_seed = crystal.clone()
+    # crystal_seed.origin.data += torch.randn(3, device=device) * crystal.scale * 0.01
+    crystal_seed.origin.data = torch.randn(3, device=device) * 0.01
+    # crystal_seed.scale.data = crystal.scale * 0.4
+    crystal_seed.scale.data = torch.tensor(0.3, device=device)
+    seed_texture = NoiseTexture(
+        dim=crystal.bumpmap_dim,
+        perlin_freq=5.,
+        perlin_octaves=4,
+        white_noise_scale=0.001,
+        max_amplitude=0.4,
+    )
+    crystal_seed.bumpmap_texture = seed_texture
+    crystal_seed.bumpmap.data = seed_texture.build(device=device)
 
     # Create some bubbles
     if n_bubbles > 0:
@@ -142,15 +149,6 @@ def plot_scene():
         )
     else:
         bubbles = []
-
-    # Generate a defect bumpmap
-    crystal.bumpmap.data = generate_crystal_bumpmap(
-        crystal=crystal,
-        n_defects=n_defects,
-        defect_min_width=defect_min_width,
-        defect_max_width=defect_max_width,
-        defect_max_z=defect_max_z,
-    )
 
     # Generate a surface texture map
     cell_bumpmap = NormalMapNoiseTexture(
@@ -177,6 +175,7 @@ def plot_scene():
     # Render the scene
     scene = Scene(
         crystal=crystal,
+        crystal_seed=crystal_seed,
         bubbles=bubbles,
         spp=spp,
         remesh_max_edge=None,
@@ -189,7 +188,7 @@ def plot_scene():
         aperture_radius=0.3,
 
         light_z_position=-5.1,
-        light_scale=10.,
+        light_scale=8,
         light_radiance=(0.6, 0.5, 0.3),
 
         cell_z_positions=[-5, 0., 5., 10.],
@@ -199,11 +198,11 @@ def plot_scene():
         light_st_texture=light_radiance_texture,
         cell_bumpmap=cell_bumpmap
     )
-    # scene.place_crystal(
-    #     min_area=0.1,
-    #     max_area=0.3,
-    #     centre_crystal=False,
-    # )
+    scene.place_crystal(
+        min_area=0.1,
+        max_area=0.3,
+        centre_crystal=False,
+    )
     print(crystal.vertices)
     scene.place_bubbles(
         min_scale=bubbles_min_scale,

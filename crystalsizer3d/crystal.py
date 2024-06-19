@@ -11,6 +11,7 @@ from pymatgen.symmetry.groups import PointGroup
 from torch import nn
 
 from crystalsizer3d import logger
+from crystalsizer3d.scene_components.textures import NoiseTexture
 from crystalsizer3d.util.geometry import align_points_to_xy_plane, calculate_relative_angles, merge_vertices, normalise, \
     rotate_2d_points_to_square
 from crystalsizer3d.util.utils import init_tensor
@@ -33,6 +34,7 @@ class Crystal(nn.Module):
     mesh_vertices: torch.Tensor
     mesh_faces: torch.Tensor
     bumpmap: torch.Tensor
+    bumpmap_texture: NoiseTexture
     uv_mask: torch.Tensor
 
     def __init__(
@@ -54,6 +56,7 @@ class Crystal(nn.Module):
             use_bumpmap: bool = False,
             bumpmap_dim: int = 100,
             bumpmap: Optional[torch.Tensor] = None,
+            bumpmap_texture: Optional[NoiseTexture] = None,
 
             merge_vertices: bool = False,
             dtype: torch.dtype = torch.float32
@@ -132,9 +135,16 @@ class Crystal(nn.Module):
             if use_bumpmap:
                 logger.warning('Bumpmap dimension set to -1, disabling bumpmap')
             use_bumpmap = False
+            bumpmap_texture = None
             bumpmap_dim = 10
+        if bumpmap_texture is not None:
+            assert bumpmap_texture.dim == bumpmap_dim, 'Bumpmap texture dimension must match the provided dimension'
+        self.bumpmap_texture = bumpmap_texture
         if bumpmap is None:
-            bumpmap = torch.zeros(bumpmap_dim, bumpmap_dim)
+            if self.bumpmap_texture is not None:
+                bumpmap = self.bumpmap_texture.build()
+            else:
+                bumpmap = torch.zeros(bumpmap_dim, bumpmap_dim)
         self.bumpmap = nn.Parameter(init_tensor(bumpmap), requires_grad=True)
         self.bumpmap_dim = bumpmap_dim
         self.use_bumpmap = use_bumpmap
@@ -154,6 +164,36 @@ class Crystal(nn.Module):
         # Initialise the crystal
         with torch.no_grad():
             self._init()
+
+    def clone(self) -> 'Crystal':
+        """
+        Create a copy of the crystal.
+        """
+        crystal = Crystal(
+            lattice_unit_cell=self.lattice_unit_cell,
+            lattice_angles=self.lattice_angles,
+            miller_indices=self.miller_indices,
+            point_group_symbol=self.point_group_symbol,
+
+            scale=self.scale.item(),
+            distances=self.distances.tolist(),
+            origin=self.origin.tolist(),
+            rotation=self.rotation.tolist(),
+            rotation_mode=self.rotation_mode,
+
+            material_roughness=self.material_roughness.item(),
+            material_ior=self.material_ior.item(),
+
+            use_bumpmap=self.use_bumpmap,
+            bumpmap_dim=self.bumpmap_dim,
+            bumpmap=self.bumpmap.clone().cpu(),
+            bumpmap_texture=self.bumpmap_texture.clone() if self.bumpmap_texture is not None else None,
+
+            merge_vertices=self.merge_vertices,
+            dtype=self.dtype,
+        )
+        crystal.to(self.origin.device)
+        return crystal
 
     @classmethod
     def from_json(cls, path: Path):

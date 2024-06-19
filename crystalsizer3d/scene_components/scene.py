@@ -42,6 +42,7 @@ class Scene:
     def __init__(
             self,
             crystal: Optional[Crystal] = None,
+            crystal_seed: Optional[Crystal] = None,
             bubbles: Optional[List[Bubble]] = None,
 
             spp: int = 256,
@@ -75,6 +76,7 @@ class Scene:
         Create a scene with the given crystal and bubbles.
         """
         self.crystal = crystal
+        self.crystal_seed = crystal_seed
         if bubbles is None:
             bubbles = []
         self.bubbles = bubbles
@@ -157,6 +159,13 @@ class Scene:
                 'material_roughness': self.crystal.material_roughness.item(),
                 'material_ior': self.crystal.material_ior.item(),
                 'use_bumpmap': self.crystal.use_bumpmap,
+            }
+        if self.crystal_seed is not None:
+            spec['crystal_seed'] = {
+                'scale': self.crystal_seed.scale.item(),
+                'distances': self.crystal_seed.distances.tolist(),
+                'origin': self.crystal_seed.origin.tolist(),
+                'bumpmap_texture': self.crystal_seed.bumpmap_texture.to_dict()
             }
 
         if len(self.bubbles) > 0:
@@ -258,6 +267,14 @@ class Scene:
         }
 
     @property
+    def crystal_seed_material_bsdf(self) -> dict:
+        return {
+            'type': 'dielectric',
+            'int_ior': 'water',  # 1.333
+            'ext_ior': 'water',  # 1.333
+        }
+
+    @property
     def growth_cell_params(self) -> dict:
         cell = {}
         for i, z in enumerate(self.cell_z_positions):
@@ -317,6 +334,17 @@ class Scene:
                 material_bsdf=self.crystal_material_bsdf,
                 shape_name=self.SHAPE_NAME,
                 bsdf_key=self.BSDF_KEY,
+                remesh_max_edge=self.remesh_max_edge
+            )
+
+        # Add crystal seed
+        if self.crystal_seed is not None:
+            seed_name = self.SHAPE_NAME + '_seed'
+            scene_dict[seed_name] = build_crystal_mesh(
+                crystal=self.crystal_seed,
+                material_bsdf=self.crystal_seed_material_bsdf,
+                shape_name=seed_name,
+                bsdf_key=seed_name + '_seed',
                 remesh_max_edge=self.remesh_max_edge
             )
 
@@ -445,6 +473,14 @@ class Scene:
         #             self.crystal.vertices[:, 2].min() < self.cell_z_positions[1] or
         #             self.crystal.vertices[:, 2].max() > self.cell_z_positions[2]), 'Crystal out of bounds!'
         self.crystal.to(device_og)
+
+        # Update the crystal seed
+        if self.crystal_seed is not None:
+            self.crystal_seed.scale.data *= self.crystal.scale
+            self.crystal_seed.origin.data = self.crystal.origin + self.crystal_seed.origin.data * self.crystal.scale
+            self.crystal_seed.rotation.data = self.crystal.rotation
+            self.crystal_seed.build_mesh()
+
         if rebuild_scene:
             self.build_mi_scene()
 

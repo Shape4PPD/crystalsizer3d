@@ -1,4 +1,4 @@
-from typing import Optional
+from typing import Optional, TYPE_CHECKING
 
 import cv2
 import numpy as np
@@ -6,9 +6,11 @@ import pyfastnoisesimd as fns
 import torch
 from torch.nn.functional import interpolate
 
-from crystalsizer3d.crystal import Crystal
 from crystalsizer3d.util.geometry import line_equation_coefficients, line_intersection, normalise
 from crystalsizer3d.util.utils import get_seed, is_power_of_two, to_dict, to_numpy
+
+if TYPE_CHECKING:
+    from crystalsizer3d.crystal import Crystal
 
 
 class NoiseTexture:
@@ -35,6 +37,19 @@ class NoiseTexture:
         if seed is None:
             seed = get_seed()
         self.seed = seed
+
+    def clone(self) -> 'NoiseTexture':
+        return NoiseTexture(
+            dim=self.dim,
+            channels=self.channels,
+            perlin_freq=self.perlin_freq,
+            perlin_octaves=self.perlin_octaves,
+            white_noise_scale=self.white_noise_scale,
+            max_amplitude=self.max_amplitude,
+            zero_centred=self.zero_centred,
+            shift=self.shift,
+            seed=self.seed
+        )
 
     def build(self, device: torch.device = torch.device('cpu')) -> torch.Tensor:
         noise = generate_noise_map(
@@ -183,7 +198,7 @@ def generate_noise_map(
 
 
 def generate_crystal_bumpmap(
-        crystal: Crystal,
+        crystal: 'Crystal',
         n_defects: int,
         defect_min_width: float = 0.0001,
         defect_max_width: float = 0.001,
