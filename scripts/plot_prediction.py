@@ -19,6 +19,8 @@ from torchvision.transforms.functional import crop, to_tensor
 from crystalsizer3d import LOGS_PATH, START_TIMESTAMP, USE_CUDA, logger
 from crystalsizer3d.args.base_args import BaseArgs
 from crystalsizer3d.nn.manager import Manager
+from crystalsizer3d.projector import Projector
+from crystalsizer3d.scene_components.utils import project_to_image
 from crystalsizer3d.util.plots import make_3d_digital_crystal_image, make_error_image, plot_distances, plot_light, \
     plot_material, plot_transformation
 from crystalsizer3d.util.utils import print_args, to_dict, to_numpy
@@ -308,14 +310,38 @@ def plot_prediction(args: Optional[RuntimeArgs] = None):
 
     # Re-render with the rendering pipeline
     if Y_target is not None:
-        img_target2 = manager.crystal_renderer.render_from_parameters(r_params_target)
+        img_target2, scene_target = manager.crystal_renderer.render_from_parameters(r_params_target, return_scene=True)
         img_target2 = cv2.cvtColor(img_target2, cv2.COLOR_RGB2BGR)
         Image.fromarray(img_target2).save(save_dir / 'target_rerendered.png')
 
     # Render the predicted crystal
-    img_pred = manager.crystal_renderer.render_from_parameters(r_params_pred)
+    img_pred, scene_pred = manager.crystal_renderer.render_from_parameters(r_params_pred, return_scene=True)
     img_pred = cv2.cvtColor(img_pred, cv2.COLOR_RGB2BGR)
     Image.fromarray(img_pred).save(save_dir / 'predicted.png')
+
+    # Estimate the unit scale factor for orthographic projection
+    z = scene_pred.crystal.vertices[:, 2].mean()
+    pts = torch.tensor([[0, -1, z], [0, 1, z]], device=manager.device)
+    uv_pts = project_to_image(scene_pred.mi_scene, pts)
+    zoom = torch.abs(uv_pts[0, 1] - uv_pts[1, 1]) / scene_pred.res
+
+    # Project the wireframes onto the images
+    projector_args = dict(
+        crystal=scene_pred.crystal,
+        image_size=(img_pred.shape[1], img_pred.shape[0]),
+        zoom=zoom
+    )
+    projector = Projector(background_image=img_pred, **projector_args)
+    img_pred_overlay = to_numpy(projector.image * 255).astype(np.uint8).squeeze().transpose(1, 2, 0)
+    Image.fromarray(img_pred_overlay).save(save_dir / 'predicted_overlay_pred.png')
+    projector = Projector(background_image=img_target, **projector_args)
+    img_target_overlay_pred = to_numpy(projector.image * 255).astype(np.uint8).squeeze().transpose(1, 2, 0)
+    Image.fromarray(img_target_overlay_pred).save(save_dir / 'target_overlay_pred.png')
+    if Y_target is not None:
+        projector.crystal = scene_target.crystal
+        projector.project()
+        img_target_overlay_target = to_numpy(projector.image * 255).astype(np.uint8).squeeze().transpose(1, 2, 0)
+        Image.fromarray(img_target_overlay_target).save(save_dir / 'target_overlay_target.png')
 
     # Create error images
     img_l2 = make_error_image(img_target, img_pred, loss_type='l2')

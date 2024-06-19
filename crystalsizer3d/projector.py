@@ -66,9 +66,10 @@ class Projector:
             self,
             crystal: Crystal,
             image_size: Tuple[int, int] = (1000, 1000),
-            camera_axis: List[int] = [0, 0, 1],
+            camera_axis: List[int] = [0, 0, -1],
             zoom: float = 1.,
             background_image: np.ndarray = None,
+            external_ior: float = 1.333,  # water
             colour_facing_towards: List[float] = [1, 0, 0],
             colour_facing_away: List[float] = [0, 0, 1]
     ):
@@ -77,6 +78,7 @@ class Projector:
         """
         self.crystal = crystal
         self.device = crystal.origin.device
+        self.external_ior = external_ior
 
         # Set image size and aspect ratio
         self.image_size = image_size
@@ -194,24 +196,22 @@ class Projector:
         """
         Refract the crystal vertices in the plane given by the normal and the distance.
         """
-        # Calculate the (negative) unit vector of the refracted direction
-        eta = 1 / self.crystal.material_ior
+        eta = self.external_ior / self.crystal.material_ior
 
         # Calculate the refracted vertices
         points = self.vertices
-        incident = self.view_axis/self.view_axis.norm()
-        theta_inc = -normal @ incident / normal.norm()
-        cos_theta_t = torch.sqrt(1 - (eta**2) * ( 1 - torch.cos(theta_inc)**2 ))
-        
-        T = eta*incident + ( eta*torch.cos(theta_inc) - cos_theta_t) * normal / normal.norm()
-        
+        incident = self.view_axis / self.view_axis.norm()
+        n_norm = normal.norm()
+        cos_theta_inc = torch.cos(-normal @ incident / n_norm)
+        cos_theta_t = torch.sqrt(1 - (eta**2) * (1 - cos_theta_inc**2))
+        T = eta * incident + (eta * cos_theta_inc - cos_theta_t) * normal / n_norm
         dot_product = points @ normal
 
         # Calculate the distance from each point to the plane
-        d = torch.abs(dot_product - distance*self.crystal.scale) / torch.norm(normal)
-        
-        # add distance to plane
-        points = points + (d[:, None] / cos_theta_t ) *T / T.norm()
+        d = torch.abs(dot_product - distance * self.crystal.scale) / n_norm
+
+        # Add distance to plane
+        points = points + (d[:, None] / cos_theta_t) * T / T.norm()
 
         return points
 
@@ -227,7 +227,6 @@ class Projector:
         """
         x_min, x_max = self.x_range
         y_max, y_min = self.y_range  # Flip the y-axis to match the image coordinates
-        # y_min, y_max = self.y_range
 
         x_scale = (x_max - x_min) / self.image_size[1]
         y_scale = (y_max - y_min) / self.image_size[0]
@@ -263,7 +262,7 @@ class Projector:
             image = image[0]  # Remove batch dimension
 
         def in_frame(p):
-            return 0 <= p[0] < w and 0 <= p[1] < h
+            return 1 <= p[0] < w - 1 and 1 <= p[1] < h - 1
 
         # Refract the vertices in every face
         for face, normal in zip(self.faces, self.face_normals):

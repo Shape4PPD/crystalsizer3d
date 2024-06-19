@@ -7,11 +7,11 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 from kornia.geometry import axis_angle_to_rotation_matrix
-from pytorch3d.utils import ico_sphere
 from torch import nn
 from torchvision.transforms import GaussianBlur
 
 from crystalsizer3d import LOGS_PATH, START_TIMESTAMP, USE_CUDA, logger
+from crystalsizer3d.util.ico_sphere import ico_sphere
 from crystalsizer3d.util.utils import to_numpy
 
 if USE_CUDA:

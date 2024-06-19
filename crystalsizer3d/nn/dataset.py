@@ -225,7 +225,7 @@ class Dataset:
                         bumpmap_path = self.path / 'crystal_bumpmaps' / f'{row["image"][:-4]}.npz'
                         if self.ds_args.check_image_paths:
                             assert bumpmap_path.exists(), f'Bumpmap path does not exist: {bumpmap_path}'
-                        item['rendering_parameters']['bumpmap'] = bumpmap_path
+                        item['rendering_parameters']['crystal']['bumpmap'] = bumpmap_path
 
                 # Include the crystal vertices
                 if vertices is not None:
@@ -468,9 +468,10 @@ class Dataset:
             scale_og = r_params['crystal']['scale']
             origin_new = params['transformation'][:3]
             scale_new = params['transformation'][3]
-            vertices_og = np.array(item['vertices'])
-            vertices_new = (vertices_og - origin_og) / scale_og * scale_new + origin_new
-            params['vertices'] = vertices_new
+            if 'vertices' in item:
+                vertices_og = np.array(item['vertices'])
+                vertices_new = (vertices_og - origin_og) / scale_og * scale_new + origin_new
+                params['vertices'] = vertices_new
 
             # Include the face areas for the 3D loss
             params['face_areas'] = np.array([

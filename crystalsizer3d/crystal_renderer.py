@@ -27,7 +27,7 @@ from crystalsizer3d.scene_components.scene import Scene
 from crystalsizer3d.scene_components.textures import NoiseTexture, NormalMapNoiseTexture, generate_crystal_bumpmap
 from crystalsizer3d.scene_components.utils import RenderError
 from crystalsizer3d.util.geometry import merge_vertices
-from crystalsizer3d.util.utils import SEED, hash_data, to_numpy
+from crystalsizer3d.util.utils import get_seed, hash_data, to_numpy
 
 if USE_CUDA:
     if 'cuda_ad_rgb' not in mi.variants():
@@ -172,7 +172,7 @@ def _render_batch(
     Render a batch of crystals to images.
     """
     da = dataset_args
-    seed = SEED + batch_idx
+    seed = get_seed() + batch_idx
     worker_key = f'{worker_id}_{batch_idx:06d}'
     assert root_dir.exists(), f'Root dir does not exist! ({root_dir})'
 
@@ -301,17 +301,9 @@ def _render_batch(
                     min_area=da.crystal_area_min,
                     max_area=da.crystal_area_max,
                     centre_crystal=da.centre_crystals,
-                    min_x=da.crystal_min_x,
-                    max_x=da.crystal_max_x,
-                    min_y=da.crystal_min_y,
-                    max_y=da.crystal_max_y,
                     rebuild_scene=False,
                 )
                 scene.place_bubbles(
-                    min_x=da.bubbles_min_x,
-                    max_x=da.bubbles_max_x,
-                    min_y=da.bubbles_min_y,
-                    max_y=da.bubbles_max_y,
                     min_scale=da.bubbles_min_scale,
                     max_scale=da.bubbles_max_scale,
                     rebuild_scene=False,
@@ -864,7 +856,7 @@ class CrystalRenderer:
             cell_bumpmap=cell_bumpmap,
             **self.dataset_args.to_dict(),
         )
-        img = scene.render(seed=params['seed'] if 'seed' in params else SEED)
+        img = scene.render(seed=params['seed'] if 'seed' in params else get_seed())
         img = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)  # todo: do we need this?
 
         if return_scene:

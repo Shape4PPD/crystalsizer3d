@@ -132,9 +132,7 @@ def validate(
             # Add textures
             if dsa.crystal_bumpmap_dim > 0:
                 tex_path = output_dir / 'crystal_bumpmaps' / f'{row["image"][:-4]}.npz'
-                assert tex_path.exists(), f'Texture path does not exist: {tex_path}'
-                if 'textures' not in item['rendering_parameters']:
-                    item['rendering_parameters']['textures'] = {}
+                assert tex_path.exists(), f'Crystal bumpmap path does not exist: {tex_path}'
                 item['rendering_parameters']['crystal']['bumpmap'] = tex_path
 
             # Add the clean image if it exists

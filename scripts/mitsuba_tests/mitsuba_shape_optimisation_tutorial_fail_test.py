@@ -4,10 +4,10 @@ import drjit as dr
 import matplotlib.pyplot as plt
 import mitsuba as mi
 import torch
-from pytorch3d.utils import ico_sphere
 from torch import nn
 
 from crystalsizer3d import ROOT_PATH
+from crystalsizer3d.util.ico_sphere import ico_sphere
 
 USE_CUDA = 1
 

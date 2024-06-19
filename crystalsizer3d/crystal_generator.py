@@ -12,7 +12,7 @@ from crystalsizer3d.args.dataset_synthetic_args import CRYSTAL_IDS
 from crystalsizer3d.crystal import Crystal
 from crystalsizer3d.csd_proxy import CSDProxy
 from crystalsizer3d.util.geometry import merge_vertices
-from crystalsizer3d.util.utils import SEED, to_numpy
+from crystalsizer3d.util.utils import get_seed, to_numpy
 
 
 def _generate_crystal(
@@ -245,7 +245,7 @@ class CrystalGenerator:
         self.n_workers = n_workers
 
         # Initialise the random number generator
-        self.rng = default_rng(SEED)
+        self.rng = default_rng(get_seed())
 
     def _init_crystal(self):
         """
@@ -291,7 +291,7 @@ class CrystalGenerator:
             logger.info(f'Generating crystals in parallel, worker pool size: {self.n_workers}')
             args = []
             for i in range(num):
-                args.append({'idx': i, 'seed': SEED + i, **shared_args})
+                args.append({'idx': i, 'seed': get_seed() + i, **shared_args})
             with Pool(processes=self.n_workers) as pool:
                 crystals = pool.map(_generate_crystal_wrapper, args)
         else:

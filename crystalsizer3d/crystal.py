@@ -369,7 +369,7 @@ class Crystal(nn.Module):
             simplices = mfv[mfi.T]
             s1 = simplices[:, 1] - simplices[:, 0]
             s2 = simplices[:, 2] - simplices[:, 0]
-            cp = torch.cross(s1, s2)
+            cp = torch.cross(s1, s2, dim=-1)
             areas[hkl] = (0.5 * torch.norm(cp, dim=-1)).sum().item()
 
             # Update the vertex index to continue from the last face

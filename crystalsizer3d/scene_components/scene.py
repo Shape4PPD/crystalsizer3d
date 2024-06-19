@@ -4,6 +4,9 @@ from typing import List, Optional, Tuple, Union
 import mitsuba as mi
 import numpy as np
 import torch
+from scipy.optimize import minimize
+from scipy.spatial import ConvexHull
+
 from crystalsizer3d import MI_CPU_VARIANT, USE_CUDA
 from crystalsizer3d.args.dataset_synthetic_args import ROTATION_MODE_AXISANGLE
 from crystalsizer3d.crystal import Crystal
@@ -11,9 +14,7 @@ from crystalsizer3d.scene_components.bubble import Bubble
 from crystalsizer3d.scene_components.textures import NoiseTexture, NormalMapNoiseTexture
 from crystalsizer3d.scene_components.utils import RenderError, build_crystal_mesh, project_to_image
 from crystalsizer3d.util.geometry import normalise
-from crystalsizer3d.util.utils import to_numpy
-from scipy.optimize import minimize
-from scipy.spatial import ConvexHull
+from crystalsizer3d.util.utils import hash_data, to_numpy
 
 if USE_CUDA:
     if 'cuda_ad_rgb' not in mi.variants():
@@ -33,6 +34,10 @@ class Scene:
     FACES_KEY = SHAPE_NAME + '.faces'
     BSDF_KEY = SHAPE_NAME + '.bsdf'
     COLOUR_KEY = BSDF_KEY + '.reflectance.value'
+    mi_scene_dict: dict
+    mi_scene: mi.Scene
+    hash_id: str
+    xy_bounds = {}
 
     def __init__(
             self,
@@ -41,13 +46,15 @@ class Scene:
 
             spp: int = 256,
             res: int = 400,
+            remesh_max_edge: Optional[float] = None,
 
             integrator_max_depth: int = 64,
             integrator_rr_depth: int = 5,
 
             camera_distance: float = 100.,
-            camera_fov: float = 25.,
             focus_distance: float = 90.,
+            focal_length: Optional[float] = None,
+            camera_fov: Optional[float] = 25.,
             aperture_radius: float = 0.5,
             sampler_type: str = 'stratified',
 
@@ -60,6 +67,7 @@ class Scene:
             cell_surface_scale: float = 100.,
             cell_bumpmap: Optional[Union[NormalMapNoiseTexture, torch.Tensor]] = None,
             cell_bumpmap_idx: int = 1,
+            cell_render_blanks: bool = False,
 
             **kwargs
     ):
@@ -74,6 +82,7 @@ class Scene:
         # Rendering settings
         self.spp = spp
         self.res = res
+        self.remesh_max_edge = remesh_max_edge
 
         # Integrator parameters
         self.integrator_max_depth = integrator_max_depth
@@ -81,8 +90,12 @@ class Scene:
 
         # Sensor parameters
         self.camera_distance = camera_distance
-        self.camera_fov = camera_fov
         self.focus_distance = focus_distance
+        assert focal_length is not None or camera_fov is not None, 'Either focal length or camera FOV must be provided.'
+        if focal_length is not None and camera_fov is not None:
+            camera_fov = None  # Focal length takes precedence
+        self.focal_length = focal_length
+        self.camera_fov = camera_fov
         self.aperture_radius = aperture_radius
         self.sampler_type = sampler_type
 
@@ -97,7 +110,9 @@ class Scene:
         self.cell_surface_scale = cell_surface_scale
         self.cell_bumpmap = cell_bumpmap
         self.cell_bumpmap_idx = cell_bumpmap_idx
+        self.cell_render_blanks = cell_render_blanks
 
+        # Build the scene
         self.build_mi_scene()
 
     def to_dict(self) -> dict:
@@ -107,13 +122,15 @@ class Scene:
         spec = {
             'spp': self.spp,
             'res': self.res,
+            'remesh_max_edge': self.remesh_max_edge,
 
             'integrator_max_depth': self.integrator_max_depth,
             'integrator_rr_depth': self.integrator_rr_depth,
 
             'camera_distance': self.camera_distance,
-            'camera_fov': self.camera_fov,
             'focus_distance': self.focus_distance,
+            'focal_length': self.focal_length,
+            'camera_fov': self.camera_fov,
             'aperture_radius': self.aperture_radius,
             'sampler_type': self.sampler_type,
 
@@ -128,6 +145,7 @@ class Scene:
             'cell_bumpmap': self.cell_bumpmap.to_dict()
             if isinstance(self.cell_bumpmap, NormalMapNoiseTexture) else None,
             'cell_bumpmap_idx': self.cell_bumpmap_idx,
+            'cell_render_blanks': self.cell_render_blanks,
         }
 
         if self.crystal is not None:
@@ -170,7 +188,8 @@ class Scene:
             'type': 'thinlens',
             'aperture_radius': self.aperture_radius,
             'focus_distance': self.focus_distance,
-            'fov': self.camera_fov,
+            'focal_length' if self.focal_length is not None else 'fov':
+                f'{self.focal_length}mm' if self.focal_length is not None else self.camera_fov,
             'to_world': T.look_at(
                 origin=[0, 0, self.camera_distance],
                 target=[0, 0, 0],
@@ -266,8 +285,10 @@ class Scene:
                     },
                     'bsdf': material_bsdf
                 }
-            else:
+            elif self.cell_render_blanks:
                 bsdf = material_bsdf
+            else:
+                continue
 
             cell[f'cell_glass_{i}'] = {
                 'type': 'rectangle',
@@ -296,6 +317,7 @@ class Scene:
                 material_bsdf=self.crystal_material_bsdf,
                 shape_name=self.SHAPE_NAME,
                 bsdf_key=self.BSDF_KEY,
+                remesh_max_edge=self.remesh_max_edge
             )
 
         # Add bubbles
@@ -303,7 +325,8 @@ class Scene:
             scene_dict[bubble.SHAPE_NAME] = bubble.build_mitsuba_mesh()
 
         self.mi_scene_dict = scene_dict
-        self.mi_scene: mi.Scene = mi.load_dict(scene_dict)
+        self.mi_scene = mi.load_dict(scene_dict)
+        self.hash_id = hash_data(self.to_dict())
 
     def render(self, seed: int = 0) -> np.ndarray:
         """
@@ -312,6 +335,35 @@ class Scene:
         img = mi.render(self.mi_scene, seed=seed)
         img = np.array(mi.util.convert_to_bitmap(img))
         return img
+
+    def get_xy_bounds(
+            self,
+            z: float = 0,
+            z_precision: float = 1e-2,
+            verify: bool = True
+    ) -> Tuple[Tuple[float, float], Tuple[float, float]]:
+        """
+        Get the 3D x and y coordinates that map to the edges of the image at the given z position.
+        """
+        z = round(z / z_precision) * z_precision
+        if self.hash_id not in self.xy_bounds or z not in self.xy_bounds[self.hash_id]:
+            pts = torch.tensor([[-1, -1, z], [1, 1, z]], device=device)
+            uv_pts = project_to_image(self.mi_scene, pts)
+            zoom = torch.abs(uv_pts[0] - uv_pts[1]) / self.res
+            bounds = torch.tensor([[-1 / zoom[0], -1 / zoom[1], z], [1 / zoom[0], 1 / zoom[1], z]], device=device)
+
+            # To verify, check that the projected bound points appear at the corners of the image
+            if verify:
+                uv_pts2 = project_to_image(self.mi_scene, bounds)
+                assert torch.allclose(uv_pts2, torch.tensor([[0., self.res], [self.res, 0.]], device=device), atol=1e-3)
+
+            min_x, max_x = bounds[0, 0].item(), bounds[1, 0].item()
+            min_y, max_y = bounds[0, 1].item(), bounds[1, 1].item()
+
+            if self.hash_id not in self.xy_bounds:
+                self.xy_bounds[self.hash_id] = {}
+            self.xy_bounds[self.hash_id][z] = (min_x, max_x), (min_y, max_y)
+        return self.xy_bounds[self.hash_id][z]
 
     def get_crystal_image_coords(self) -> torch.Tensor:
         """
@@ -326,10 +378,6 @@ class Scene:
             min_area: float = 0.1,
             max_area: float = 0.5,
             centre_crystal: bool = False,
-            min_x: float = -50.,
-            max_x: float = 50.,
-            min_y: float = -50.,
-            max_y: float = 50.,
             max_placement_attempts: int = 1000,
             rebuild_scene: bool = True,
     ):
@@ -339,25 +387,13 @@ class Scene:
         assert self.crystal is not None, 'No crystal object provided.'
         device_og = self.crystal.origin.device
         self.crystal.to(torch.device('cpu'))
+        self.crystal.origin.data.zero_()
 
-        # Keep trying to place the crystal until the projected area is close to the target
-        is_placed = False
+        # Keep rotating and scaling until the projected area is close to the target
+        is_scaled = False
         n_placement_attempts = 0
-        while not is_placed and n_placement_attempts < max_placement_attempts:
+        while not is_scaled and n_placement_attempts < max_placement_attempts:
             n_placement_attempts += 1
-
-            # Sample a target area for how much of the image should be covered by the crystal
-            target_area = np.random.uniform(min_area, max_area)
-
-            # Place the crystal
-            if centre_crystal:
-                self.crystal.origin.data.zero_()
-            else:
-                self.crystal.origin.data = torch.tensor([
-                    min_x + torch.rand(1) * (max_x - min_x),
-                    min_y + torch.rand(1) * (max_y - min_y),
-                    0
-                ])
 
             # Apply random rotation
             if self.crystal.rotation_mode == ROTATION_MODE_AXISANGLE:
@@ -365,71 +401,90 @@ class Scene:
             else:
                 self.crystal.rotation.data = normalise(torch.rand(4) * 2 * math.pi)
 
-            # Optimise the crystal placement
-            is_placed = self._optimise_crystal_placement(target_area, centre_crystal)
+            # Sample a target area for how much of the image should be covered by the crystal
+            target_area = np.random.uniform(min_area, max_area)
 
-        # Put crystal back on the original device
-        self.crystal.to(device_og)
+            # Optimise the crystal scaling to match the target area
+            is_scaled = self._optimise_crystal_scaling(target_area)
 
-        if not is_placed:
-            # Try again with a slightly smaller target area
+        # Try again with a slightly smaller target area
+        if not is_scaled:
             if min_area > 0.01:
+                self.crystal.to(device_og)
                 return self.place_crystal(
                     min_area=min_area - 0.01,
                     max_area=max_area - 0.01,
                     centre_crystal=centre_crystal,
-                    min_x=min_x,
-                    max_x=max_x,
-                    min_y=min_y,
-                    max_y=max_y,
                     max_placement_attempts=max_placement_attempts,
                     rebuild_scene=rebuild_scene,
                 )
             raise RenderError('Failed to place crystal!')
 
+        # Place the crystal
+        if not centre_crystal:
+            self.crystal.build_mesh(update_uv_map=False)
+            uv_points = project_to_image(self.mi_scene, self.crystal.vertices)
+            min_uv = uv_points.argmin(dim=0)
+            max_uv = uv_points.argmax(dim=0)
+            z = torch.cat([self.crystal.vertices[min_uv, 2], self.crystal.vertices[max_uv, 2]]).amax()
+            (min_x, max_x), (min_y, max_y) = self.get_xy_bounds(z=z.item())
+            min_x -= self.crystal.vertices[:, 0].min()
+            max_x -= self.crystal.vertices[:, 0].max()
+            min_y -= self.crystal.vertices[:, 1].min()
+            max_y -= self.crystal.vertices[:, 1].max()
+            self.crystal.origin.data[:2] = torch.tensor([
+                min_x + torch.rand(1) * (max_x - min_x),
+                min_y + torch.rand(1) * (max_y - min_y),
+            ])
+
         # Rebuild the scene with the new crystal position
         self.crystal.build_mesh()
+        # uv_points = project_to_image(self.mi_scene, self.crystal.vertices)
+        # assert not (uv_points[:, 0].min() < 0 or uv_points[:, 0].max() > self.res or
+        #             uv_points[:, 1].min() < 0 or uv_points[:, 1].max() > self.res or
+        #             self.crystal.vertices[:, 2].min() < self.cell_z_positions[1] or
+        #             self.crystal.vertices[:, 2].max() > self.cell_z_positions[2]), 'Crystal out of bounds!'
+        self.crystal.to(device_og)
         if rebuild_scene:
             self.build_mi_scene()
 
-    def _optimise_crystal_placement(
+    def _optimise_crystal_scaling(
             self,
             target_area: float,
-            centre_crystal: bool = False,
+            tol: float = 1e-3,
     ):
         """
-        Optimise the crystal placement.
+        Optimise the crystal scaling.
         """
-        cell_height = self.cell_z_positions[2] - self.cell_z_positions[1]
+        assert torch.allclose(self.crystal.origin, torch.zeros(3))
         self.crystal.build_mesh(update_uv_map=False)
+        scale_og = self.crystal.scale.clone().detach()
+        scale_new = scale_og.clone().detach().clamp(min=1e-3)
+        origin_new = self.crystal.origin.clone().detach()
         vertices_og = self.crystal.vertices.clone().detach()
         vertices_new = vertices_og.clone()
-        origin_og = self.crystal.origin.clone().detach()
-        origin_new = origin_og.clone()
-        scale_og = self.crystal.scale.clone().detach()
-        scale_new = scale_og.clone()
 
         def _update_vertices():
-            nonlocal vertices_new, origin_new
-            vertices_new = (vertices_og - origin_og) / scale_og * scale_new + origin_new
-            z_adj = vertices_new[:, 2].min() + self.cell_z_positions[1]
-            vertices_new[:, 2] -= z_adj
-            origin_new[2] -= z_adj
-            if centre_crystal:
-                origin_new[:2].zero_()
+            nonlocal vertices_new
+            vertices_new = vertices_og / scale_og * scale_new
+            z_adj = self.cell_z_positions[1] - vertices_new[:, 2].min()
+            vertices_new[:, 2] += z_adj
+            origin_new[2] = z_adj
 
         def _in_bounds(img_points):
-            z_min, z_max = vertices_new[:, 2].min(), vertices_new[:, 2].max()
             return not (img_points[:, 0].min() < 0 or img_points[:, 0].max() > self.res or
                         img_points[:, 1].min() < 0 or img_points[:, 1].max() > self.res or
-                        z_max - z_min > cell_height)
+                        vertices_new[:, 2].max() > self.cell_z_positions[2])
 
         def _projected_area(img_points):
             # Check the area of the convex hull of the projected points
+            pts = to_numpy(img_points)
+            if pts.ptp(axis=0).min() < 1e-3:
+                return 0
             ch = ConvexHull(to_numpy(img_points))
             return ch.volume / self.res**2  # Note - volume not area (area is perimeter)
 
-        # Ensure the initial guess falls in the bounds by scaling and translating it until it must
+        # Ensure the initial guess falls in the bounds by scaling until it must
         oob = True
         n_fails = 0
         while oob:
@@ -439,45 +494,37 @@ class Scene:
                 oob = False
             else:
                 scale_new *= 0.9
-                origin_new[:2] *= 0.8
                 n_fails += 1
                 if n_fails > 100:
                     return False
         assert _in_bounds(uv_points)
 
-        # Set up parameters and bounds
-        if centre_crystal:
-            x0 = np.array([scale_new, ])
-            bounds = [[1e-3, 1e2], ]
-        else:
-            x0 = np.array([scale_new, *origin_new[:2]])
-            bounds = [[1e-3, 1e2], ] + [[-100, 100]] * 2
+        # Set up parameters
+        x0 = np.array([scale_new, ])
 
         def _loss(x):
             scale_new.data = torch.tensor(x[0], dtype=self.crystal.scale.dtype)
-            if not centre_crystal:
-                origin_new.data[:2] = torch.tensor([x[1], x[2]], dtype=self.crystal.origin.dtype)
+            scale_new.clamp_(min=1e-3)
             _update_vertices()
             uv_points = project_to_image(self.mi_scene, vertices_new)
             projected_area = _projected_area(uv_points)
-            loss_area = (projected_area - target_area)**2
+            loss = (projected_area - target_area)**2
             if not _in_bounds(uv_points):
-                loss_area += 100
-            return loss_area
+                loss += 100
+            return loss
 
-        # Find optimal placement
+        # Find optimal scaling
         res = minimize(
             _loss,
             x0=x0,
-            bounds=bounds,
             method='COBYLA',
             options={
                 'maxiter': 1000,
-                'tol': 1e-3,
+                'tol': tol
             }
         )
 
-        if res.success and res.fun < 1e-3:
+        if res.success and res.fun < tol:
             self.crystal.scale.data = scale_new
             self.crystal.origin.data = origin_new
             return True
@@ -485,10 +532,6 @@ class Scene:
 
     def place_bubbles(
             self,
-            min_x: float,
-            max_x: float,
-            min_y: float,
-            max_y: float,
             min_scale: float,
             max_scale: float,
             rebuild_scene: bool = True,
@@ -505,6 +548,16 @@ class Scene:
         h_below = z_pos[1] - z_pos[0]
         h_above = z_pos[3] - z_pos[2]
 
+        # Get the xy bounds
+        bounds = {}
+        for i, c in enumerate(['bottom', 'top']):
+            xb, yb = self.get_xy_bounds(z=(z_pos[2 * i] + z_pos[2 * i + 1]) / 2)
+            bounds[c] = {
+                'x': xb,
+                'y': yb,
+                'z': [z_pos[2 * i], z_pos[2 * i + 1]],
+            }
+
         placed_bubbles = []
         for bubble in self.bubbles:
             # Keep trying to place the bubble until it appears in the image and doesn't intersect with anything else in the scene
@@ -517,20 +570,12 @@ class Scene:
                 # Pick whether to place the bubble above or below of the cell
                 if np.random.uniform() < h_below / (h_below + h_above):
                     channel = 'bottom'
-                    min_x_c = min_x
-                    max_x_c = max_x
-                    min_y_c = min_y
-                    max_y_c = max_y
-                    min_z_c = z_pos[0]
-                    max_z_c = z_pos[1]
                 else:
                     channel = 'top'
-                    min_x_c = min_x / 2
-                    max_x_c = max_x / 2
-                    min_y_c = min_y / 2
-                    max_y_c = max_y / 2
-                    min_z_c = z_pos[2]
-                    max_z_c = z_pos[3]
+                bounds_c = bounds[channel]
+                min_x_c, max_x_c = bounds_c['x']
+                min_y_c, max_y_c = bounds_c['y']
+                min_z_c, max_z_c = bounds_c['z']
 
                 # Sample the bubble scale and update the z limits
                 bubble.scale.data = min_scale + torch.rand(1) * (max_scale - min_scale)
