@@ -17,7 +17,7 @@ from matplotlib.figure import Figure
 from timm.optim import create_optimizer_v2
 from timm.scheduler import create_scheduler_v2
 from timm.scheduler.scheduler import Scheduler
-from torch import nn
+from torch import Tensor, nn
 from torch.backends import cudnn
 from torch.optim import Optimizer
 from torch.utils.data import DataLoader
@@ -973,7 +973,7 @@ class Manager:
 
     def _train_batch(
             self,
-            data: Tuple[dict, torch.Tensor, torch.Tensor, Dict[str, torch.Tensor]]
+            data: Tuple[dict, Tensor, Tensor, Optional[Tensor], Dict[str, Tensor]]
     ) -> Tuple[dict, float, dict]:
         """
         Train on a single batch of data.
@@ -1151,22 +1151,23 @@ class Manager:
 
     def _process_batch_predictor(
             self,
-            data: Tuple[dict, torch.Tensor, torch.Tensor, Dict[str, torch.Tensor]]
-    ) -> Tuple[Dict[str, Any], torch.Tensor, Dict]:
+            data: Tuple[dict, Tensor, Tensor, Optional[Tensor], Dict[str, Tensor]]
+    ) -> Tuple[Dict[str, Any], Tensor, Dict]:
         """
         Take a batch of images, predict the parameters and calculate the average loss per example.
         """
-        _, X_target_og, X_target, Y_target = data  # Use the (possibly) augmented image as input
-        X_target_og = X_target_og.to(self.device)
-        X_target = X_target.to(self.device)
+        _, _, X_target_aug, X_target_clean, Y_target = data  # Use the (possibly) augmented image as input
+        X_target_aug = X_target_aug.to(self.device)
+        if X_target_clean is not None:
+            X_target_clean = X_target_clean.to(self.device)
         Y_target = {
             k: [vi.to(self.device) for vi in v] if isinstance(v, list) else v.to(self.device)
             for k, v in Y_target.items()
         }
 
         # Predict the parameters and calculate losses
-        Y_pred = self.predict(X_target)
-        loss, metrics, X_pred2 = self.calculate_predictor_losses(Y_pred, Y_target, X_target_og)
+        Y_pred = self.predict(X_target_aug)
+        loss, metrics, X_pred2 = self.calculate_predictor_losses(Y_pred, Y_target, X_target_clean)
         outputs = {
             'Y_pred': Y_pred,
             'X_pred2': X_pred2
@@ -1182,7 +1183,7 @@ class Manager:
             outputs['Z_pred'] = Z.clone().detach()
             X_pred = self.generator(Z)
             outputs['X_pred'] = X_pred
-            loss_g, metrics_g, Y_pred2 = self.calculate_generator_losses(X_pred, X_target, Y_target,
+            loss_g, metrics_g, Y_pred2 = self.calculate_generator_losses(X_pred, X_target_aug, Y_target,
                                                                          include_teacher_loss=False,
                                                                          include_transcoder_loss=False)
             metrics.update(metrics_g)
@@ -1199,17 +1200,17 @@ class Manager:
 
     def _process_batch_generator(
             self,
-            data: Tuple[dict, torch.Tensor, torch.Tensor, Dict[str, torch.Tensor]]
-    ) -> Tuple[Dict[str, Any], torch.Tensor, Dict]:
+            data: Tuple[dict, Tensor, Tensor, Tensor, Dict[str, Tensor]]
+    ) -> Tuple[Dict[str, Any], Tensor, Dict]:
         """
         Take a batch of input data, push it through the network and calculate the average loss per example.
         """
         if self.dataset_args.train_combined:
             raise RuntimeError('Training the generator separately in train_combined mode is disabled.')
-        _, X_target, _, Y_target = data  # Use the non-augmented image as the target
+        _, _, _, X_target, Y_target = data  # Use the clean image as the target
         X_target = X_target.to(self.device)
         Y_target = {
-            k: [vi.to(self.device) for vi in v] if type(v) == list else v.to(self.device)
+            k: [vi.to(self.device) for vi in v] if isinstance(v, list) else v.to(self.device)
             for k, v in Y_target.items()
         }
 
@@ -1229,13 +1230,13 @@ class Manager:
 
     def _process_batch_discriminator(
             self,
-            data: Tuple[dict, torch.Tensor, torch.Tensor, Dict[str, torch.Tensor]],
-            X_pred: torch.Tensor
-    ) -> Tuple[Dict[str, Any], torch.Tensor, Dict]:
+            data: Tuple[dict, Tensor, Tensor, Tensor, Dict[str, Tensor]],
+            X_pred: Tensor
+    ) -> Tuple[Dict[str, Any], Tensor, Dict]:
         """
         Run the discriminator on the real and predicted images and calculate losses.
         """
-        _, X_target, _, _ = data  # Use the non-augmented image as target
+        _, _, X_target, _, _ = data  # Use the clean image as target
         X_target = X_target.to(self.device)
 
         # Evaluate the real and fake images
@@ -1257,16 +1258,16 @@ class Manager:
 
     def _process_batch_transcoder(
             self,
-            data: Tuple[dict, torch.Tensor, torch.Tensor, Dict[str, torch.Tensor]],
-            Z_pred: Optional[torch.Tensor] = None
-    ) -> Tuple[Dict[str, Any], torch.Tensor, Dict]:
+            data: Tuple[dict, Tensor, Tensor, Tensor, Dict[str, Tensor]],
+            Z_pred: Optional[Tensor] = None
+    ) -> Tuple[Dict[str, Any], Tensor, Dict]:
         """
         Run the transcoder on the parameter to latent mappings.
         """
 
         # VAE transcoder
         if self.transcoder_args.tc_model_name in ['vae', 'tvae']:
-            _, _, _, Y_target = data
+            _, _, _, _, Y_target = data
             Y_target = {
                 k: [vi.to(self.device) for vi in v] if isinstance(v, list) else v.to(self.device)
                 for k, v in Y_target.items()
@@ -1311,16 +1312,16 @@ class Manager:
 
     def _transcode_loop(
             self,
-            Y_target: Union[torch.Tensor, Dict[str, torch.Tensor]],
+            Y_target: Union[Tensor, Dict[str, Tensor]],
             add_latent_noise: bool = True,
     ):
         """
         Encode and decode parameters through the transcoder.
         """
-        if isinstance(Y_target, torch.Tensor):
+        if isinstance(Y_target, Tensor):
             Y_target_vec = Y_target.to(self.device)
         else:
-            Y_target_vec = torch.cat([Yk for Yk in Y_target.values() if isinstance(Yk, torch.Tensor)], dim=1).to(
+            Y_target_vec = torch.cat([Yk for Yk in Y_target.values() if isinstance(Yk, Tensor)], dim=1).to(
                 self.device)
 
         # Encode parameters into the latent space
@@ -1346,7 +1347,7 @@ class Manager:
 
         return Yr_mu, Yr_logvar, Z_mu_logits, Z_logvar, Z
 
-    def predict(self, X: torch.Tensor, latent_input: bool = False) -> Dict[str, torch.Tensor]:
+    def predict(self, X: Tensor, latent_input: bool = False) -> Dict[str, Tensor]:
         """
         Take a batch of input data and return network output.
         """
@@ -1387,9 +1388,9 @@ class Manager:
 
     def prepare_parameter_dict(
             self,
-            Y: torch.Tensor,
+            Y: Tensor,
             apply_sigmoid_to_switches: bool = True
-    ) -> Dict[str, torch.Tensor]:
+    ) -> Dict[str, Tensor]:
         """
         Prepare the predicted parameters into output groups.
         """
@@ -1452,13 +1453,16 @@ class Manager:
 
         return output
 
-    def generate(self, Y: Dict[str, torch.Tensor]) -> Optional[torch.Tensor]:
+    def generate(self, Y: Dict[str, Tensor]) -> Optional[Tensor]:
         """
         Take a batch of parameters and generate a batch of images.
         """
         if not self.dataset_args.train_generator:
             return None
-        Y_vector = torch.cat([Yk for Yk in Y.values() if isinstance(Yk, torch.Tensor)], dim=1)
+        Y_vector = torch.cat([
+            Yk for k, Yk in Y.items()
+            if k in ['distances', 'transformation', 'material', 'light']
+        ], dim=1)
 
         # Add some noise to the input parameters during training
         if self.generator.training and self.generator_args.gen_input_noise_std > 0:
@@ -1474,10 +1478,10 @@ class Manager:
 
     def calculate_predictor_losses(
             self,
-            Y_pred: Dict[str, torch.Tensor],
-            Y_target: Dict[str, Union[torch.Tensor, List[torch.Tensor]]],
-            X_target: Optional[torch.Tensor],
-    ) -> Tuple[torch.Tensor, Dict[str, torch.Tensor], Optional[torch.Tensor]]:
+            Y_pred: Dict[str, Tensor],
+            Y_target: Dict[str, Union[Tensor, List[Tensor]]],
+            X_target_clean: Optional[Tensor],
+    ) -> Tuple[Tensor, Dict[str, Any], Optional[Tensor]]:
         """
         Calculate losses.
         """
@@ -1526,7 +1530,7 @@ class Manager:
 
         # Only include teacher loss if the generator loss is below a threshold
         if self.dataset_args.train_generator:
-            loss_t, stats_t, X_pred2 = self._calculate_net_teacher_losses(Y_pred, X_target)
+            loss_t, stats_t, X_pred2 = self._calculate_pred_teacher_losses(Y_pred, X_target_clean)
             if self._can_teach('generator'):
                 losses.append(self.optimiser_args.w_net_teacher * loss_t)
             stats.update(stats_t)
@@ -1544,9 +1548,9 @@ class Manager:
 
     def _calculate_zingg_losses(
             self,
-            zingg_pred: torch.Tensor,
-            zingg_target: torch.Tensor
-    ) -> Tuple[torch.Tensor, Dict[str, float]]:
+            zingg_pred: Tensor,
+            zingg_target: Tensor
+    ) -> Tuple[Tensor, Dict[str, float]]:
         """
         Calculate the Zingg losses.
         """
@@ -1559,9 +1563,9 @@ class Manager:
 
     def _calculate_distance_losses(
             self,
-            d_pred: torch.Tensor,
-            d_target: torch.Tensor
-    ) -> Tuple[torch.Tensor, Dict[str, float]]:
+            d_pred: Tensor,
+            d_target: Tensor
+    ) -> Tuple[Tensor, Dict[str, float]]:
         """
         Calculate distance losses.
         """
@@ -1592,9 +1596,9 @@ class Manager:
 
     def _calculate_distance_switches_losses(
             self,
-            s_pred: torch.Tensor,
-            s_target: torch.Tensor
-    ) -> Tuple[torch.Tensor, Dict[str, float]]:
+            s_pred: Tensor,
+            s_target: Tensor
+    ) -> Tuple[Tensor, Dict[str, float]]:
         """
         Calculate distance switches losses.
         """
@@ -1607,10 +1611,10 @@ class Manager:
 
     def _calculate_transformation_losses(
             self,
-            t_pred: torch.Tensor,
-            t_target: torch.Tensor,
-            sym_rotations: Optional[List[torch.Tensor]] = None
-    ) -> Tuple[torch.Tensor, Dict[str, float]]:
+            t_pred: Tensor,
+            t_target: Tensor,
+            sym_rotations: Optional[List[Tensor]] = None
+    ) -> Tuple[Tensor, Dict[str, float]]:
         """
         Calculate the transformation losses.
         """
@@ -1684,9 +1688,9 @@ class Manager:
 
     def _calculate_3d_losses(
             self,
-            Y_pred: Dict[str, torch.Tensor],
-            Y_target: Dict[str, Union[torch.Tensor, List[torch.Tensor]]]
-    ) -> Tuple[torch.Tensor, Dict[str, float]]:
+            Y_pred: Dict[str, Tensor],
+            Y_target: Dict[str, Union[Tensor, List[Tensor]]]
+    ) -> Tuple[Tensor, Dict[str, float]]:
         """
         Calculate the distances between 3d vertices.
         """
@@ -1778,9 +1782,9 @@ class Manager:
 
     def _calculate_material_losses(
             self,
-            m_pred: torch.Tensor,
-            m_target: torch.Tensor
-    ) -> Tuple[torch.Tensor, Dict[str, float]]:
+            m_pred: Tensor,
+            m_target: Tensor
+    ) -> Tuple[Tensor, Dict[str, float]]:
         """
         Calculate the material properties losses.
         """
@@ -1810,9 +1814,9 @@ class Manager:
 
     def _calculate_light_losses(
             self,
-            l_pred: torch.Tensor,
-            l_target: torch.Tensor
-    ) -> Tuple[torch.Tensor, Dict[str, float]]:
+            l_pred: Tensor,
+            l_target: Tensor
+    ) -> Tuple[Tensor, Dict[str, float]]:
         """
         Calculate the light properties losses.
         """
@@ -1825,13 +1829,13 @@ class Manager:
         }
         return loss, stats
 
-    def _calculate_net_teacher_losses(
+    def _calculate_pred_teacher_losses(
             self,
-            Y_pred: Dict[str, torch.Tensor],
-            X_target: torch.Tensor,
-    ) -> Tuple[torch.Tensor, Dict[str, float], torch.Tensor]:
+            Y_pred: Dict[str, Tensor],
+            X_target: Tensor,
+    ) -> Tuple[Tensor, Dict[str, float], Tensor]:
         """
-        Calculate the teacher losses using the generator network as the teacher.
+        Calculate the predictor's teacher losses using the generator network as the teacher.
         """
         # Run the predicted parameters through the generator to get another image
         if self.transcoder_args.use_transcoder:
@@ -1850,13 +1854,13 @@ class Manager:
 
     def calculate_generator_losses(
             self,
-            X_pred: Optional[torch.Tensor],
-            X_target: Optional[torch.Tensor],
-            Y_target: Dict[str, Union[torch.Tensor, List[torch.Tensor]]],
+            X_pred: Optional[Tensor],
+            X_target: Optional[Tensor],
+            Y_target: Dict[str, Union[Tensor, List[Tensor]]],
             include_teacher_loss: bool = True,
             include_discriminator_loss: bool = True,
             include_transcoder_loss: bool = True,
-    ) -> Tuple[torch.Tensor, Dict[str, torch.Tensor], Optional[Dict[str, torch.Tensor]]]:
+    ) -> Tuple[Tensor, Dict[str, Tensor], Optional[Dict[str, Tensor]]]:
         """
         Calculate losses.
         """
@@ -1900,9 +1904,9 @@ class Manager:
 
     def _calculate_generator_losses(
             self,
-            X_pred: torch.Tensor,
-            X_target: torch.Tensor
-    ) -> Tuple[torch.Tensor, Dict[str, float]]:
+            X_pred: Tensor,
+            X_target: Tensor
+    ) -> Tuple[Tensor, Dict[str, float]]:
         """
         Calculate the generator network losses.
         """
@@ -1920,9 +1924,9 @@ class Manager:
 
     def _calculate_gen_teacher_losses(
             self,
-            X_pred: torch.Tensor,
-            Y_target: Dict[str, Union[torch.Tensor, List[torch.Tensor]]],
-    ) -> Tuple[torch.Tensor, Dict[str, float], Dict[str, torch.Tensor]]:
+            X_pred: Tensor,
+            Y_target: Dict[str, Union[Tensor, List[Tensor]]],
+    ) -> Tuple[Tensor, Dict[str, float], Dict[str, Tensor]]:
         """
         Calculate the teacher losses using the parameter network as the teacher.
         """
@@ -1947,8 +1951,8 @@ class Manager:
 
     def _calculate_gen_gan_losses(
             self,
-            X_pred: torch.Tensor,
-    ) -> Tuple[torch.Tensor, Dict[str, float]]:
+            X_pred: Tensor,
+    ) -> Tuple[Tensor, Dict[str, float]]:
         """
         Calculate the GAN losses on the generator.
         """
@@ -1962,9 +1966,9 @@ class Manager:
 
     def calculate_discriminator_losses(
             self,
-            D_real: torch.Tensor,
-            D_fake: torch.Tensor,
-    ) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
+            D_real: Tensor,
+            D_fake: Tensor,
+    ) -> Tuple[Tensor, Dict[str, Tensor]]:
         """
         Calculate discriminator losses.
         """
@@ -1987,8 +1991,8 @@ class Manager:
 
     def _calculate_disc_gan_losses(
             self,
-            D_real: torch.Tensor,
-            D_fake: torch.Tensor,
+            D_real: Tensor,
+            D_fake: Tensor,
     ):
         """
         Calculate the GAN losses on the discriminator.
@@ -2031,12 +2035,12 @@ class Manager:
 
     def calculate_vae_transcoder_losses(
             self,
-            Y_target: Dict[str, Union[torch.Tensor, List[torch.Tensor]]],
-            Yr_mu_vec: torch.Tensor,
-            Yr_mu_clean: torch.Tensor,
-            Z_mu_logits: torch.Tensor,
-            Z_logvar: torch.Tensor
-    ) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
+            Y_target: Dict[str, Union[Tensor, List[Tensor]]],
+            Yr_mu_vec: Tensor,
+            Yr_mu_clean: Tensor,
+            Z_mu_logits: Tensor,
+            Z_logvar: Tensor
+    ) -> Tuple[Tensor, Dict[str, Tensor]]:
         """
         Calculate VAE transcoder losses.
         """
@@ -2096,8 +2100,8 @@ class Manager:
 
     def _calculate_parameter_reconstruction_losses(
             self,
-            Y_target: Dict[str, Union[torch.Tensor, List[torch.Tensor]]],
-            Y_pred_vec: torch.Tensor,
+            Y_target: Dict[str, Union[Tensor, List[Tensor]]],
+            Y_pred_vec: Tensor,
             check_sym_rotations: bool = False
     ):
         """
@@ -2148,12 +2152,12 @@ class Manager:
 
     def _calculate_transcoder_parameter_independence_losses(
             self,
-            Y_target: Dict[str, Union[torch.Tensor, List[torch.Tensor]]],
+            Y_target: Dict[str, Union[Tensor, List[Tensor]]],
     ):
         """
         Calculate the parameter independence loss.
         """
-        Y_vector = torch.cat([Yk for Yk in Y_target.values() if isinstance(Yk, torch.Tensor)], dim=1)
+        Y_vector = torch.cat([Yk for Yk in Y_target.values() if isinstance(Yk, Tensor)], dim=1)
         noise_level = 0.1
         bs = len(Y_vector)
 
@@ -2249,14 +2253,14 @@ class Manager:
 
     def _calculate_com_loss(
             self,
-            Z: torch.Tensor,
-            Y_target: Dict[str, Union[torch.Tensor, List[torch.Tensor]]],
+            Z: Tensor,
+            Y_target: Dict[str, Union[Tensor, List[Tensor]]],
             use_sym_rotations: bool = True
     ):
         """
         Calculate the latents loss - difference between the latent Z and the target latents from the parameters.
         """
-        Y_target_vec = torch.cat([Yk for Yk in Y_target.values() if isinstance(Yk, torch.Tensor)], dim=1)
+        Y_target_vec = torch.cat([Yk for Yk in Y_target.values() if isinstance(Yk, Tensor)], dim=1)
 
         # Make a new batch of Y_targets with the rotation picked to be as close to the predicted rotation as possible
         if use_sym_rotations and 'sym_rotations' in Y_target:
@@ -2287,9 +2291,9 @@ class Manager:
 
     def _make_plots(
             self,
-            data: Tuple[dict, torch.Tensor, torch.Tensor, Dict[str, torch.Tensor]],
+            data: Tuple[dict, Tensor, Tensor, Dict[str, Tensor]],
             outputs: Dict[str, Any],
-            stats: Dict[str, torch.Tensor],
+            stats: Dict[str, Tensor],
             train_or_test: str,
             end_of_epoch: bool = False
     ):

@@ -76,7 +76,7 @@ class Dataset:
             self,
             ds_args: DatasetTrainingArgs,
     ):
-        self.ds_args = ds_args
+        self.dst_args = ds_args
         path = ds_args.dataset_path
         assert path.exists(), f'Dataset path does not exist: {path}'
         self.path = path
@@ -89,7 +89,7 @@ class Dataset:
         self._load_ds_stats()
 
         # Split dataset into train and test
-        self.train_test_split_target = self.ds_args.train_test_split
+        self.train_test_split_target = self.dst_args.train_test_split
         self._split_dataset()
 
         # Set stats
@@ -100,23 +100,23 @@ class Dataset:
 
         # Set labels (and output vector size)
         labels = []
-        if self.ds_args.train_zingg:
+        if self.dst_args.train_zingg:
             labels += self.labels_zingg
-        if self.ds_args.train_distances:
+        if self.dst_args.train_distances:
             labels += self.labels_distances
-            if self.ds_args.use_distance_switches:
+            if self.dst_args.use_distance_switches:
                 labels += self.labels_distance_switches
-        if self.ds_args.train_transformation:
+        if self.dst_args.train_transformation:
             labels += self.labels_transformation
-            if self.ds_args.rotation_mode == ROTATION_MODE_QUATERNION:
+            if self.dst_args.rotation_mode == ROTATION_MODE_QUATERNION:
                 labels += self.labels_rotation_quaternion
             else:
-                assert self.ds_args.rotation_mode == ROTATION_MODE_AXISANGLE
+                assert self.dst_args.rotation_mode == ROTATION_MODE_AXISANGLE
                 labels += self.labels_rotation_axisangle
 
-        if self.ds_args.train_material:
+        if self.dst_args.train_material:
             labels += self.labels_material
-        if self.ds_args.train_light:
+        if self.dst_args.train_light:
             labels += self.labels_light
 
         # If any of the labels have 0 variance in the dataset then remove them
@@ -127,7 +127,7 @@ class Dataset:
             if k not in self.labels_transformation and self.ds_stats[k]['var'] == 0:
                 logger.warning(f'Removing key {k} from parameters as it has 0 variance.')
                 fixed_parameters[k] = self.ds_stats[k]['mean']
-                if k in self.labels_distances and self.ds_args.use_distance_switches:
+                if k in self.labels_distances and self.dst_args.use_distance_switches:
                     k_switch = f'ds{self.labels_distances.index(k)}'
                     fixed_parameters[k_switch] = 1 if self.ds_stats[k]['mean'] > 0 else 0
         for k in fixed_parameters.keys():
@@ -143,7 +143,7 @@ class Dataset:
                                              if k in self.labels]
         self.labels_material_active = [k for k in self.labels_material if k in self.labels]
         self.labels_light_active = [k for k in self.labels_light if k in self.labels]
-        if self.ds_args.train_light:
+        if self.dst_args.train_light:
             assert len(self.labels_light_active) > 0, 'Light parameters not present in dataset so can\'t train them!'
 
         # Cache the rotation matrices and symmetry groups
@@ -201,12 +201,12 @@ class Dataset:
                         item[header] = row[header]
                     elif header == 'image':
                         image_path = self.path / 'images' / row['image']
-                        if self.ds_args.check_image_paths:
+                        if self.dst_args.check_image_paths:
                             assert image_path.exists(), f'Image path does not exist: {image_path}'
                         item['image'] = image_path
                         if self.dataset_args.generate_clean:
                             clean_image_path = self.path / 'images_clean' / row['image']
-                            if self.ds_args.check_image_paths:
+                            if self.dst_args.check_image_paths:
                                 assert clean_image_path.exists(), f'Clean image path does not exist: {clean_image_path}'
                             item['image_clean'] = clean_image_path
                     elif header[0] == 'd':
@@ -223,7 +223,7 @@ class Dataset:
                     # Add the bumpmap path if required
                     if self.dataset_args.crystal_bumpmap_dim > -1:
                         bumpmap_path = self.path / 'crystal_bumpmaps' / f'{row["image"][:-4]}.npz'
-                        if self.ds_args.check_image_paths:
+                        if self.dst_args.check_image_paths:
                             assert bumpmap_path.exists(), f'Bumpmap path does not exist: {bumpmap_path}'
                         item['rendering_parameters']['crystal']['bumpmap'] = bumpmap_path
 
@@ -365,7 +365,7 @@ class Dataset:
         else:
             return self.size_all
 
-    def load_item(self, idx: int) -> Tuple[dict, Image.Image, Dict[str, np.ndarray]]:
+    def load_item(self, idx: int) -> Tuple[dict, Image.Image, Optional[Image.Image], Dict[str, np.ndarray]]:
         """
         Get an item from the dataset.
         """
@@ -374,10 +374,16 @@ class Dataset:
         r_params = item['rendering_parameters']
 
         # Load the image
-        if self.ds_args.use_clean_images:
+        if self.dst_args.use_clean_images:
             img = Image.open(item['image_clean'])
         else:
             img = Image.open(item['image'])
+
+        # Load the clean image too if training the generator
+        if self.dst_args.train_generator:
+            img_clean = Image.open(item['image_clean'])
+        else:
+            img_clean = None
 
         def z_transform(x, k):
             return (x - self.ds_stats[k]['mean']) / np.sqrt(self.ds_stats[k]['var'])
@@ -392,26 +398,26 @@ class Dataset:
         params = {}
 
         # Zingg parameters are always in [0, 1]
-        if self.ds_args.train_zingg:
+        if self.dst_args.train_zingg:
             params['zingg'] = np.array([
                 item['si'],
                 item['il']
             ])
 
         # Distances are in (0, 1]
-        if self.ds_args.train_distances:
+        if self.dst_args.train_distances:
             params['distances'] = np.array([
                 item[k]
                 for k in self.labels_distances_active
             ])
-            if self.ds_args.use_distance_switches:
+            if self.dst_args.use_distance_switches:
                 params['distance_switches'] = np.array([
                     0 if item[k] == 0 else 1
                     for k in [k.replace('d', 'a') for k in self.labels_distances_active]
                 ])
 
         # Transformation parameters are normalised by the dataset statistics
-        if self.ds_args.train_transformation or self.ds_args.train_3d:
+        if self.dst_args.train_transformation or self.dst_args.train_3d:
             # Normalise the origin to [-1, 1] x 3, but scale together
             origin = np.array(r_params['crystal']['origin'])
             l_max = np.array([self.ds_stats[xyz]['max'] for xyz in 'xyz'])
@@ -431,10 +437,10 @@ class Dataset:
                 R0 = Rotation.from_rotvec(r_params['crystal']['rotation'])
 
             # Rotation representation to be returned
-            if self.ds_args.rotation_mode == ROTATION_MODE_QUATERNION:
+            if self.dst_args.rotation_mode == ROTATION_MODE_QUATERNION:
                 rotation = R0.as_quat(canonical=True)[[3, 0, 1, 2]]
             else:
-                assert self.ds_args.rotation_mode == ROTATION_MODE_AXISANGLE
+                assert self.dst_args.rotation_mode == ROTATION_MODE_AXISANGLE
                 rotation = R0.as_rotvec()
 
             params['transformation'] = np.array([
@@ -444,7 +450,7 @@ class Dataset:
             ])
 
             # Apply the rotation to the symmetry group
-            if self.ds_args.check_symmetries > 0:
+            if self.dst_args.check_symmetries > 0:
                 sym_group = self._get_symmetry_group(idx)
                 sym_R = np.zeros((len(sym_group), 3, 3))
                 for i, R in enumerate(sym_group):
@@ -463,7 +469,7 @@ class Dataset:
             #     assert np.all(min_vertex_dists < 0.1), 'Symmetry group is not correct!'
 
         # 3D vertices are transformed by the normalised transformation parameters
-        if self.ds_args.train_3d:
+        if self.dst_args.train_3d:
             origin_og = np.array(r_params['crystal']['origin'])
             scale_og = r_params['crystal']['scale']
             origin_new = params['transformation'][:3]
@@ -480,7 +486,7 @@ class Dataset:
             ])
 
         # Material parameters are z-score standardised
-        if self.ds_args.train_material and len(self.labels_material_active) > 0:
+        if self.dst_args.train_material and len(self.labels_material_active) > 0:
             m_params = []
             if 'ior' in self.labels_material_active:
                 m_params.append(z_transform(r_params['crystal']['material_ior'], 'ior'))
@@ -488,14 +494,14 @@ class Dataset:
                 m_params.append(z_transform(r_params['crystal']['material_roughness'], 'r'))
             params['material'] = np.array(m_params)
 
-        if self.ds_args.train_light:
+        if self.dst_args.train_light:
             # Standardise the radiance
             params['light'] = np.array([
                 z_transform(r_params['light_radiance'][i], f'e{rgb}')
                 for i, rgb in enumerate('rgb')
             ])
 
-        return item, img, params
+        return item, img, img_clean, params
 
     def load_crystal(
             self,
@@ -577,10 +583,10 @@ class Dataset:
         """
         Calculate a set of rotation matrices for a given number of angles.
         """
-        if self.ds_args.check_symmetries == 0:
+        if self.dst_args.check_symmetries == 0:
             angles = [0, ]
         else:
-            angles = np.linspace(0, np.pi, 1 + self.ds_args.check_symmetries, endpoint=True)
+            angles = np.linspace(0, np.pi, 1 + self.dst_args.check_symmetries, endpoint=True)
         Rs_all = []
         for rx, ry, rz in product(angles, repeat=3):
             R = Rotation.from_euler('XYZ', [rx, ry, rz])
@@ -737,7 +743,7 @@ class Dataset:
         bs = distance_vals.shape[0]
 
         # Set distances to something large if the switches are off or if the distance is negative
-        if self.ds_args.use_distance_switches and switches is not None:
+        if self.dst_args.use_distance_switches and switches is not None:
             distance_vals = torch.where(switches < .5, missing_distance_val, distance_vals)
         distance_vals[distance_vals < 0] = missing_distance_val
 

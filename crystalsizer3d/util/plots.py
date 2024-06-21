@@ -689,7 +689,7 @@ def plot_training_samples(
     Plot the image and parameter comparisons.
     """
     n_examples = len(idxs)
-    metas, images, images_aug, Y_target = data
+    metas, images, images_aug, images_clean, Y_target = data
     Y_pred = outputs['Y_pred']
     dsa = manager.dataset_args
     if dsa.train_generator:
@@ -721,8 +721,8 @@ def plot_training_samples(
     if dsa.train_light:
         height_ratios.append(0.7)
     if dsa.train_generator:
-        height_ratios.insert(0, 1.2)
-        height_ratios.insert(0, 1.2)
+        height_ratios.insert(0, 1.3)
+        height_ratios.insert(0, 1.3)
 
     fig = plt.figure(figsize=(n_examples * 2.7, n_rows * 2.3))
     gs = GridSpec(

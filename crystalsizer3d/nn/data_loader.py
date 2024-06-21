@@ -1,8 +1,9 @@
 from abc import ABC
-from typing import Dict, Tuple
+from typing import Dict, Optional, Tuple
 
 import numpy as np
 import torch
+from torch import Tensor
 from torch.utils.data import DataLoader, Dataset as DatasetTorch, default_collate
 from torchvision import transforms
 from torchvision.transforms.functional import to_tensor
@@ -22,7 +23,7 @@ class GaussianNoise(torch.nn.Module):
     def get_params(sigma_min: float, sigma_max: float) -> float:
         return torch.empty(1).uniform_(sigma_min, sigma_max).item()
 
-    def forward(self, img: torch.Tensor) -> torch.Tensor:
+    def forward(self, img: Tensor) -> Tensor:
         sigma = self.get_params(self.sigma_min, self.sigma_max)
         return img + sigma * torch.randn_like(img)
 
@@ -68,10 +69,13 @@ class DatasetLoader(DatasetTorch, ABC):
             ]),
         ])
 
-    def __getitem__(self, index: int) -> Tuple[dict, torch.Tensor, torch.Tensor, Dict[str, torch.Tensor]]:
+    def __getitem__(self, index: int) \
+            -> Tuple[dict, Tensor, Tensor, Optional[Tensor], Dict[str, Tensor]]:
         ds_idx = self.idxs[index]
-        item, image, params = self.ds.load_item(ds_idx)
+        item, image, image_clean, params = self.ds.load_item(ds_idx)
         image = to_tensor(image)
+        if image_clean is not None:
+            image_clean = to_tensor(image_clean)
         params = {
             k: torch.from_numpy(v).to(torch.float32) if isinstance(v, np.ndarray) else v
             for k, v in params.items()
@@ -82,7 +86,7 @@ class DatasetLoader(DatasetTorch, ABC):
         else:
             image_aug = image.clone()
 
-        return item, image, image_aug, params
+        return item, image, image_aug, image_clean, params
 
     def __len__(self) -> int:
         return self.ds.get_size(self.train_or_test)
@@ -103,10 +107,6 @@ def get_data_loader(
 
     def collate_fn(batch):
         transposed = list(zip(*batch))
-        ret = []
-        ret.append(transposed[0])  # meta
-        ret.append(default_collate(transposed[1]))  # image
-        ret.append(default_collate(transposed[2]))  # image_aug
 
         def collate_targets(targets):
             data = {}
@@ -117,7 +117,14 @@ def get_data_loader(
                     data[k] = default_collate([target[k] for target in targets])
             return data
 
-        ret.append(collate_targets(transposed[3]))  # params
+        ret = [
+            transposed[0],  # meta
+            default_collate(transposed[1]),  # image
+            default_collate(transposed[2]),  # image_aug
+            default_collate(transposed[3]) if transposed[3][0] is not None else None,  # image_clean
+            collate_targets(transposed[4]),  # params
+        ]
+
         return ret
 
     dataset_loader = DatasetLoader(
