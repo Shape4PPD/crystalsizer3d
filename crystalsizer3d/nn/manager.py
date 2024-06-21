@@ -92,7 +92,8 @@ class Manager:
             generator_args: GeneratorArgs,
             transcoder_args: TranscoderArgs,
             optimiser_args: OptimiserArgs,
-            save_dir: Optional[Path] = None
+            save_dir: Optional[Path] = None,
+            print_networks: bool = True
     ):
         # Argument groups
         self.runtime_args = runtime_args
@@ -104,6 +105,9 @@ class Manager:
 
         # Save dir
         self.save_dir = save_dir
+
+        # Debug
+        self.print_networks = print_networks
 
         # Seed
         if self.runtime_args.seed is not None:
@@ -181,7 +185,8 @@ class Manager:
             cls,
             model_path: Path,
             args_changes: Dict[str, Dict[str, Any]],
-            save_dir: Optional[Path] = None
+            save_dir: Optional[Path] = None,
+            print_networks: bool = False
     ) -> 'Manager':
         """
         Instantiate a manager from a checkpoint json file.
@@ -211,7 +216,8 @@ class Manager:
             net_args=NetworkArgs.from_args(data['network_args']),
             generator_args=GeneratorArgs.from_args(data['generator_args']),
             transcoder_args=TranscoderArgs.from_args(data['transcoder_args']),
-            optimiser_args=OptimiserArgs.from_args(data['optimiser_args'])
+            optimiser_args=OptimiserArgs.from_args(data['optimiser_args']),
+            print_networks=print_networks
         )
 
         # Update the arguments with required changes
@@ -257,7 +263,7 @@ class Manager:
         for tt in ['train', 'test']:
             loaders[tt] = get_data_loader(
                 ds=self.ds,
-                augment=self.dataset_args.augment,
+                dst_args=self.dataset_args,
                 train_or_test=tt,
                 batch_size=self.runtime_args.batch_size,
                 n_workers=self.runtime_args.n_dataloader_workers,
@@ -349,7 +355,8 @@ class Manager:
         logger.info(f'Instantiated predictor network with {predictor.get_n_params() / 1e6:.4f}M parameters.')
         if net_args.base_net in ['vitnet', 'timm']:
             logger.info(f'Classifier has {predictor.get_n_classifier_params() / 1e6:.4f}M parameters.')
-        logger.debug(f'----------- Predictor Network --------------\n\n{predictor}\n\n')
+        if self.print_networks:
+            logger.debug(f'----------- Predictor Network --------------\n\n{predictor}\n\n')
         predictor.to(self.device)
 
         # Instantiate an exponential moving average tracker for the predictor loss
@@ -418,7 +425,8 @@ class Manager:
 
         # Instantiate the network
         logger.info(f'Instantiated generator network with {generator.get_n_params() / 1e6:.4f}M parameters.')
-        logger.debug(f'----------- Generator Network --------------\n\n{generator}\n\n')
+        if self.print_networks:
+            logger.debug(f'----------- Generator Network --------------\n\n{generator}\n\n')
         generator.to(self.device)
 
         # Instantiate an exponential moving average tracker for the generator loss
@@ -444,7 +452,8 @@ class Manager:
 
         # Instantiate the network
         logger.info(f'Instantiated discriminator network with {discriminator.get_n_params() / 1e6:.4f}M parameters.')
-        logger.debug(f'----------- Discriminator Network --------------\n\n{discriminator}\n\n')
+        if self.print_networks:
+            logger.debug(f'----------- Discriminator Network --------------\n\n{discriminator}\n\n')
         discriminator.to(self.device)
 
         # Instantiate an exponential moving average tracker for the discriminator loss
@@ -494,7 +503,8 @@ class Manager:
 
         # Instantiate the network
         logger.info(f'Instantiated transcoder network with {transcoder.get_n_params() / 1e6:.4f}M parameters.')
-        logger.debug(f'----------- Transcoder Network --------------\n\n{transcoder}\n\n')
+        if self.print_networks:
+            logger.debug(f'----------- Transcoder Network --------------\n\n{transcoder}\n\n')
         transcoder.to(self.device)
 
         # Instantiate exponential moving average trackers for the reconstruction and regularisation losses
