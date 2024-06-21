@@ -89,6 +89,21 @@ class DatasetSyntheticArgs(BaseArgs):
             defect_max_width: float = 0.001,
             defect_max_z: float = 0.1,
 
+            # Crystal seed properties
+            seed_prob: float = 0.,
+            seed_scale_min: float = 0.1,
+            seed_scale_max: float = 0.6,
+            seed_distances_var: float = 0.1,
+            seed_origin_var: float = 0.1,
+            seed_perlin_freq_min: float = 3,
+            seed_perlin_freq_max: float = 8.,
+            seed_perlin_octaves_min: int = 4,
+            seed_perlin_octaves_max: int = 10,
+            seed_white_noise_scale_min: float = 0.0001,
+            seed_white_noise_scale_max: float = 0.005,
+            seed_noise_amplitude_min: float = 0.01,
+            seed_noise_amplitude_max: float = 0.4,
+
             # Bubble properties
             min_bubbles: int = 0,
             max_bubbles: int = 0,
@@ -201,6 +216,27 @@ class DatasetSyntheticArgs(BaseArgs):
         self.defect_min_width = defect_min_width
         self.defect_max_width = defect_max_width
         self.defect_max_z = defect_max_z
+
+        # Crystal seed properties
+        assert 0 <= seed_prob <= 1, f'Seed probability must be between 0 and 1. {seed_prob} received.'
+        if seed_prob > 0:
+            assert crystal_bumpmap_dim > 0, \
+                f'Crystal bumpmap dimension must be greater than 0 if seed probability is greater than 0. {crystal_bumpmap_dim} received.'
+        self.seed_prob = seed_prob
+        assert 0 < seed_scale_min <= seed_scale_max < 1, \
+            f'Seed scale must be between 0 and 1 and min must be less than max. {seed_scale_min} <= {seed_scale_max} received.'
+        self.seed_scale_min = seed_scale_min
+        self.seed_scale_max = seed_scale_max
+        self.seed_distances_var = seed_distances_var
+        self.seed_origin_var = seed_origin_var
+        self.seed_perlin_freq_min = seed_perlin_freq_min
+        self.seed_perlin_freq_max = seed_perlin_freq_max
+        self.seed_perlin_octaves_min = seed_perlin_octaves_min
+        self.seed_perlin_octaves_max = seed_perlin_octaves_max
+        self.seed_white_noise_scale_min = seed_white_noise_scale_min
+        self.seed_white_noise_scale_max = seed_white_noise_scale_max
+        self.seed_noise_amplitude_min = seed_noise_amplitude_min
+        self.seed_noise_amplitude_max = seed_noise_amplitude_max
 
         # Bubble properties
         self.min_bubbles = min_bubbles
@@ -357,6 +393,34 @@ class DatasetSyntheticArgs(BaseArgs):
                            help='Maximum defect width.')
         group.add_argument('--defect-max-z', type=float, default=1,
                            help='Maximum defect z-coordinate.')
+
+        # Crystal seed properties
+        group.add_argument('--seed-prob', type=float, default=0.,
+                           help='Probability of adding a seed crystal inside the crystal.')
+        group.add_argument('--seed-scale-min', type=float, default=0.1,
+                           help='Minimum scale of the seed crystal.')
+        group.add_argument('--seed-scale-max', type=float, default=0.6,
+                           help='Maximum scale of the seed crystal.')
+        group.add_argument('--seed-distances-var', type=float, default=0.1,
+                           help='Variance of the face distances of the seed crystal relative to the crystal.')
+        group.add_argument('--seed-origin-var', type=float, default=0.1,
+                           help='Variance of the origin of the seed crystal.')
+        group.add_argument('--seed-perlin-freq-min', type=float, default=3,
+                           help='Minimum Perlin frequency of the seed crystal bumpmap texture.')
+        group.add_argument('--seed-perlin-freq-max', type=float, default=8.,
+                           help='Maximum Perlin frequency of the seed crystal bumpmap texture.')
+        group.add_argument('--seed-perlin-octaves-min', type=int, default=4,
+                           help='Minimum Perlin octaves of the seed crystal bumpmap texture.')
+        group.add_argument('--seed-perlin-octaves-max', type=int, default=10,
+                           help='Maximum Perlin octaves of the seed crystal bumpmap texture.')
+        group.add_argument('--seed-white-noise-scale-min', type=float, default=0.0001,
+                           help='Minimum white noise scale of the seed crystal bumpmap texture.')
+        group.add_argument('--seed-white-noise-scale-max', type=float, default=0.005,
+                           help='Maximum white noise scale of the seed crystal bumpmap texture.')
+        group.add_argument('--seed-noise-amplitude-min', type=float, default=0.01,
+                           help='Minimum noise amplitude of the seed crystal bumpmap texture.')
+        group.add_argument('--seed-noise-amplitude-max', type=float, default=0.4,
+                           help='Maximum noise amplitude of the seed crystal bumpmap texture.')
 
         # Bubbles
         group.add_argument('--min-bubbles', type=int, default=0,

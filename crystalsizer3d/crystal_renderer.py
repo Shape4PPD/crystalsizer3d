@@ -144,7 +144,7 @@ def _initialise_crystal(
     crystal.to(device)
 
     # Create the crystal bumpmap
-    if da.crystal_bumpmap_dim > 0:
+    if da.crystal_bumpmap_dim > 0 and da.max_defects > 0:
         n_defects = np.random.randint(da.min_defects, da.max_defects + 1)
         crystal.bumpmap.data = generate_crystal_bumpmap(
             crystal=crystal,
@@ -155,6 +155,41 @@ def _initialise_crystal(
         )
 
     return crystal
+
+
+def _initialise_crystal_seed(
+        crystal: Crystal,
+        dataset_args: DatasetSyntheticArgs,
+) -> Crystal:
+    """
+    Initialise a crystal seed object based on the crystal.
+    """
+    da = dataset_args
+    crystal_seed = crystal.clone()
+
+    # Scale will be multiplied by the crystal scale after crystal is placed in the scene
+    crystal_seed.scale.data = torch.tensor(np.random.uniform(da.seed_scale_min, da.seed_scale_max))
+
+    # Add a bit of noise to the distances
+    dists_mu = crystal_seed.distances
+    dists_sigma = dists_mu * da.seed_distances_var
+    crystal_seed.distances.data = torch.normal(mean=dists_mu, std=dists_sigma)
+
+    # The origin will be added to the crystal origin
+    crystal_seed.origin.data = torch.randn(3) * da.seed_origin_var
+
+    # Generate a random noise texture for the seed bumpmap
+    crystal_seed.bumpmap_texture = NoiseTexture(
+        dim=crystal.bumpmap_dim,
+        perlin_freq=np.random.uniform(da.seed_perlin_freq_min, da.seed_perlin_freq_max),
+        perlin_octaves=np.random.randint(da.seed_perlin_octaves_min, da.seed_perlin_octaves_max + 1),
+        white_noise_scale=np.random.uniform(da.seed_white_noise_scale_min, da.seed_white_noise_scale_max),
+        max_amplitude=np.random.uniform(da.seed_noise_amplitude_min, da.seed_noise_amplitude_max),
+    )
+    crystal_seed.bumpmap.data = crystal_seed.bumpmap_texture.build()
+    crystal_seed.use_bumpmap = True
+
+    return crystal_seed
 
 
 def _render_batch(
@@ -253,6 +288,10 @@ def _render_batch(
             crystal_params_i['distances'] = list(params['distances'].values())
             scene.crystal = _initialise_crystal(crystal_params_i, da, scale_init, device=torch.device('cpu'))
 
+            # Add the crystal seed
+            if np.random.rand() < da.seed_prob:
+                scene.crystal_seed = _initialise_crystal_seed(scene.crystal, da)
+
             # Create the bubbles
             if da.max_bubbles > 0:
                 scene.bubbles = make_bubbles(
@@ -310,6 +349,8 @@ def _render_batch(
                 )
             scale_init = scene.crystal.scale.item()
             scene.crystal.to(device)
+            if scene.crystal_seed is not None:
+                scene.crystal_seed.to(device)
             for bubble in scene.bubbles:
                 bubble.to(device)
             scene.build_mi_scene()
@@ -325,6 +366,8 @@ def _render_batch(
                 'cell_bumpmap_idx': scene_params['cell_bumpmap_idx'],
                 'crystal': scene_params['crystal'],
             }
+            if 'crystal_seed' in scene_params:
+                rendering_params[idx]['crystal_seed'] = scene_params['crystal_seed']
             if 'bubbles' in scene_params:
                 rendering_params[idx]['bubbles'] = scene_params['bubbles']
             segmentations[idx] = scene.get_crystal_image_coords().tolist()
@@ -832,6 +875,19 @@ class CrystalRenderer:
         else:
             crystal.bumpmap.data.zero_()
 
+        # Create the crystal seed
+        crystal_seed = None
+        if 'crystal_seed' in params:
+            crystal_seed = self._init_crystal(
+                distances=params['crystal_seed']['distances'],
+                scale=params['crystal_seed']['scale'],
+                origin=params['crystal_seed']['origin'],
+                rotation=params['crystal']['rotation']
+            )
+            crystal_seed.use_bumpmap = True
+            crystal_seed.bumpmap_texture = NoiseTexture(**params['crystal_seed']['bumpmap_texture'])
+            crystal_seed.bumpmap.data = crystal_seed.bumpmap_texture.build(device=device)
+
         # Create the bubbles
         bubbles = []
         if 'bubbles' in params:
@@ -849,6 +905,7 @@ class CrystalRenderer:
         # Create and render the scene
         scene = Scene(
             crystal=crystal,
+            crystal_seed=crystal_seed,
             bubbles=bubbles,
             res=self.dataset_args.image_size,
             light_radiance=params['light_radiance'],

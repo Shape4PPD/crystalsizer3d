@@ -7,6 +7,7 @@ import trimesh.remesh
 from trimesh import Trimesh
 
 from crystalsizer3d.crystal import Crystal
+from crystalsizer3d.scene_components.textures import NoiseTexture
 from crystalsizer3d.util.utils import to_numpy
 
 

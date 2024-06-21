@@ -7,46 +7,66 @@ from torch.utils.data import DataLoader, Dataset as DatasetTorch, default_collat
 from torchvision import transforms
 from torchvision.transforms.functional import to_tensor
 
+from crystalsizer3d.args.dataset_training_args import DatasetTrainingArgs
 from crystalsizer3d.nn.dataset import Dataset
 
 
-def get_affine_transforms() -> transforms.Compose:
-    raise NotImplementedError('Affine transforms not implemented.')
-    return transforms.Compose([
-        transforms.RandomOrder([
-            transforms.RandomHorizontalFlip(),
-            transforms.RandomVerticalFlip(),
-        ])
-    ])
+class GaussianNoise(torch.nn.Module):
+    def __init__(self, sigma_min: float = 0.1, sigma_max: float = 1.0):
+        super().__init__()
+        assert 0 <= sigma_min <= sigma_max, 'sigma_min should be smaller than sigma_max'
+        self.sigma_min = sigma_min
+        self.sigma_max = sigma_max
 
+    @staticmethod
+    def get_params(sigma_min: float, sigma_max: float) -> float:
+        return torch.empty(1).uniform_(sigma_min, sigma_max).item()
 
-def get_image_transforms() -> transforms.Compose:
-    return transforms.Compose([
-        transforms.RandomApply([
-            transforms.GaussianBlur(kernel_size=9, sigma=(0.01, 5)),
-        ])
-    ])
+    def forward(self, img: torch.Tensor) -> torch.Tensor:
+        sigma = self.get_params(self.sigma_min, self.sigma_max)
+        return img + sigma * torch.randn_like(img)
+
+    def __repr__(self) -> str:
+        s = f'{self.__class__.__name__}(sigma_min={self.sigma_min}, sigma_max={self.sigma_max})'
+        return s
 
 
 class DatasetLoader(DatasetTorch, ABC):
     def __init__(
             self,
             ds: Dataset,
-            augment: bool,
+            dst_args: DatasetTrainingArgs,
             train_or_test: str,
     ):
         assert train_or_test in ['train', 'test']
         self.ds = ds
         self.idxs = list(getattr(ds, train_or_test + '_idxs'))
         self.train_or_test = train_or_test
-        self.augment = augment
-        if self.augment:
-            self.image_transforms = get_image_transforms()
-            # todo: get_affine_transforms() - labels need changing too with this
-            self.affine_transforms = None
+        self.dst_args = dst_args
+        if train_or_test == 'train' and self.dst_args.augment:
+            self.image_transforms = self._init_image_transforms()
         else:
             self.image_transforms = None
-            self.affine_transforms = None
+
+    def _init_image_transforms(self) -> transforms.Compose:
+        return transforms.Compose([
+            transforms.RandomChoice([
+                transforms.RandomApply([
+                    transforms.GaussianBlur(
+                        kernel_size=9,
+                        sigma=(
+                            self.dst_args.augment_blur_min_sigma,
+                            self.dst_args.augment_blur_max_sigma
+                        )),
+                ], p=self.dst_args.augment_blur_prob),
+                transforms.RandomApply([
+                    GaussianNoise(
+                        sigma_min=self.dst_args.augment_noise_min_sigma,
+                        sigma_max=self.dst_args.augment_noise_max_sigma
+                    ),
+                ], p=self.dst_args.augment_noise_prob),
+            ]),
+        ])
 
     def __getitem__(self, index: int) -> Tuple[dict, torch.Tensor, torch.Tensor, Dict[str, torch.Tensor]]:
         ds_idx = self.idxs[index]
@@ -57,8 +77,7 @@ class DatasetLoader(DatasetTorch, ABC):
             for k, v in params.items()
         }
 
-        if self.augment:
-            # image = self.affine_transforms(image)
+        if self.image_transforms is not None:
             image_aug = self.image_transforms(image)
         else:
             image_aug = image.clone()
@@ -71,7 +90,7 @@ class DatasetLoader(DatasetTorch, ABC):
 
 def get_data_loader(
         ds: Dataset,
-        augment: bool,
+        dst_args: DatasetTrainingArgs,
         train_or_test: str,
         batch_size: int,
         n_workers: int,
@@ -103,7 +122,7 @@ def get_data_loader(
 
     dataset_loader = DatasetLoader(
         ds=ds,
-        augment=augment,
+        dst_args=dst_args,
         train_or_test=train_or_test,
     )
 
