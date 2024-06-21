@@ -60,7 +60,6 @@ class Crystal(nn.Module):
 
             merge_vertices: bool = False,
             dtype: torch.dtype = torch.float32,
-            triangular_faces: bool = True,
     ):
         """
         Set up the initial crystal and calculate the crystal habit.
@@ -153,7 +152,6 @@ class Crystal(nn.Module):
 
         # Mesh options
         self.merge_vertices = merge_vertices
-        self.triangular_faces = triangular_faces
 
         # Register buffers
         self.register_buffer('all_distances', torch.empty(0))
@@ -415,35 +413,15 @@ class Crystal(nn.Module):
             # Update the vertex index to continue from the last face
             mfi = mfi + v_idx
             v_idx += N + 1
-            if self.triangular_faces:
-                mesh_vertices.append(mfv)
-                mesh_faces.append(mfi)
-            else:
-                mesh_vertices.append(face_vertices[sorted_idxs])
-                mesh_faces.append(sorted_face_vertex_idxs)
+            mesh_vertices.append(mfv)
+            mesh_faces.append(mfi)
 
         if len(mesh_faces) < 3:
             raise ValueError('Not enough faces to build a mesh!')
 
         # Step 4: Merge mesh vertices and correct face indices
-        if self.triangular_faces:
-            mesh_vertices = torch.cat(mesh_vertices)
-            mesh_faces = torch.cat(mesh_faces, dim=1).T
-        else:
-            # Pad tensor if not using a trianglular mesh
-            # Find the length of the longest tensor
-            max_length = max(tensor.size(0) for tensor in mesh_faces)
-            
-            # Pad each tensor to the maximum length
-            padded_tensors = [
-                torch.nn.functional.pad(tensor, (0, max_length - tensor.size(0)),value=-1)
-                for tensor in mesh_faces
-            ]
-            
-            # Stack the padded tensors to form a single 2D tensor
-            mesh_faces = torch.stack(padded_tensors)
-            mesh_vertices = vertices
-            
+        mesh_vertices = torch.cat(mesh_vertices)
+        mesh_faces = torch.cat(mesh_faces, dim=1).T
         if self.merge_vertices:
             mesh_vertices, cluster_idxs = merge_vertices(mesh_vertices)
             mesh_faces = cluster_idxs[mesh_faces]
