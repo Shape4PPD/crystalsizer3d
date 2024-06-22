@@ -77,7 +77,7 @@ class ViTVAE(BaseNet):
         self.enc_dec = ViTEncDec(
             dim=self.latent_size,
             image_size=image_size,
-            channels=1,
+            channels=self.output_shape[0],
             layers=self.n_layers,
             patch_size=self.patch_size,
             dim_head=self.dim_head,

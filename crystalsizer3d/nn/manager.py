@@ -118,7 +118,7 @@ class Manager:
 
     @property
     def image_shape(self) -> Tuple[int, ...]:
-        n_channels = 3 if self.dataset_args.add_coord_grid else 1
+        n_channels = 5 if self.dataset_args.add_coord_grid else 3
         return n_channels, self.ds.image_size, self.ds.image_size
 
     @property
