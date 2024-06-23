@@ -1183,7 +1183,7 @@ class Manager:
             outputs['Z_pred'] = Z.clone().detach()
             X_pred = self.generator(Z)
             outputs['X_pred'] = X_pred
-            loss_g, metrics_g, Y_pred2 = self.calculate_generator_losses(X_pred, X_target_aug, Y_target,
+            loss_g, metrics_g, Y_pred2 = self.calculate_generator_losses(X_pred, X_target_clean, Y_target,
                                                                          include_teacher_loss=False,
                                                                          include_transcoder_loss=False)
             metrics.update(metrics_g)
