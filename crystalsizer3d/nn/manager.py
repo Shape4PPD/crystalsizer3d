@@ -1321,8 +1321,7 @@ class Manager:
         if isinstance(Y_target, Tensor):
             Y_target_vec = Y_target.to(self.device)
         else:
-            Y_target_vec = torch.cat([Yk for Yk in Y_target.values() if isinstance(Yk, Tensor)], dim=1).to(
-                self.device)
+            Y_target_vec = self._Y_to_vec(Y_target)
 
         # Encode parameters into the latent space
         Z_mu_logits, Z_logvar = self.transcoder.to_latents(Y_target_vec, return_logvar=True, activate=False)
@@ -1349,7 +1348,7 @@ class Manager:
 
     def predict(self, X: Tensor, latent_input: bool = False) -> Dict[str, Tensor]:
         """
-        Take a batch of input data and return network output.
+        Take a batch of images and predict parameters.
         """
         X = X.to(self.device)
 
@@ -1453,26 +1452,33 @@ class Manager:
 
         return output
 
+    @staticmethod
+    def _Y_to_vec(Y: Dict[str, Tensor]) -> Tensor:
+        """
+        Convert a dictionary of parameters to a vector, only extracting the actual parameters
+        """
+        return torch.cat([
+            Yk for k, Yk in Y.items()
+            if k in ['distances', 'transformation', 'material', 'light']
+        ], dim=1)
+
     def generate(self, Y: Dict[str, Tensor]) -> Optional[Tensor]:
         """
         Take a batch of parameters and generate a batch of images.
         """
         if not self.dataset_args.train_generator:
             return None
-        Y_vector = torch.cat([
-            Yk for k, Yk in Y.items()
-            if k in ['distances', 'transformation', 'material', 'light']
-        ], dim=1)
+        Y_vec = self._Y_to_vec(Y)
 
         # Add some noise to the input parameters during training
         if self.generator.training and self.generator_args.gen_input_noise_std > 0:
-            Y_vector = Y_vector + torch.randn_like(Y_vector) * self.generator_args.gen_input_noise_std
+            Y_vec = Y_vec + torch.randn_like(Y_vec) * self.generator_args.gen_input_noise_std
 
         # Transcode
         if self.transcoder_args.use_transcoder:
-            Y_vector = self.transcoder(Y_vector, 'latents')
+            Y_vec = self.transcoder(Y_vec, 'latents')
 
-        X_pred = self.generator(Y_vector)
+        X_pred = self.generator(Y_vec)
 
         return X_pred
 
@@ -1841,7 +1847,7 @@ class Manager:
         if self.transcoder_args.use_transcoder:
             Z = self.transcoder.latents_in
         else:
-            Z = torch.cat([Yk for k, Yk in Y_pred.items() if k != 'sym_rotations'], dim=1)
+            Z = self._Y_to_vec(Y_pred)
         X_pred2 = self.generator(Z)
 
         # Calculate how closely the same images come back out
@@ -1931,23 +1937,25 @@ class Manager:
         Calculate the teacher losses using the parameter network as the teacher.
         """
         # Run the predicted image through the parameter network to estimate the parameters (or latent vector logits)
-        Y_pred2 = self.predictor(X_pred)
+        Y_pred2 = self.predict(X_pred)
         stats = {}
 
         # Calculate loss in the latent space if using a transcoder
         if self.transcoder_args.use_transcoder:
             Z1 = self.transcoder.latents_out  # Latent vector from parameters via transcoder
-            Z2 = self.transcoder.latent_activation_fn(Y_pred2)  # Latent vector from image via predictor
+            Z2 = self.transcoder.latents_in  # Latent vector from image via predictor
             loss = ((Z1 - Z2)**2).mean()
         else:
             # Calculate how closely the same parameters come back out
-            loss, r_stats = self._calculate_parameter_reconstruction_losses(Y_target, Y_pred2, check_sym_rotations=True)
+            loss, r_stats = self._calculate_parameter_reconstruction_losses(
+                Y_target, Y_pred2, check_sym_rotations=True
+            )
             for k, v in r_stats.items():
                 stats[f'losses/teacher_gen/{k}'] = v
 
         stats['losses/teacher_gen'] = loss.item()
 
-        return loss, stats, self.prepare_parameter_dict(Y_pred2.detach().cpu())
+        return loss, stats, Y_pred2
 
     def _calculate_gen_gan_losses(
             self,
@@ -2101,13 +2109,14 @@ class Manager:
     def _calculate_parameter_reconstruction_losses(
             self,
             Y_target: Dict[str, Union[Tensor, List[Tensor]]],
-            Y_pred_vec: Tensor,
+            Y_pred: Union[dict, Tensor],
             check_sym_rotations: bool = False
     ):
         """
         Calculate the parameter errors.
         """
-        Y_pred = self.prepare_parameter_dict(Y_pred_vec)
+        if isinstance(Y_pred, Tensor):
+            Y_pred = self.prepare_parameter_dict(Y_pred)
         losses = []
         stats = {}
 
@@ -2157,21 +2166,21 @@ class Manager:
         """
         Calculate the parameter independence loss.
         """
-        Y_vector = torch.cat([Yk for Yk in Y_target.values() if isinstance(Yk, Tensor)], dim=1)
+        Y_vec = self._Y_to_vec(Y_target)
         noise_level = 0.1
-        bs = len(Y_vector)
+        bs = len(Y_vec)
 
-        # The parameter groups should be independent
+        # The parameters should be independent
         groups = {}
         Y_perturbations = []
         idx = 0
 
         def add_to_batch(start_idx, end_idx):
-            noise = torch.randn_like(Y_vector) * noise_level
+            noise = torch.randn_like(Y_vec) * noise_level
             noise[:, start_idx:end_idx] = 0
-            Y_perturbations.append(Y_vector.clone() + noise)
+            Y_perturbations.append(Y_vec.clone() + noise)
 
-        # Zinng parameters and distances define the morphology
+        # Distances define the morphology
         if self.dataset_args.train_distances:
             n_params = len(self.ds.labels_distances_active)
             if self.dataset_args.use_distance_switches:
@@ -2185,9 +2194,16 @@ class Manager:
 
         # Transformation has three independent components - location, scale and rotation
         if self.dataset_args.train_transformation:
-            groups['t/location'] = (idx, idx + 3)
-            idx += 3
-            groups['t/scale'] = (idx, idx + 1)
+            # groups['t/location'] = (idx, idx + 3)
+            # idx += 3
+            groups['t/origin_x'] = (idx, idx + 1)
+            idx += 1
+            groups['t/origin_y'] = (idx, idx + 1)
+            idx += 1
+            groups['t/origin_z'] = (idx, idx + 1)
+            idx += 1
+            # Leave out scale as it is sort of dependent on the morphology
+            # groups['t/scale'] = (idx, idx + 1)
             idx += 1
             if self.dataset_args.rotation_mode == ROTATION_MODE_QUATERNION:
                 groups['t/rotation'] = (idx, idx + 4)
@@ -2203,7 +2219,7 @@ class Manager:
                 groups[f'm/{k}'] = (idx, idx + 1)
                 idx += 1
 
-        # Lighting has one three component radiance property
+        # Lighting has one three-component radiance property
         if self.dataset_args.train_light:
             groups['l/radiance'] = (idx, idx + 3)
             idx += 1
@@ -2311,8 +2327,9 @@ class Manager:
             if self.dataset_args.train_predictor:
                 fig = plot_training_samples(self, data, outputs, train_or_test, idxs)
                 self._save_plot(fig, 'samples', train_or_test)
-            if self.transcoder_args.use_transcoder:
-                self._plot_vaetc_examples(data, outputs, train_or_test, idxs)
+            # if self.transcoder_args.use_transcoder: todo - fix
+            #     fig = plot_vaetc_examples(data, outputs, train_or_test, idxs)
+            #     self._save_plot(fig, 'vaetc_examples', train_or_test)
 
     def _save_plot(self, fig: Figure, plot_type: str, train_or_test: str = None):
         """
