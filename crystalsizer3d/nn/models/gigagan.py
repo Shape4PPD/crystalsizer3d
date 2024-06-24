@@ -82,7 +82,7 @@ class GigaGAN(BaseNet):
             image_size=image_size,
             dim_capacity=self.dim_capacity,
             dim_max=self.dim_max,
-            channels=1,
+            channels=self.output_shape[0],
             style_network_dim=self.latent_size,
             dim_latent=self.latent_size,
             self_attn_resolutions=tuple(self.self_attn_resolutions),
