@@ -53,7 +53,7 @@ from crystalsizer3d.nn.models.vit_pretrained import ViTPretrainedNet
 from crystalsizer3d.nn.models.vitvae import ViTVAE
 from crystalsizer3d.util.ema import EMA
 from crystalsizer3d.util.geometry import geodesic_distance
-from crystalsizer3d.util.plots import plot_training_samples
+from crystalsizer3d.util.plots import plot_generator_samples, plot_training_samples
 from crystalsizer3d.util.polyhedron import calculate_polyhedral_vertices
 from crystalsizer3d.util.utils import is_bad, set_seed
 
@@ -1181,19 +1181,24 @@ class Manager:
             metrics['loss_com/pred'] = loss.item()
             Z = self.transcoder.latents_in
             outputs['Z_pred'] = Z.clone().detach()
-            outputs['X_pred'] = outputs['X_pred2']
             loss_g, metrics_g, Y_pred2 = self.calculate_generator_losses(X_pred2, X_target_clean, Y_target,
                                                                          include_teacher_loss=False,
                                                                          include_transcoder_loss=False)
             metrics.update(metrics_g)
             metrics['loss_gen'] = loss_g.item()
             self.g_loss_ema(metrics['losses/generator'])
-            outputs['Y_pred2'] = Y_pred2
 
             # Replace loss with the generator loss plus the latents consistency loss
             l_z = self._calculate_com_loss(Z, Y_target=Y_target)
             metrics['loss_com/X'] = l_z.item()
             loss = loss_g + self.optimiser_args.w_com_X * l_z
+
+            # Also do the generation step from the target parameters
+            with torch.no_grad():
+                X_pred = self.generate(Y_target)
+                outputs['X_pred'] = X_pred.detach().cpu()
+                Y_pred2 = self.predict(X_pred)
+                outputs['Y_pred2'] = Y_pred2
 
         return outputs, loss, metrics
 
@@ -2310,7 +2315,7 @@ class Manager:
 
     def _make_plots(
             self,
-            data: Tuple[dict, Tensor, Tensor, Dict[str, Tensor]],
+            data: Tuple[dict, Tensor, Tensor, Tensor, Dict[str, Tensor]],
             outputs: Dict[str, Any],
             stats: Dict[str, Tensor],
             train_or_test: str,
@@ -2329,6 +2334,9 @@ class Manager:
             idxs = np.random.choice(self.runtime_args.batch_size, n_examples, replace=False)
             if self.dataset_args.train_predictor:
                 fig = plot_training_samples(self, data, outputs, train_or_test, idxs)
+                self._save_plot(fig, 'samples', train_or_test)
+            elif self.dataset_args.train_generator:
+                fig = plot_generator_samples(self, data, outputs, train_or_test, idxs)
                 self._save_plot(fig, 'samples', train_or_test)
             # if self.transcoder_args.use_transcoder: todo - fix
             #     fig = plot_vaetc_examples(data, outputs, train_or_test, idxs)

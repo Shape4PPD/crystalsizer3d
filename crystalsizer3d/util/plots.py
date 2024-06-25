@@ -12,6 +12,7 @@ from matplotlib.axes import Axes
 from matplotlib.figure import Figure
 from matplotlib.gridspec import GridSpec
 from mayavi import mlab
+from torch import Tensor
 
 from crystalsizer3d import USE_MLAB
 from crystalsizer3d.crystal import Crystal, ROTATION_MODE_AXISANGLE, ROTATION_MODE_QUATERNION
@@ -26,7 +27,7 @@ mlab.options.offscreen = True
 
 
 def _load_single_parameter(
-        Y: Union[None, Dict[str, torch.Tensor]],
+        Y: Union[None, Dict[str, Tensor]],
         key: str,
         idx: Optional[int] = 0
 ) -> Union[None, np.ndarray]:
@@ -82,7 +83,7 @@ def plot_image(ax: Axes, title: str, img: np.ndarray):
     ax.axis('off')
 
 
-def add_discriminator_value(ax: Axes, outputs: Dict[str, torch.Tensor], D_key: str, idx: int):
+def add_discriminator_value(ax: Axes, outputs: Dict[str, Tensor], D_key: str, idx: int):
     """
     Add the discriminator value to the axis.
     """
@@ -252,8 +253,8 @@ def plot_3d(
 
 def plot_zingg(
         ax: Axes,
-        Y_pred: Dict[str, torch.Tensor],
-        Y_target: Dict[str, torch.Tensor],
+        Y_pred: Dict[str, Tensor],
+        Y_target: Dict[str, Tensor],
         idx: int,
         share_ax: Dict[str, Axes],
         **kwargs
@@ -331,9 +332,9 @@ def _shared_ax_legend(share_ax: Dict[str, Axes], ax: Axes, key: str):
 def plot_distances(
         ax: Axes,
         manager: Manager,
-        Y_pred: Dict[str, torch.Tensor],
-        Y_target: Optional[Dict[str, torch.Tensor]] = None,
-        Y_pred2: Optional[Dict[str, torch.Tensor]] = None,
+        Y_pred: Dict[str, Tensor],
+        Y_target: Optional[Dict[str, Tensor]] = None,
+        Y_pred2: Optional[Dict[str, Tensor]] = None,
         idx: int = 0,
         colour_pred: str = 'cornflowerblue',
         colour_target: str = 'darkorange',
@@ -440,9 +441,9 @@ def plot_areas(
         ax: Axes,
         manager: Manager,
         crystal_pred: Crystal,
-        Y_pred: Dict[str, torch.Tensor],
+        Y_pred: Dict[str, Tensor],
         crystal_target: Optional[Crystal] = None,
-        Y_target: Optional[Dict[str, torch.Tensor]] = None,
+        Y_target: Optional[Dict[str, Tensor]] = None,
         idx: int = 0,
         colour_pred: str = 'cornflowerblue',
         colour_target: str = 'darkorange',
@@ -528,9 +529,9 @@ def plot_areas(
 def plot_transformation(
         ax: Axes,
         manager: Manager,
-        Y_pred: Dict[str, torch.Tensor],
-        Y_target: Optional[Dict[str, torch.Tensor]] = None,
-        Y_pred2: Optional[Dict[str, torch.Tensor]] = None,
+        Y_pred: Dict[str, Tensor],
+        Y_target: Optional[Dict[str, Tensor]] = None,
+        Y_pred2: Optional[Dict[str, Tensor]] = None,
         idx: int = 0,
         colour_pred: str = 'cornflowerblue',
         colour_target: str = 'darkorange',
@@ -600,9 +601,9 @@ def plot_transformation(
 def plot_material(
         ax: Axes,
         manager: Manager,
-        Y_pred: Dict[str, torch.Tensor],
-        Y_target: Optional[Dict[str, torch.Tensor]] = None,
-        Y_pred2: Optional[Dict[str, torch.Tensor]] = None,
+        Y_pred: Dict[str, Tensor],
+        Y_target: Optional[Dict[str, Tensor]] = None,
+        Y_pred2: Optional[Dict[str, Tensor]] = None,
         idx: int = 0,
         colour_pred: str = 'cornflowerblue',
         colour_target: str = 'darkorange',
@@ -643,9 +644,9 @@ def plot_material(
 
 def plot_light(
         ax: Axes,
-        Y_pred: Dict[str, torch.Tensor],
-        Y_target: Optional[Dict[str, torch.Tensor]] = None,
-        Y_pred2: Optional[Dict[str, torch.Tensor]] = None,
+        Y_pred: Dict[str, Tensor],
+        Y_target: Optional[Dict[str, Tensor]] = None,
+        Y_pred2: Optional[Dict[str, Tensor]] = None,
         idx: int = 0,
         colour_pred: str = 'cornflowerblue',
         colour_target: str = 'darkorange',
@@ -680,7 +681,7 @@ def plot_light(
 
 def plot_training_samples(
         manager: Manager,
-        data: Tuple[dict, torch.Tensor, torch.Tensor, Dict[str, torch.Tensor]],
+        data: Tuple[dict, Tensor, Tensor, Tensor, Dict[str, Tensor]],
         outputs: Dict[str, Any],
         train_or_test: str,
         idxs: List[int],
@@ -825,9 +826,67 @@ def plot_training_samples(
     return fig
 
 
+def plot_generator_samples(
+        manager: Manager,
+        data: Tuple[dict, Tensor, Tensor, Tensor, Dict[str, Tensor]],
+        outputs: Dict[str, Any],
+        train_or_test: str,
+        idxs: List[int],
+) -> Figure:
+    """
+    Plot the image and generator output.
+    """
+    n_examples = len(idxs)
+    metas, images, images_aug, images_clean, Y_target = data
+    X_pred = outputs['X_pred']
+    n_rows = 3
+    fig = plt.figure(figsize=(n_examples * 2.7, n_rows * 3))
+    gs = GridSpec(
+        nrows=n_rows,
+        ncols=n_examples,
+        wspace=0.06,
+        hspace=0.03,
+        top=0.95,
+        bottom=0.004,
+        left=0.01,
+        right=0.99
+    )
+
+    loss = getattr(manager.checkpoint, f'loss_{train_or_test}')
+    fig.suptitle(
+        f'epoch={manager.checkpoint.epoch}, '
+        f'step={manager.checkpoint.step + 1}, '
+        f'loss={loss:.4E}',
+        fontweight='bold',
+        y=0.995
+    )
+
+    for i, idx in enumerate(idxs):
+        meta = metas[idx]
+
+        # Plot the (possibly augmented) input image
+        img = to_numpy(images_aug[idx]).squeeze()
+        ax = fig.add_subplot(gs[0, i])
+        plot_image(ax, meta['image'].name, img)
+
+        # Plot the clean image
+        img = to_numpy(images_clean[idx]).squeeze()
+        ax = fig.add_subplot(gs[1, i])
+        plot_image(ax, 'Clean target', img)
+        add_discriminator_value(ax, outputs, 'D_real', idx)
+
+        # Plot the generated image
+        img = to_numpy(X_pred[idx]).squeeze()
+        ax = fig.add_subplot(gs[2, i])
+        plot_image(ax, 'Generated', img)
+        add_discriminator_value(ax, outputs, 'D_fake', idx)
+
+    return fig
+
+
 def _plot_vaetc_examples(
         self,
-        data: Tuple[dict, torch.Tensor, torch.Tensor, Dict[str, torch.Tensor]],
+        data: Tuple[dict, Tensor, Tensor, Dict[str, Tensor]],
         outputs: Dict[str, Any],
         train_or_test: str,
         idxs: np.ndarray
