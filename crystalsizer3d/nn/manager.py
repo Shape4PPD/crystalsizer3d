@@ -1170,7 +1170,7 @@ class Manager:
         loss, metrics, X_pred2 = self.calculate_predictor_losses(Y_pred, Y_target, X_target_clean)
         outputs = {
             'Y_pred': Y_pred,
-            'X_pred2': X_pred2
+            'X_pred2': X_pred2.detach().cpu()
         }
 
         # Update the EMA of the predictor loss
@@ -1181,9 +1181,8 @@ class Manager:
             metrics['loss_com/pred'] = loss.item()
             Z = self.transcoder.latents_in
             outputs['Z_pred'] = Z.clone().detach()
-            X_pred = self.generator(Z)
-            outputs['X_pred'] = X_pred
-            loss_g, metrics_g, Y_pred2 = self.calculate_generator_losses(X_pred, X_target_clean, Y_target,
+            outputs['X_pred'] = outputs['X_pred2']
+            loss_g, metrics_g, Y_pred2 = self.calculate_generator_losses(X_pred2, X_target_clean, Y_target,
                                                                          include_teacher_loss=False,
                                                                          include_transcoder_loss=False)
             metrics.update(metrics_g)
@@ -1192,7 +1191,7 @@ class Manager:
             outputs['Y_pred2'] = Y_pred2
 
             # Replace loss with the generator loss plus the latents consistency loss
-            l_z = self._calculate_com_loss(Z, Y_target)
+            l_z = self._calculate_com_loss(Z, Y_target=Y_target)
             metrics['loss_com/X'] = l_z.item()
             loss = loss_g + self.optimiser_args.w_com_X * l_z
 
@@ -1296,7 +1295,7 @@ class Manager:
             if self.dataset_args.train_combined:
                 assert Z_pred is not None, 'Z_pred must be provided to the transcoder when training the full auto encoder variant.'
                 metrics['loss_com/tc'] = loss.item()
-                l_z = self._calculate_com_loss(Z_pred, Y_target)
+                l_z = self._calculate_com_loss(Z_mu_logits, Z_target=Z_pred)
                 metrics['loss_com/Y'] = l_z.item()
                 loss = loss + self.optimiser_args.w_com_Y * l_z
 
@@ -1856,7 +1855,7 @@ class Manager:
             'losses/teacher_net': loss.item()
         }
 
-        return loss, stats, X_pred2.detach().cpu()
+        return loss, stats, X_pred2
 
     def calculate_generator_losses(
             self,
@@ -2270,23 +2269,27 @@ class Manager:
     def _calculate_com_loss(
             self,
             Z: Tensor,
-            Y_target: Dict[str, Union[Tensor, List[Tensor]]],
+            Z_target: Optional[Tensor] = None,
+            Y_target: Optional[Dict[str, Union[Tensor, List[Tensor]]]] = None,
             use_sym_rotations: bool = True
     ):
         """
-        Calculate the latents loss - difference between the latent Z and the target latents from the parameters.
+        Calculate the latents loss - difference between the latent Z and the target latents (from the parameters).
         """
-        Y_target_vec = torch.cat([Yk for Yk in Y_target.values() if isinstance(Yk, Tensor)], dim=1)
+        if Y_target is not None:
+            assert Z_target is None
+            Y_target_vec = self._Y_to_vec(Y_target)
 
-        # Make a new batch of Y_targets with the rotation picked to be as close to the predicted rotation as possible
-        if use_sym_rotations and 'sym_rotations' in Y_target:
-            bs = len(Y_target_vec)
-            q0 = self.ds.labels.index('rw')
-            for i in range(bs):
-                Y_target_vec[i, q0:q0 + 4] = Y_target['sym_rotations'][i][self.sym_group_idxs[i]]
+            # Make a new batch of Y_targets with the rotation picked to be as close to the predicted rotation as possible
+            if use_sym_rotations and 'sym_rotations' in Y_target:
+                bs = len(Y_target_vec)
+                q0 = self.ds.labels.index('rw')
+                for i in range(bs):
+                    Y_target_vec[i, q0:q0 + 4] = Y_target['sym_rotations'][i][self.sym_group_idxs[i]]
 
-        # Measure distance to the target latents
-        Z_target = self.transcoder.to_latents(Y_target_vec)
+            # Measure distance to the target latents
+            with torch.no_grad():
+                Z_target = self.transcoder.to_latents(Y_target_vec)
         l_z = torch.mean((Z - Z_target)**2)
 
         return l_z
