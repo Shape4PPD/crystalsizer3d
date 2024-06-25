@@ -69,7 +69,6 @@ class GeneratorNet(BaseNet):
             nn.ConvTranspose2d(
                 in_channels=in_channels,
                 out_channels=out_size[0],
-                # out_channels=1,  # out_size[0] shows 3 channels if the coord grid is there
                 kernel_size=4,
                 stride=2,
                 padding=1,

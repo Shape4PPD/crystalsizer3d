@@ -18,6 +18,7 @@ class RuntimeArgs(BaseArgs):
             n_dataloader_workers: int = 4,
             prefetch_factor: int = 1,
             batch_size: int = 32,
+            steps_per_batch: int = 1,
             n_epochs: int = 300,
             checkpoint_every_n_epochs: int = 1,
             checkpoint_every_n_batches: int = -1,
@@ -41,6 +42,7 @@ class RuntimeArgs(BaseArgs):
         self.n_dataloader_workers = n_dataloader_workers
         self.prefetch_factor = prefetch_factor
         self.batch_size = batch_size
+        self.steps_per_batch = steps_per_batch
         self.n_epochs = n_epochs
         self.checkpoint_every_n_epochs = checkpoint_every_n_epochs
         self.checkpoint_every_n_batches = checkpoint_every_n_batches
@@ -79,6 +81,8 @@ class RuntimeArgs(BaseArgs):
                            help='Number of batches to prefetch.')
         group.add_argument('--batch-size', type=int, default=8,
                            help='Batch size to use for training and testing')
+        group.add_argument('--steps-per-batch', type=int, default=1,
+                           help='Number of steps to run per batch.')
         group.add_argument('--n-epochs', type=int, default=300,
                            help='Number of epochs to run for.')
         group.add_argument('--checkpoint-every-n-epochs', type=int, default=1,

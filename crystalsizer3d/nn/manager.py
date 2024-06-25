@@ -921,7 +921,8 @@ class Manager:
         epoch_metrics = {k: 0. for k in self.metric_keys}
 
         for i, data in enumerate(self.train_loader, 0):
-            outputs, loss, stats = self._train_batch(data)
+            for _ in range(self.runtime_args.steps_per_batch):
+                outputs, loss, stats = self._train_batch(data)
 
             running_loss += loss
             epoch_loss += loss
