@@ -58,6 +58,7 @@ class OptimiserArgs(BaseArgs):
             w_net_teacher: float = 1.0,
             w_gen_teacher: float = 1.0,
             w_discriminator: float = 1.0,
+            w_rcf: float = 0.,
             w_transcoder_pred: float = 1.0,
             w_transcoder_gen: float = 1.0,
             w_com_X: float = 0.,
@@ -140,6 +141,7 @@ class OptimiserArgs(BaseArgs):
         self.w_net_teacher = w_net_teacher
         self.w_gen_teacher = w_gen_teacher
         self.w_discriminator = w_discriminator
+        self.w_rcf = w_rcf
         self.w_transcoder_pred = w_transcoder_pred
         self.w_transcoder_gen = w_transcoder_gen
         self.w_com_X = w_com_X
@@ -233,6 +235,8 @@ class OptimiserArgs(BaseArgs):
                            help='Weight for gen teacher loss.')
         group.add_argument('--w-discriminator', type=float, default=1.0,
                            help='Weight for discriminator loss.')
+        group.add_argument('--w-rcf', type=float, default=0.,
+                           help='Weight for the edge detection RCF loss for the generator.')
         group.add_argument('--w-transcoder-pred', type=float, default=1.0,
                            help='Weight for transcoder regularisation loss to include in the prediction network losses (if training it).')
         group.add_argument('--w-transcoder-gen', type=float, default=1.0,

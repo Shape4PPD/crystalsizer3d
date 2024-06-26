@@ -43,6 +43,7 @@ from crystalsizer3d.nn.models.fcnet import FCNet
 from crystalsizer3d.nn.models.generatornet import GeneratorNet
 from crystalsizer3d.nn.models.gigagan import GigaGAN
 from crystalsizer3d.nn.models.pyramidnet import PyramidNet
+from crystalsizer3d.nn.models.rcf import RCF
 from crystalsizer3d.nn.models.resnet import ResNet
 from crystalsizer3d.nn.models.timmnet import TimmNet
 from crystalsizer3d.nn.models.transcoder import Transcoder
@@ -160,6 +161,9 @@ class Manager:
         elif name == 'transcoder':
             self.transcoder = self._init_transcoder()
             return self.transcoder
+        elif name == 'rcf':
+            self.rcf = self._init_rcf()
+            return self.rcf
         elif name in ['optimiser_p', 'lr_scheduler_p',
                       'optimiser_g', 'lr_scheduler_g',
                       'optimiser_d', 'lr_scheduler_d',
@@ -432,6 +436,9 @@ class Manager:
         # Instantiate an exponential moving average tracker for the generator loss
         self.g_loss_ema = EMA()
 
+        # Instantiate the RCF model here too
+        self.rcf = self._init_rcf()
+
         return generator
 
     def _init_discriminator(self) -> Optional[Discriminator]:
@@ -512,6 +519,28 @@ class Manager:
         self.tc_kl_loss_ema = EMA()
 
         return transcoder
+
+    def _init_rcf(self) -> Optional[RCF]:
+        """
+        Initialise the Richer Convolutional Features model for edge detection.
+        """
+        if not self.generator_args.use_rcf:
+            return None
+        rcf_path = self.generator_args.rcf_model_path
+        rcf = RCF()
+        checkpoint = torch.load(rcf_path)
+        rcf.load_state_dict(checkpoint, strict=False)
+        rcf.eval()
+
+        # Instantiate the network
+        n_params = sum([p.data.nelement() for p in rcf.parameters()])
+        logger.info(f'Instantiated RCF network with {n_params / 1e6:.4f}M parameters from {rcf_path}.')
+        if self.print_networks:
+            logger.debug(f'----------- RCF Network --------------\n\n{rcf}\n\n')
+        rcf = torch.jit.script(rcf)
+        rcf.to(self.device)
+
+        return rcf
 
     def _init_optimisers(self) -> Tuple[
         Optimizer, Scheduler,
@@ -1870,6 +1899,7 @@ class Manager:
             Y_target: Dict[str, Union[Tensor, List[Tensor]]],
             include_teacher_loss: bool = True,
             include_discriminator_loss: bool = True,
+            include_rcf_loss: bool = True,
             include_transcoder_loss: bool = True,
     ) -> Tuple[Tensor, Dict[str, Tensor], Optional[Dict[str, Tensor]]]:
         """
@@ -1899,6 +1929,12 @@ class Manager:
             loss_d, stats_d = self._calculate_gen_gan_losses(X_pred)
             losses.append(self.optimiser_args.w_discriminator * loss_d)
             stats.update(stats_d)
+
+        # Edge features loss
+        if include_rcf_loss and self.generator_args.use_rcf:
+            loss_rcf, stats_rcf = self._calculate_rcf_losses(X_pred, X_target)
+            losses.append(self.optimiser_args.w_rcf * loss_rcf)
+            stats.update(stats_rcf)
 
         # Transcoder regularisation loss
         if (include_transcoder_loss and self.transcoder_args.use_transcoder
@@ -1973,6 +2009,37 @@ class Manager:
         loss = self.discriminator.gen_loss(D_fake)
         stats = {
             'losses/gan_gen': loss.item()
+        }
+
+        return loss, stats
+
+    def _calculate_rcf_losses(
+            self,
+            X_pred: Tensor,
+            X_target: Tensor,
+    ) -> Tuple[Tensor, Dict[str, float]]:
+        """
+        Calculate the RCF losses on the generator.
+        """
+        bs = len(X_pred)
+        rcf_input = torch.cat([X_pred, X_target])
+        rcf_feats = self.rcf(rcf_input, apply_sigmoid=False)
+
+        def loss_(X_pred_, X_target_):
+            if self.generator_args.rcf_loss_type == 'l1':
+                l = (X_pred_ - X_target_).abs().mean()
+            elif self.generator_args.rcf_loss_type == 'l2':
+                l = ((X_pred_ - X_target_)**2).mean()
+            else:
+                raise NotImplementedError()
+            return l
+
+        losses = [loss_(f[:bs], f[bs:]) for f in rcf_feats]
+        loss = torch.stack(losses).sum()
+
+        stats = {
+            **{f'rcf/feat_{i}': l.item() for i, l in enumerate(losses)},
+            **{'losses/rcf': loss.item()}
         }
 
         return loss, stats

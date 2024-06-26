@@ -1,6 +1,8 @@
 from argparse import ArgumentParser, _ArgumentGroup
-from typing import Tuple
+from pathlib import Path
+from typing import Tuple, Union
 
+from crystalsizer3d import ROOT_PATH
 from crystalsizer3d.args.base_args import BaseArgs
 from crystalsizer3d.util.utils import str2bool
 
@@ -45,6 +47,11 @@ class GeneratorArgs(BaseArgs):
             disc_n_base_filters: int = 32,
             disc_n_layers: int = 4,
 
+            # RCF model args
+            use_rcf: bool = False,
+            rcf_model_path: Union[str, Path] = ROOT_PATH / 'data' / 'bsds500_pascal_model.pth',
+            rcf_loss_type: str = 'l2',
+
             **kwargs
     ):
         self.gen_input_noise_std = gen_input_noise_std
@@ -83,6 +90,16 @@ class GeneratorArgs(BaseArgs):
         self.use_discriminator = use_discriminator
         self.disc_n_base_filters = disc_n_base_filters
         self.disc_n_layers = disc_n_layers
+
+        # RCF model args
+        self.use_rcf = use_rcf
+        if isinstance(rcf_model_path, str):
+            rcf_model_path = Path(rcf_model_path)
+        if use_rcf:
+            assert rcf_model_path.exists(), f'RCF model path {rcf_model_path} does not exist.'
+        self.rcf_model_path = rcf_model_path
+        assert rcf_loss_type in ['l1', 'l2'], f'Invalid RCF loss type {rcf_loss_type}, must be one of [l1, l2]'
+        self.rcf_loss_type = rcf_loss_type
 
     @classmethod
     def add_args(cls, parser: ArgumentParser) -> _ArgumentGroup:
@@ -152,5 +169,13 @@ class GeneratorArgs(BaseArgs):
                            help='Number of base filters in the first block of the discriminator, doubles for each subsequent block.')
         group.add_argument('--disc-n-layers', type=int, default=4,
                            help='Number of downsampling, residual convolution blocks in the discriminator.')
+
+        # RCF model args
+        group.add_argument('--use-rcf', type=str2bool, default=False,
+                           help='Use the Richer Convolutional Features model for edge detection.')
+        group.add_argument('--rcf-model-path', type=Path, default=ROOT_PATH / 'data' / 'bsds500_pascal_model.pth',
+                           help='Path to the RCF model checkpoint.')
+        group.add_argument('--rcf-loss-type', type=str, default='l2', choices=['l1', 'l2'],
+                           help='Loss function to use for the RCF features comparison.')
 
         return group
