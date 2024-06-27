@@ -382,7 +382,9 @@ class Manager:
             img_mean = 0.5
             img_std = 0.5
 
-        input_shape = self.parameters_shape if not self.transcoder_args.use_transcoder \
+        n_inputs = self.parameters_shape[0] \
+                   + (len(self.ds.labels_distances_active) if self.generator_args.gen_include_face_areas else 0)
+        input_shape = (n_inputs,) if not self.transcoder_args.use_transcoder \
             else (self.transcoder_args.tc_latent_size,)
         shared_args = dict(
             input_shape=input_shape,
@@ -1503,6 +1505,8 @@ class Manager:
         if not self.dataset_args.train_generator:
             return None
         Y_vec = self._Y_to_vec(Y)
+        if self.generator_args.gen_include_face_areas:
+            Y_vec = torch.cat([Y_vec, Y['face_areas']], dim=1)
 
         # Add some noise to the input parameters during training
         if self.generator.training and self.generator_args.gen_input_noise_std > 0:

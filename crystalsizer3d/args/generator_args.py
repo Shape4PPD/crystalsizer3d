@@ -16,6 +16,7 @@ class GeneratorArgs(BaseArgs):
             gen_model_name: str = 'dcgan',
             gen_latent_size: int = 100,
             gen_image_loss: str = 'l2',
+            gen_include_face_areas: bool = False,
 
             # DCGAN args
             dcgan_n_blocks: int = 4,
@@ -60,6 +61,7 @@ class GeneratorArgs(BaseArgs):
         assert gen_image_loss in GEN_IMAGE_LOSS_CHOICES, \
             f'Invalid image loss {gen_image_loss}, must be one of {GEN_IMAGE_LOSS_CHOICES}'
         self.gen_image_loss = gen_image_loss
+        self.gen_include_face_areas = gen_include_face_areas
 
         # DCGAN args
         self.dcgan_n_blocks = dcgan_n_blocks
@@ -115,6 +117,8 @@ class GeneratorArgs(BaseArgs):
                            help='Size of the latent vector.')
         group.add_argument('--gen-image-loss', type=str, default='l2', choices=GEN_IMAGE_LOSS_CHOICES,
                            help='Loss function to use for the image reconstruction.')
+        group.add_argument('--gen-include-face-areas', type=str2bool, default=False,
+                           help='Include face areas as input to the generator.')
 
         # DCGAN args
         group.add_argument('--dcgan-n-blocks', type=int, default=4,
