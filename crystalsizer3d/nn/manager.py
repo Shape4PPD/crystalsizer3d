@@ -361,6 +361,8 @@ class Manager:
             logger.info(f'Classifier has {predictor.get_n_classifier_params() / 1e6:.4f}M parameters.')
         if self.print_networks:
             logger.debug(f'----------- Predictor Network --------------\n\n{predictor}\n\n')
+        if self.device.type == 'cuda' and torch.cuda.device_count() > 1:
+            predictor = nn.DataParallel(predictor)
         predictor.to(self.device)
 
         # Instantiate an exponential moving average tracker for the predictor loss
@@ -433,6 +435,8 @@ class Manager:
         logger.info(f'Instantiated generator network with {generator.get_n_params() / 1e6:.4f}M parameters.')
         if self.print_networks:
             logger.debug(f'----------- Generator Network --------------\n\n{generator}\n\n')
+        if self.device.type == 'cuda' and torch.cuda.device_count() > 1:
+            generator = nn.DataParallel(generator)
         generator.to(self.device)
 
         # Instantiate an exponential moving average tracker for the generator loss
@@ -463,6 +467,8 @@ class Manager:
         logger.info(f'Instantiated discriminator network with {discriminator.get_n_params() / 1e6:.4f}M parameters.')
         if self.print_networks:
             logger.debug(f'----------- Discriminator Network --------------\n\n{discriminator}\n\n')
+        if self.device.type == 'cuda' and torch.cuda.device_count() > 1:
+            discriminator = nn.DataParallel(discriminator)
         discriminator.to(self.device)
 
         # Instantiate an exponential moving average tracker for the discriminator loss
@@ -514,6 +520,8 @@ class Manager:
         logger.info(f'Instantiated transcoder network with {transcoder.get_n_params() / 1e6:.4f}M parameters.')
         if self.print_networks:
             logger.debug(f'----------- Transcoder Network --------------\n\n{transcoder}\n\n')
+        if self.device.type == 'cuda' and torch.cuda.device_count() > 1:
+            transcoder = nn.DataParallel(transcoder)
         transcoder.to(self.device)
 
         # Instantiate exponential moving average trackers for the reconstruction and regularisation losses
@@ -539,6 +547,8 @@ class Manager:
         logger.info(f'Instantiated RCF network with {n_params / 1e6:.4f}M parameters from {rcf_path}.')
         if self.print_networks:
             logger.debug(f'----------- RCF Network --------------\n\n{rcf}\n\n')
+        if self.device.type == 'cuda' and torch.cuda.device_count() > 1:
+            rcf = nn.DataParallel(rcf)
         rcf = torch.jit.script(rcf)
         rcf.to(self.device)
 
@@ -713,14 +723,6 @@ class Manager:
             n_gpus = torch.cuda.device_count()
             if n_gpus > 1:
                 logger.info(f'Using {n_gpus} GPUs!')
-                if self.predictor is not None:
-                    self.predictor = nn.DataParallel(self.predictor)
-                if self.generator is not None:
-                    self.generator = nn.DataParallel(self.generator)
-                if self.discriminator is not None:
-                    self.discriminator = nn.DataParallel(self.discriminator)
-                if self.transcoder is not None:
-                    self.transcoder = nn.DataParallel(self.transcoder)
             else:
                 logger.info('Using GPU.')
             cudnn.benchmark = True  # optimises code for constant input sizes
