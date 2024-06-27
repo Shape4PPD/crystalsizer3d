@@ -56,7 +56,7 @@ from crystalsizer3d.util.ema import EMA
 from crystalsizer3d.util.geometry import geodesic_distance
 from crystalsizer3d.util.plots import plot_generator_samples, plot_training_samples
 from crystalsizer3d.util.polyhedron import calculate_polyhedral_vertices
-from crystalsizer3d.util.utils import is_bad, set_seed
+from crystalsizer3d.util.utils import calculate_model_norm, is_bad, set_seed
 
 
 # torch.autograd.set_detect_anomaly(True)
@@ -549,7 +549,8 @@ class Manager:
             logger.debug(f'----------- RCF Network --------------\n\n{rcf}\n\n')
         if self.device.type == 'cuda' and torch.cuda.device_count() > 1:
             rcf = nn.DataParallel(rcf)
-        rcf = torch.jit.script(rcf)
+        else:
+            rcf = torch.jit.script(rcf)
         rcf.to(self.device)
 
         return rcf
@@ -1081,37 +1082,25 @@ class Manager:
 
         # Calculate L2 loss for predictor network
         if self.dataset_args.train_predictor:
-            norms = self.predictor.calc_norms()
-            weights_cumulative_norm = torch.tensor(0., dtype=torch.float32, device=self.device)
-            for _, norm in norms.items():
-                weights_cumulative_norm += norm
+            weights_cumulative_norm = calculate_model_norm(self.predictor, device=self.device)
             assert not is_bad(weights_cumulative_norm), 'Bad parameters! (Predictor network)'
             self.tb_logger.add_scalar('batch/train/w_norm', weights_cumulative_norm.item(), self.checkpoint.step)
 
         # Calculate L2 loss for generator network
         if self.dataset_args.train_generator:
-            norms = self.generator.calc_norms()
-            weights_cumulative_norm = torch.tensor(0., dtype=torch.float32, device=self.device)
-            for _, norm in norms.items():
-                weights_cumulative_norm += norm
+            weights_cumulative_norm = calculate_model_norm(self.generator, device=self.device)
             assert not is_bad(weights_cumulative_norm), 'Bad parameters! (Generator network)'
             self.tb_logger.add_scalar('batch/train/w_norm_gen', weights_cumulative_norm.item(), self.checkpoint.step)
 
         # Calculate L2 loss for discriminator network
         if self.dataset_args.train_generator and self.generator_args.use_discriminator:
-            norms = self.discriminator.calc_norms()
-            weights_cumulative_norm = torch.tensor(0., dtype=torch.float32, device=self.device)
-            for _, norm in norms.items():
-                weights_cumulative_norm += norm
+            weights_cumulative_norm = calculate_model_norm(self.discriminator, device=self.device)
             assert not is_bad(weights_cumulative_norm), 'Bad parameters! (Discriminator network)'
             self.tb_logger.add_scalar('batch/train/w_norm_disc', weights_cumulative_norm.item(), self.checkpoint.step)
 
         # Calculate L2 loss for transcoder network
         if self.transcoder_args.use_transcoder:
-            norms = self.transcoder.calc_norms()
-            weights_cumulative_norm = torch.tensor(0., dtype=torch.float32, device=self.device)
-            for _, norm in norms.items():
-                weights_cumulative_norm += norm
+            weights_cumulative_norm = calculate_model_norm(self.transcoder, device=self.device)
             assert not is_bad(weights_cumulative_norm), 'Bad parameters! (Transcoder network)'
             self.tb_logger.add_scalar('batch/train/w_norm_tc', weights_cumulative_norm.item(), self.checkpoint.step)
 

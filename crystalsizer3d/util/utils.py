@@ -124,6 +124,25 @@ def is_bad(t: torch.Tensor) -> bool:
     return False
 
 
+def calculate_model_norm(
+        model: torch.nn.Module,
+        p: int = 2,
+        device: torch.device = torch.device('cpu')
+) -> torch.Tensor:
+    """Calculate the cumulative Lp norms of the model parameters."""
+    if isinstance(model, torch.nn.DataParallel):  # Check if the model is a DataParallel object
+        model = model.module
+    with torch.no_grad():
+        norm = torch.tensor(0., dtype=torch.float32, device=device)
+        for name, m in model.named_modules():
+            if hasattr(m, 'parameters'):
+                p_norm = 0
+                for i, param in enumerate(m.parameters()):
+                    p_norm += param.norm(p)
+                norm += p_norm
+    return norm
+
+
 def equal_aspect_ratio(ax: Axes, zoom: float = 1.0):
     """Fix equal aspect ratio for 3D plots."""
     limits = np.array([getattr(ax, f'get_{axis}lim')() for axis in 'xyz'])
