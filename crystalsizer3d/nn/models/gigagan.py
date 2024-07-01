@@ -4,11 +4,21 @@ from typing import Tuple
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from gigagan_pytorch import Generator
+from gigagan_pytorch import Generator as GigaganGenerator
 
 from crystalsizer3d import logger
 from crystalsizer3d.nn.models.basenet import BaseNet
 from crystalsizer3d.util.utils import is_power_of_two
+
+
+class Generator(GigaganGenerator):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.device_ = None
+
+    @property
+    def device(self):
+        return self.device_
 
 
 class GigaGAN(BaseNet):
@@ -106,6 +116,7 @@ class GigaGAN(BaseNet):
     def forward(self, x):
         # Expand parameters to latent space and input to generator as "styles"
         x = self.linear(x)
+        self.generator.device_ = x.device
         x = self.generator(styles=x)
 
         # Resize to required output shape
