@@ -177,6 +177,7 @@ class Manager:
         elif name in ['optimiser_p', 'lr_scheduler_p',
                       'optimiser_g', 'lr_scheduler_g',
                       'optimiser_d', 'lr_scheduler_d',
+                      'optimiser_dn', 'lr_scheduler_dn',
                       'optimiser_t', 'lr_scheduler_t']:
             (self.optimiser_p, self.lr_scheduler_p,
              self.optimiser_g, self.lr_scheduler_g,
@@ -497,11 +498,6 @@ class Manager:
             return None
         assert self.denoiser_args.dn_model_name == 'MAGVIT2', 'Only MAGVIT2 denoiser is supported.'
 
-        # The MAGVIT2 model is a pytorch-lightning model
-        config = OmegaConf.load(self.denoiser_args.dn_mv2_config_path)
-        config.data.init_args.batch_size = self.runtime_args.batch_size
-        config.data.init_args.test.params.config.size = self.image_shape
-
         # Monkey-patch the LPIPS class so it loads from a sensible place
         from taming.modules.losses.lpips import LPIPS
 
@@ -513,6 +509,8 @@ class Manager:
         LPIPS.load_from_pretrained = load_pips
 
         # Load the model checkpoint
+        config = OmegaConf.load(self.denoiser_args.dn_mv2_config_path)
+        self.dn_config = config
         denoiser = VQModel(**config.model.init_args)
         sd = torch.load(self.denoiser_args.dn_mv2_checkpoint_path, map_location='cpu')['state_dict']
         missing, unexpected = denoiser.load_state_dict(sd, strict=False)
@@ -1409,6 +1407,12 @@ class Manager:
         X_target_aug = X_target_aug.to(self.device)
         X_target_clean = X_target_clean.to(self.device)
 
+        # Resize images
+        dn_size = self.dn_config.data.init_args.train.params.config.size
+        if self.image_shape[-1] != dn_size:
+            X_target_aug = F.interpolate(X_target_aug, size=(dn_size, dn_size), mode='bilinear', align_corners=False)
+            X_target_clean = F.interpolate(X_target_clean, size=(dn_size, dn_size), mode='bilinear', align_corners=False)
+
         # Denoise the image
         X_denoised, l_codebook, l_breakdown = self.denoiser(X_target_aug)
 
@@ -1431,7 +1435,7 @@ class Manager:
                + dn_loss.commit_weight * l_breakdown.commitment
 
         outputs = {
-            'X_denoised': X_denoised,
+            'X_denoised': X_denoised.detach().cpu(),
         }
 
         metrics = {
