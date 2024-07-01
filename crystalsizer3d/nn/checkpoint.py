@@ -7,6 +7,7 @@ import torch
 
 from crystalsizer3d import logger
 from crystalsizer3d.args.dataset_training_args import DatasetTrainingArgs
+from crystalsizer3d.args.denoiser_args import DenoiserArgs
 from crystalsizer3d.args.generator_args import GeneratorArgs
 from crystalsizer3d.args.network_args import NetworkArgs
 from crystalsizer3d.args.optimiser_args import OptimiserArgs
@@ -23,6 +24,7 @@ class Checkpoint:
             dataset_args: DatasetTrainingArgs,
             network_args: NetworkArgs,
             generator_args: GeneratorArgs,
+            denoiser_args: DenoiserArgs,
             transcoder_args: TranscoderArgs,
             optimiser_args: OptimiserArgs,
             runtime_args: RuntimeArgs,
@@ -32,6 +34,7 @@ class Checkpoint:
         self.dataset_args = dataset_args
         self.network_args = network_args
         self.generator_args = generator_args
+        self.denoiser_args = denoiser_args
         self.transcoder_args = transcoder_args
         self.optimiser_args = optimiser_args
         self.runtime_args = runtime_args
@@ -44,6 +47,7 @@ class Checkpoint:
             'dataset_args': self.dataset_args.hash(),
             'network_args': self.network_args.hash(),
             'generator_args': self.generator_args.hash(),
+            'denoiser_args': self.denoiser_args.hash(),
             'transcoder_args': self.transcoder_args.hash(),
             'optimiser_args': self.optimiser_args.hash(),
         })
@@ -117,6 +121,9 @@ class Checkpoint:
                             elif k == 'generator_args':
                                 old_args_k = GeneratorArgs.from_args(v)
                                 new_args_k = self.generator_args
+                            elif k == 'denoiser_args':
+                                old_args_k = DenoiserArgs.from_args(v)
+                                new_args_k = self.denoiser_args
                             elif k == 'transcoder_args':
                                 old_args_k = TranscoderArgs.from_args(v)
                                 new_args_k = self.transcoder_args
@@ -148,6 +155,8 @@ class Checkpoint:
             optimiser_g: Optional[torch.optim.Optimizer] = None,
             net_d: Optional[torch.nn.Module] = None,
             optimiser_d: Optional[torch.optim.Optimizer] = None,
+            net_dn: Optional[torch.nn.Module] = None,
+            optimiser_dn: Optional[torch.optim.Optimizer] = None,
             net_t: Optional[torch.nn.Module] = None,
             optimiser_t: Optional[torch.optim.Optimizer] = None,
     ):
@@ -155,8 +164,8 @@ class Checkpoint:
         Save the checkpoint to disk.
         """
         meta = {'created': self.created, 'id': self.id}
-        for args_key in ['dataset_args', 'network_args', 'generator_args', 'transcoder_args', 'optimiser_args',
-                         'runtime_args']:
+        for args_key in ['dataset_args', 'network_args', 'generator_args', 'denoiser_args',
+                         'transcoder_args', 'optimiser_args', 'runtime_args']:
             args = getattr(self, args_key)
             args_dict = args.to_dict()
             args_dict['hash'] = args.hash()
@@ -187,6 +196,9 @@ class Checkpoint:
                 if self.generator_args.use_discriminator:
                     assert net_d is not None, 'Must provide the discriminator network to create a snapshot.'
                     assert optimiser_d is not None, 'Must provide the discriminator network optimiser to create a snapshot.'
+            if self.dataset_args.train_denoiser:
+                assert net_dn is not None, 'Must provide the denoiser network to create a snapshot.'
+                assert optimiser_dn is not None, 'Must provide the denoiser network optimiser to create a snapshot.'
             if self.transcoder_args.use_transcoder:
                 assert net_t is not None, 'Must provide the transcoder network to create a snapshot.'
 
@@ -214,6 +226,9 @@ class Checkpoint:
                 if self.generator_args.use_discriminator:
                     data['net_d_state_dict'] = net_d.state_dict()
                     data['optimiser_d_state_dict'] = optimiser_d.state_dict()
+            if self.dataset_args.train_denoiser:
+                data['net_dn_state_dict'] = net_dn.state_dict()
+                data['optimiser_dn_state_dict'] = optimiser_dn.state_dict()
             if self.transcoder_args.use_transcoder:
                 data['net_t_state_dict'] = net_t.state_dict()
                 if optimiser_t is not None:

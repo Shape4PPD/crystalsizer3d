@@ -32,6 +32,7 @@ class DatasetTrainingArgs(BaseArgs):
             train_predictor: bool = True,
             train_generator: bool = True,
             train_combined: bool = False,
+            train_denoiser: bool = False,
 
             rotation_mode: str = 'axisangle',
 
@@ -71,9 +72,10 @@ class DatasetTrainingArgs(BaseArgs):
             assert train_predictor and train_generator, \
                 'train_predictor and train_generator must be True when train_combined is True.'
         self.train_combined = train_combined
-        assert rotation_mode in ROTATION_MODES, f'Invalid rotation mode {rotation_mode}, must be one of {ROTATION_MODES}'
+        self.train_denoiser = train_denoiser
 
         # Rotation mode
+        assert rotation_mode in ROTATION_MODES, f'Invalid rotation mode {rotation_mode}, must be one of {ROTATION_MODES}'
         self.rotation_mode = rotation_mode
 
         # Old arguments, now not recommended
@@ -133,6 +135,8 @@ class DatasetTrainingArgs(BaseArgs):
                            help='Train generator network.')
         group.add_argument('--train-combined', type=str2bool, default=False,
                            help='Train the full predictor and generator networks together as a visual autoencoder.')
+        group.add_argument('--train-denoiser', type=str2bool, default=False,
+                           help='Train the denoiser network.')
 
         # Rotation mode
         group.add_argument('--rotation-mode', type=str, default=ROTATION_MODE_AXISANGLE, choices=ROTATION_MODES,

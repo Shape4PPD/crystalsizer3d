@@ -2,6 +2,7 @@ from argparse import ArgumentParser
 from typing import Tuple
 
 from crystalsizer3d.args.dataset_training_args import DatasetTrainingArgs
+from crystalsizer3d.args.denoiser_args import DenoiserArgs
 from crystalsizer3d.args.generator_args import GeneratorArgs
 from crystalsizer3d.args.network_args import NetworkArgs
 from crystalsizer3d.args.optimiser_args import OptimiserArgs
@@ -11,8 +12,15 @@ from crystalsizer3d.nn.manager import Manager
 from crystalsizer3d.util.utils import print_args
 
 
-def parse_arguments(printout: bool = True) \
-        -> Tuple[DatasetTrainingArgs, NetworkArgs, GeneratorArgs, TranscoderArgs, OptimiserArgs, RuntimeArgs]:
+def parse_arguments(printout: bool = True) -> Tuple[
+    DatasetTrainingArgs,
+    NetworkArgs,
+    GeneratorArgs,
+    DenoiserArgs,
+    TranscoderArgs,
+    OptimiserArgs,
+    RuntimeArgs
+]:
     """
     Parse command line arguments and build parameter holders.
     """
@@ -21,6 +29,7 @@ def parse_arguments(printout: bool = True) \
     DatasetTrainingArgs.add_args(parser)
     NetworkArgs.add_args(parser)
     GeneratorArgs.add_args(parser)
+    DenoiserArgs.add_args(parser)
     TranscoderArgs.add_args(parser)
     OptimiserArgs.add_args(parser)
     RuntimeArgs.add_args(parser)
@@ -34,24 +43,26 @@ def parse_arguments(printout: bool = True) \
     dataset_args = DatasetTrainingArgs.from_args(args)
     net_args = NetworkArgs.from_args(args)
     generator_args = GeneratorArgs.from_args(args)
+    denoiser_args = DenoiserArgs.from_args(args)
     transcoder_args = TranscoderArgs.from_args(args)
     optimiser_args = OptimiserArgs.from_args(args)
     runtime_args = RuntimeArgs.from_args(args)
 
-    return dataset_args, net_args, generator_args, transcoder_args, optimiser_args, runtime_args
+    return dataset_args, net_args, generator_args, denoiser_args, transcoder_args, optimiser_args, runtime_args
 
 
 def train():
     """
     Trains a network to estimate crystal growth parameters from images.
     """
-    dataset_args, net_args, generator_args, transcoder_args, optimiser_args, runtime_args = parse_arguments()
+    dataset_args, net_args, generator_args, denoiser_args, transcoder_args, optimiser_args, runtime_args = parse_arguments()
 
     # Construct manager
     manager = Manager(
         dataset_args=dataset_args,
         net_args=net_args,
         generator_args=generator_args,
+        denoiser_args=denoiser_args,
         transcoder_args=transcoder_args,
         optimiser_args=optimiser_args,
         runtime_args=runtime_args

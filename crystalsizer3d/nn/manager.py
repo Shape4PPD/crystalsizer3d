@@ -14,6 +14,10 @@ import torch.nn.functional as F
 from kornia.geometry import axis_angle_to_rotation_matrix
 from matplotlib import pyplot as plt
 from matplotlib.figure import Figure
+from omegaconf import OmegaConf
+from taming.models.lfqgan import VQModel
+from taming.modules.losses.vqperceptual import VQLPIPSWithDiscriminator
+from taming.util import get_ckpt_path
 from timm.optim import create_optimizer_v2
 from timm.scheduler import create_scheduler_v2
 from timm.scheduler.scheduler import Scheduler
@@ -23,8 +27,9 @@ from torch.optim import Optimizer
 from torch.utils.data import DataLoader
 from torch.utils.tensorboard import SummaryWriter
 
-from crystalsizer3d import LOGS_PATH, START_TIMESTAMP, logger
+from crystalsizer3d import DATA_PATH, LOGS_PATH, START_TIMESTAMP, logger
 from crystalsizer3d.args.dataset_training_args import DatasetTrainingArgs
+from crystalsizer3d.args.denoiser_args import DenoiserArgs
 from crystalsizer3d.args.generator_args import GeneratorArgs
 from crystalsizer3d.args.network_args import NetworkArgs
 from crystalsizer3d.args.optimiser_args import OptimiserArgs
@@ -54,7 +59,7 @@ from crystalsizer3d.nn.models.vit_pretrained import ViTPretrainedNet
 from crystalsizer3d.nn.models.vitvae import ViTVAE
 from crystalsizer3d.util.ema import EMA
 from crystalsizer3d.util.geometry import geodesic_distance
-from crystalsizer3d.util.plots import plot_generator_samples, plot_training_samples
+from crystalsizer3d.util.plots import plot_denoiser_samples, plot_generator_samples, plot_training_samples
 from crystalsizer3d.util.polyhedron import calculate_polyhedral_vertices
 from crystalsizer3d.util.utils import calculate_model_norm, is_bad, set_seed
 
@@ -91,6 +96,7 @@ class Manager:
             dataset_args: DatasetTrainingArgs,
             net_args: NetworkArgs,
             generator_args: GeneratorArgs,
+            denoiser_args: DenoiserArgs,
             transcoder_args: TranscoderArgs,
             optimiser_args: OptimiserArgs,
             save_dir: Optional[Path] = None,
@@ -101,6 +107,7 @@ class Manager:
         self.dataset_args = dataset_args
         self.net_args = net_args
         self.generator_args = generator_args
+        self.denoiser_args = denoiser_args
         self.transcoder_args = transcoder_args
         self.optimiser_args = optimiser_args
 
@@ -155,6 +162,9 @@ class Manager:
         elif name == 'generator':
             self.generator = self._init_generator()
             return self.generator
+        elif name == 'denoiser':
+            self.denoiser = self._init_denoiser()
+            return self.denoiser
         elif name == 'discriminator':
             self.discriminator = self._init_discriminator()
             return self.discriminator
@@ -171,6 +181,7 @@ class Manager:
             (self.optimiser_p, self.lr_scheduler_p,
              self.optimiser_g, self.lr_scheduler_g,
              self.optimiser_d, self.lr_scheduler_d,
+             self.optimiser_dn, self.lr_scheduler_dn,
              self.optimiser_t, self.lr_scheduler_t) = self._init_optimisers()
             return getattr(self, name)
         elif name == 'metric_keys':
@@ -201,7 +212,8 @@ class Manager:
 
         # Ensure all the required arguments are present
         required_args = ['runtime_args', 'dataset_args', 'network_args',
-                         'generator_args', 'transcoder_args', 'optimiser_args']
+                         'generator_args', 'denoiser_args', 'transcoder_args',
+                         'optimiser_args']
         for arg in required_args:
             if arg not in data:
                 data[arg] = {}
@@ -219,6 +231,7 @@ class Manager:
             dataset_args=DatasetTrainingArgs.from_args(data['dataset_args']),
             net_args=NetworkArgs.from_args(data['network_args']),
             generator_args=GeneratorArgs.from_args(data['generator_args']),
+            denoiser_args=DenoiserArgs.from_args(data['denoiser_args']),
             transcoder_args=TranscoderArgs.from_args(data['transcoder_args']),
             optimiser_args=OptimiserArgs.from_args(data['optimiser_args']),
             print_networks=print_networks
@@ -476,6 +489,46 @@ class Manager:
 
         return discriminator
 
+    def _init_denoiser(self) -> Optional[VQModel]:
+        """
+        Initialise the denoiser network.
+        """
+        if not self.dataset_args.train_denoiser:
+            return None
+        assert self.denoiser_args.dn_model_name == 'MAGVIT2', 'Only MAGVIT2 denoiser is supported.'
+
+        # The MAGVIT2 model is a pytorch-lightning model
+        config = OmegaConf.load(self.denoiser_args.dn_mv2_config_path)
+        config.data.init_args.batch_size = self.runtime_args.batch_size
+        config.data.init_args.test.params.config.size = self.image_shape
+
+        # Monkey-patch the LPIPS class so it loads from a sensible place
+        from taming.modules.losses.lpips import LPIPS
+
+        def load_pips(self, name='vgg_lpips'):
+            ckpt = get_ckpt_path(name, DATA_PATH / 'vgg_lpips')
+            self.load_state_dict(torch.load(ckpt, map_location=torch.device('cpu')), strict=False)
+            logger.info(f'Loaded pretrained LPIPS loss from {ckpt}.')
+
+        LPIPS.load_from_pretrained = load_pips
+
+        # Load the model checkpoint
+        denoiser = VQModel(**config.model.init_args)
+        sd = torch.load(self.denoiser_args.dn_mv2_checkpoint_path, map_location='cpu')['state_dict']
+        missing, unexpected = denoiser.load_state_dict(sd, strict=False)
+        denoiser.eval()
+
+        # Instantiate the network
+        n_params = sum([p.data.nelement() for p in denoiser.parameters()])
+        logger.info(f'Instantiated denoiser network with {n_params / 1e6:.4f}M parameters.')
+        if self.print_networks:
+            logger.debug(f'----------- Denoiser Network --------------\n\n{denoiser}\n\n')
+        if self.device.type == 'cuda' and torch.cuda.device_count() > 1:
+            denoiser = nn.DataParallel(denoiser)
+        denoiser.to(self.device)
+
+        return denoiser
+
     def _init_transcoder(self) -> Optional[Transcoder]:
         """
         Initialise the transcoder network.
@@ -557,6 +610,7 @@ class Manager:
 
     def _init_optimisers(self) -> Tuple[
         Optimizer, Scheduler,
+        Optional[Optimizer], Optional[Scheduler],
         Optional[Optimizer], Optional[Scheduler],
         Optional[Optimizer], Optional[Scheduler],
         Optional[Optimizer], Optional[Scheduler]
@@ -660,6 +714,19 @@ class Manager:
             optimiser_d = None
             lr_scheduler_d = None
 
+        # Create a separate optimiser for the denoiser network
+        if self.dataset_args.train_denoiser:
+            params_dn = [
+                {'params': self.denoiser.encoder.parameters(), 'lr': oa.lr_denoiser_init},
+                {'params': self.denoiser.decoder.parameters(), 'lr': oa.lr_denoiser_init},
+                {'params': self.denoiser.quantize.parameters(), 'lr': oa.lr_denoiser_init},
+            ]
+            optimiser_dn = create_optimizer_v2(model_or_params=params_dn, betas=(0.5, 0.9), **shared_opt_args)
+            lr_scheduler_dn, n_epochs_dn = create_scheduler_v2(optimizer=optimiser_dn, **shared_lrs_args)
+        else:
+            optimiser_dn = None
+            lr_scheduler_dn = None
+
         # Create a separate optimiser for the VAE transcoder network (if used)
         if self.transcoder_args.use_transcoder and self.transcoder_args.tc_trained_by == 'self':
             params_t = [
@@ -672,12 +739,13 @@ class Manager:
             lr_scheduler_t = None
 
         # Check that the total number of epochs is the same for all optimisers
-        n_epochs = np.array([n_epochs_p, n_epochs_g, n_epochs_d, n_epochs_t])
+        n_epochs = np.array([n_epochs_p, n_epochs_g, n_epochs_d, n_epochs_dn, n_epochs_t])
         if np.all(n_epochs == 0):
             raise RuntimeError('No optimisers were created!')
         assert np.allclose(n_epochs[n_epochs > 0] / ra.n_epochs, 1, atol=0.05)
 
-        return optimiser_p, lr_scheduler_p, optimiser_g, lr_scheduler_g, optimiser_d, lr_scheduler_d, optimiser_t, lr_scheduler_t
+        return optimiser_p, lr_scheduler_p, optimiser_g, lr_scheduler_g, optimiser_d, lr_scheduler_d, \
+            optimiser_dn, lr_scheduler_dn, optimiser_t, lr_scheduler_t
 
     def _init_metrics(self) -> List[str]:
         """
@@ -703,6 +771,8 @@ class Manager:
             if self.generator_args.use_discriminator:
                 metric_keys.append('losses/gan_disc')
                 metric_keys.append('losses/gan_gen')
+        if self.dataset_args.train_denoiser:
+            metric_keys.append('losses/denoiser')
         if self.transcoder_args.use_transcoder:
             metric_keys.append('losses/transcoder')
 
@@ -749,6 +819,7 @@ class Manager:
             dataset_args=self.dataset_args,
             network_args=self.net_args,
             generator_args=self.generator_args,
+            denoiser_args=self.denoiser_args,
             optimiser_args=self.optimiser_args,
             transcoder_args=self.transcoder_args,
             runtime_args=self.runtime_args,
@@ -780,6 +851,11 @@ class Manager:
             if self.dataset_args.train_generator and self.generator_args.use_discriminator:
                 self.discriminator.load_state_dict(self._fix_state(state['net_d_state_dict']), strict=False)
                 self.optimiser_d.load_state_dict(state['optimiser_d_state_dict'])
+
+            # Load denoiser network parameters and optimiser state
+            if self.dataset_args.train_denoiser:
+                self.denoiser.load_state_dict(self._fix_state(state['net_dn_state_dict']), strict=False)
+                self.optimiser_dn.load_state_dict(state['optimiser_dn_state_dict'])
 
             # Load transcoder network parameters
             if self.transcoder_args.use_transcoder:
@@ -854,6 +930,8 @@ class Manager:
             self.generator.eval()
             if self.discriminator is not None:
                 self.discriminator.eval()
+        if self.denoiser is not None:
+            self.denoiser.eval()
         if self.transcoder is not None:
             self.transcoder.eval()
 
@@ -867,6 +945,8 @@ class Manager:
             self.generator.train()
             if self.generator_args.use_discriminator:
                 self.discriminator.train()
+        if self.dataset_args.train_denoiser:
+            self.denoiser.train()
         if self.transcoder_args.use_transcoder:
             self.transcoder.train()
 
@@ -887,6 +967,8 @@ class Manager:
             self.lr_scheduler_g.step(starting_epoch - 1)
         if self.lr_scheduler_d is not None:
             self.lr_scheduler_d.step(starting_epoch - 1)
+        if self.lr_scheduler_dn is not None:
+            self.lr_scheduler_dn.step(starting_epoch - 1)
         if self.lr_scheduler_t is not None:
             self.lr_scheduler_t.step(starting_epoch - 1)
 
@@ -900,6 +982,8 @@ class Manager:
                 self.tb_logger.add_scalar('lr/g', self.optimiser_g.param_groups[0]['lr'], epoch)
             if self.optimiser_d is not None:
                 self.tb_logger.add_scalar('lr/d', self.optimiser_d.param_groups[0]['lr'], epoch)
+            if self.optimiser_dn is not None:
+                self.tb_logger.add_scalar('lr/dn', self.optimiser_dn.param_groups[0]['lr'], epoch)
             if self.optimiser_t is not None:
                 self.tb_logger.add_scalar('lr/t', self.optimiser_t.param_groups[0]['lr'], epoch)
 
@@ -916,6 +1000,8 @@ class Manager:
                 self.lr_scheduler_g.step(epoch, self.checkpoint.loss_train)
             if self.lr_scheduler_d is not None:
                 self.lr_scheduler_d.step(epoch, self.checkpoint.loss_train)
+            if self.lr_scheduler_dn is not None:
+                self.lr_scheduler_dn.step(epoch, self.checkpoint.loss_train)
             if self.lr_scheduler_t is not None:
                 self.lr_scheduler_t.step(epoch, self.checkpoint.loss_train)
 
@@ -937,6 +1023,8 @@ class Manager:
                 optimiser_g=self.optimiser_g,
                 net_d=self.discriminator,
                 optimiser_d=self.optimiser_d,
+                net_dn=self.denoiser,
+                optimiser_dn=self.optimiser_dn,
                 net_t=self.transcoder,
                 optimiser_t=self.optimiser_t,
             )
@@ -989,6 +1077,8 @@ class Manager:
                     optimiser_g=self.optimiser_g,
                     net_d=self.discriminator,
                     optimiser_d=self.optimiser_d,
+                    net_dn=self.denoiser,
+                    optimiser_dn=self.optimiser_dn,
                     net_t=self.transcoder,
                     optimiser_t=self.optimiser_t,
                 )
@@ -1029,7 +1119,7 @@ class Manager:
             outputs.update(outputs_p)
             stats.update(stats_p)
             loss_total += loss_p.item()
-            self.tb_logger.add_scalar('batch/train/loss_pred', loss_p, self.checkpoint.step)
+            self.tb_logger.add_scalar('batch/train/loss_pred', loss_p.item(), self.checkpoint.step)
 
         # Do the same for the generator network
         if self.dataset_args.train_generator and not self.dataset_args.train_combined:
@@ -1042,7 +1132,7 @@ class Manager:
             outputs.update(outputs_g)
             stats.update(stats_g)
             loss_total += loss_g.item()
-            self.tb_logger.add_scalar('batch/train/loss_gen', loss_g, self.checkpoint.step)
+            self.tb_logger.add_scalar('batch/train/loss_gen', loss_g.item(), self.checkpoint.step)
 
         # Only train the discriminator when it is doing worse than some threshold
         if self.dataset_args.train_generator and self.generator_args.use_discriminator:
@@ -1057,7 +1147,20 @@ class Manager:
             outputs.update(outputs_d)
             stats.update(stats_d)
             loss_total += loss_d.item()
-            self.tb_logger.add_scalar('batch/train/loss_disc', loss_d, self.checkpoint.step)
+            self.tb_logger.add_scalar('batch/train/loss_disc', loss_d.item(), self.checkpoint.step)
+
+        # Train the denoiser
+        if self.dataset_args.train_denoiser:
+            outputs_dn, loss_dn, stats_dn = self._process_batch_denoiser(data)
+            self.optimiser_dn.zero_grad()
+            loss_dn.backward()
+            if self.optimiser_args.clip_grad_norm != -1:
+                nn.utils.clip_grad_norm_(self.denoiser.parameters(), max_norm=self.optimiser_args.clip_grad_norm)
+            self.optimiser_dn.step()
+            outputs.update(outputs_dn)
+            stats.update(stats_dn)
+            loss_total += loss_dn.item()
+            self.tb_logger.add_scalar('batch/train/loss_dn', loss_dn.item(), self.checkpoint.step)
 
         # Train the transcoder
         if self.transcoder_args.use_transcoder and self.transcoder_args.tc_trained_by == 'self':
@@ -1097,6 +1200,12 @@ class Manager:
             weights_cumulative_norm = calculate_model_norm(self.discriminator, device=self.device)
             assert not is_bad(weights_cumulative_norm), 'Bad parameters! (Discriminator network)'
             self.tb_logger.add_scalar('batch/train/w_norm_disc', weights_cumulative_norm.item(), self.checkpoint.step)
+
+        # Calculate L2 loss for denoiser network
+        if self.dataset_args.train_denoiser:
+            weights_cumulative_norm = calculate_model_norm(self.denoiser, device=self.device)
+            assert not is_bad(weights_cumulative_norm), 'Bad parameters! (Denoiser network)'
+            self.tb_logger.add_scalar('batch/train/w_norm_dn', weights_cumulative_norm.item(), self.checkpoint.step)
 
         # Calculate L2 loss for transcoder network
         if self.transcoder_args.use_transcoder:
@@ -1147,6 +1256,12 @@ class Manager:
                     outputs.update(outputs_d)
                     stats.update(stats_d)
                     loss_total += loss_d.item()
+
+                if self.dataset_args.train_denoiser:
+                    outputs_dn, loss_dn, stats_dn = self._process_batch_denoiser(data)
+                    outputs.update(outputs_dn)
+                    stats.update(stats_dn)
+                    loss_total += loss_dn.item()
 
                 if self.transcoder_args.use_transcoder and self.transcoder_args.tc_trained_by == 'self':
                     outputs_t, loss_t, stats_t = self._process_batch_transcoder(
@@ -1279,6 +1394,52 @@ class Manager:
         outputs = {
             'D_real': D_real,
             'D_fake': D_fake,
+        }
+
+        return outputs, loss, metrics
+
+    def _process_batch_denoiser(
+            self,
+            data: Tuple[dict, Tensor, Tensor, Tensor, Dict[str, Tensor]]
+    ) -> Tuple[Dict[str, Any], Tensor, Dict]:
+        """
+        Take a batch of noisy images and try to recover the clean images.
+        """
+        _, _, X_target_aug, X_target_clean, Y_target = data
+        X_target_aug = X_target_aug.to(self.device)
+        X_target_clean = X_target_clean.to(self.device)
+
+        # Denoise the image
+        X_denoised, l_codebook, l_breakdown = self.denoiser(X_target_aug)
+
+        # Calculate losses
+        dn_loss: VQLPIPSWithDiscriminator = self.denoiser.loss
+
+        # Reconstruction (denoising) loss - L1
+        l_rec = (X_target_clean.contiguous() - X_denoised.contiguous()).abs().mean()
+
+        # Perceptual loss
+        if dn_loss.perceptual_weight > 0:
+            l_percept = dn_loss.perceptual_loss(X_target_clean.contiguous(), X_denoised.contiguous()).mean()
+        else:
+            l_percept = torch.tensor(0., device=self.device)
+
+        # Combine losses
+        loss = l_rec \
+               + dn_loss.perceptual_weight * l_percept \
+               + dn_loss.codebook_weight * l_codebook \
+               + dn_loss.commit_weight * l_breakdown.commitment
+
+        outputs = {
+            'X_denoised': X_denoised,
+        }
+
+        metrics = {
+            'losses/denoiser': loss.item(),
+            'dn/reconst': l_rec.item(),
+            'dn/perceptual': l_percept.item(),
+            'dn/codebook': l_codebook.item(),
+            'dn/commitment': l_breakdown.commitment.item(),
         }
 
         return outputs, loss, metrics
@@ -2401,6 +2562,9 @@ class Manager:
             elif self.dataset_args.train_generator:
                 fig = plot_generator_samples(self, data, outputs, train_or_test, idxs)
                 self._save_plot(fig, 'samples', train_or_test)
+            if self.dataset_args.train_denoiser:
+                fig = plot_denoiser_samples(self, data, outputs, train_or_test, idxs)
+                self._save_plot(fig, 'denoiser', train_or_test)
             # if self.transcoder_args.use_transcoder: todo - fix
             #     fig = plot_vaetc_examples(data, outputs, train_or_test, idxs)
             #     self._save_plot(fig, 'vaetc_examples', train_or_test)

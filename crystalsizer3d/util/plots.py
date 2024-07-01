@@ -884,6 +884,62 @@ def plot_generator_samples(
     return fig
 
 
+def plot_denoiser_samples(
+        manager: Manager,
+        data: Tuple[dict, Tensor, Tensor, Tensor, Dict[str, Tensor]],
+        outputs: Dict[str, Any],
+        train_or_test: str,
+        idxs: List[int],
+) -> Figure:
+    """
+    Plot the image and denoiser output.
+    """
+    n_examples = len(idxs)
+    metas, images, images_aug, images_clean, Y_target = data
+    X_dn = outputs['X_denoised']
+    n_rows = 3
+    fig = plt.figure(figsize=(n_examples * 2.7, n_rows * 3))
+    gs = GridSpec(
+        nrows=n_rows,
+        ncols=n_examples,
+        wspace=0.06,
+        hspace=0.03,
+        top=0.95,
+        bottom=0.004,
+        left=0.01,
+        right=0.99
+    )
+
+    loss = getattr(manager.checkpoint, f'loss_{train_or_test}')
+    fig.suptitle(
+        f'epoch={manager.checkpoint.epoch}, '
+        f'step={manager.checkpoint.step + 1}, '
+        f'loss={loss:.4E}',
+        fontweight='bold',
+        y=0.995
+    )
+
+    for i, idx in enumerate(idxs):
+        meta = metas[idx]
+
+        # Plot the (possibly augmented) input image
+        img = to_numpy(images_aug[idx]).squeeze()
+        ax = fig.add_subplot(gs[0, i])
+        plot_image(ax, meta['image'].name, img)
+
+        # Plot the clean image
+        img = to_numpy(images_clean[idx]).squeeze()
+        ax = fig.add_subplot(gs[1, i])
+        plot_image(ax, 'Clean target', img)
+
+        # Plot the denoised image
+        img = to_numpy(X_dn[idx]).squeeze()
+        ax = fig.add_subplot(gs[2, i])
+        plot_image(ax, 'Denoised', img)
+
+    return fig
+
+
 def _plot_vaetc_examples(
         self,
         data: Tuple[dict, Tensor, Tensor, Dict[str, Tensor]],

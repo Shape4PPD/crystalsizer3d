@@ -380,7 +380,7 @@ class Dataset:
             img = Image.open(item['image'])
 
         # Load the clean image too if training the generator
-        if self.dst_args.train_generator:
+        if self.dst_args.train_generator or self.dst_args.train_denoiser:
             img_clean = Image.open(item['image_clean'])
         else:
             img_clean = None

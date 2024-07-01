@@ -36,6 +36,9 @@ def _load_env_path(k: str, default: Path):
     return ep
 
 
+# Data directory
+DATA_PATH = _load_env_path('DATA_PATH', ROOT_PATH / 'data')
+
 # Number of parallel workers to use for tasks
 N_WORKERS = int(os.getenv('N_WORKERS', 8))
 
@@ -49,7 +52,7 @@ USE_CUDA = bool(os.getenv('USE_CUDA', '1').lower() in ['1', 'true', 'yes', 'y'])
 MI_CPU_VARIANT = os.getenv('MI_CPU_VARIANT', 'llvm_ad_rgb')
 
 # CSD proxy
-CSD_PROXY_PATH = _load_env_path('CSD_PROXY_PATH', ROOT_PATH / 'data' / 'csd_proxy.json')
+CSD_PROXY_PATH = _load_env_path('CSD_PROXY_PATH', DATA_PATH / 'csd_proxy.json')
 
 # Use mlab?
 USE_MLAB = bool(os.getenv('USE_MLAB', '1').lower() in ['1', 'true', 'yes', 'y'])

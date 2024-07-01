@@ -21,6 +21,7 @@ class OptimiserArgs(BaseArgs):
             lr_pretrained_init: float = 0.1,
             lr_generator_init: float = 0.1,
             lr_discriminator_init: float = 0.1,
+            lr_denoiser_init: float = 0.1,
             lr_transcoder_init: float = 0.1,
             lr_scheduler: str = 'cosine',
             lr_min: float = 1e-6,
@@ -94,6 +95,7 @@ class OptimiserArgs(BaseArgs):
         self.lr_pretrained_init = lr_pretrained_init
         self.lr_generator_init = lr_generator_init
         self.lr_discriminator_init = lr_discriminator_init
+        self.lr_denoiser_init = lr_denoiser_init
         self.lr_transcoder_init = lr_transcoder_init
         self.lr_scheduler = lr_scheduler
         self.lr_min = lr_min
@@ -164,6 +166,8 @@ class OptimiserArgs(BaseArgs):
                            help='Learning rate for generator network.')
         group.add_argument('--lr-discriminator-init', type=float, default=0.1,
                            help='Learning rate for discriminator network.')
+        group.add_argument('--lr-denoiser-init', type=float, default=0.1,
+                           help='Learning rate for denoiser network.')
         group.add_argument('--lr-transcoder-init', type=float, default=0.1,
                            help='Learning rate for transcoder network (if trained by self).')
         group.add_argument('--lr-scheduler', type=str, default='cosine',
