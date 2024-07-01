@@ -1275,7 +1275,7 @@ class Manager:
         loss, metrics, X_pred2 = self.calculate_predictor_losses(Y_pred, Y_target, X_target_clean)
         outputs = {
             'Y_pred': Y_pred,
-            'X_pred2': X_pred2.detach().cpu()
+            'X_pred2': X_pred2.detach().cpu() if X_pred2 is not None else None
         }
 
         # Update the EMA of the predictor loss
