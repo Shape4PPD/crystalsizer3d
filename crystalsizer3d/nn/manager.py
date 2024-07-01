@@ -1106,75 +1106,44 @@ class Manager:
         stats = {}
         loss_total = 0.
 
+        def train_net(net, opt, batch_fn, loss_key, batch_fn_args=None, do_step=True):
+            nonlocal loss_total
+            if batch_fn_args is None:
+                batch_fn_args = {}
+            outputs_, loss_, stats_ = batch_fn(data, **batch_fn_args)
+            (loss_ / self.optimiser_args.accumulate_grad_batches).backward()
+            if (self.checkpoint.step + 1) % self.optimiser_args.accumulate_grad_batches == 0:
+                if self.optimiser_args.clip_grad_norm != -1:
+                    nn.utils.clip_grad_norm_(net.parameters(), max_norm=self.optimiser_args.clip_grad_norm)
+                if do_step:
+                    opt.step()
+                opt.zero_grad()
+            outputs.update(outputs_)
+            stats.update(stats_)
+            loss_total += loss_.item()
+            self.tb_logger.add_scalar(f'batch/train/loss_{loss_key}', loss_.item(), self.checkpoint.step)
+
         # Process the batch, calculate gradients and do optimisation step
         if self.dataset_args.train_predictor:
-            outputs_p, loss_p, stats_p = self._process_batch_predictor(data)
-            self.optimiser_p.zero_grad()
-            loss_p.backward()
-            if self.optimiser_args.clip_grad_norm != -1:
-                nn.utils.clip_grad_norm_(self.predictor.parameters(), max_norm=self.optimiser_args.clip_grad_norm)
-            self.optimiser_p.step()
-            outputs.update(outputs_p)
-            stats.update(stats_p)
-            loss_total += loss_p.item()
-            self.tb_logger.add_scalar('batch/train/loss_pred', loss_p.item(), self.checkpoint.step)
+            train_net(self.predictor, self.optimiser_p, self._process_batch_predictor, 'pred')
 
         # Do the same for the generator network
         if self.dataset_args.train_generator and not self.dataset_args.train_combined:
-            outputs_g, loss_g, stats_g = self._process_batch_generator(data)
-            self.optimiser_g.zero_grad()
-            loss_g.backward()
-            if self.optimiser_args.clip_grad_norm != -1:
-                nn.utils.clip_grad_norm_(self.generator.parameters(), max_norm=self.optimiser_args.clip_grad_norm)
-            self.optimiser_g.step()
-            outputs.update(outputs_g)
-            stats.update(stats_g)
-            loss_total += loss_g.item()
-            self.tb_logger.add_scalar('batch/train/loss_gen', loss_g.item(), self.checkpoint.step)
+            train_net(self.generator, self.optimiser_g, self._process_batch_generator, 'gen')
 
         # Only train the discriminator when it is doing worse than some threshold
         if self.dataset_args.train_generator and self.generator_args.use_discriminator:
-            outputs_d, loss_d, stats_d = self._process_batch_discriminator(data, outputs['X_pred'])
-            if self.d_loss_ema.val > self.optimiser_args.disc_loss_threshold:
-                self.optimiser_d.zero_grad()
-                loss_d.backward()
-                if self.optimiser_args.clip_grad_norm != -1:
-                    nn.utils.clip_grad_norm_(self.discriminator.parameters(),
-                                             max_norm=self.optimiser_args.clip_grad_norm)
-                self.optimiser_d.step()
-            outputs.update(outputs_d)
-            stats.update(stats_d)
-            loss_total += loss_d.item()
-            self.tb_logger.add_scalar('batch/train/loss_disc', loss_d.item(), self.checkpoint.step)
+            train_net(self.discriminator, self.optimiser_d, self._process_batch_generator, 'disc',
+                      do_step=self.d_loss_ema.val > self.optimiser_args.disc_loss_threshold)
 
         # Train the denoiser
         if self.dataset_args.train_denoiser:
-            outputs_dn, loss_dn, stats_dn = self._process_batch_denoiser(data)
-            self.optimiser_dn.zero_grad()
-            loss_dn.backward()
-            if self.optimiser_args.clip_grad_norm != -1:
-                nn.utils.clip_grad_norm_(self.denoiser.parameters(), max_norm=self.optimiser_args.clip_grad_norm)
-            self.optimiser_dn.step()
-            outputs.update(outputs_dn)
-            stats.update(stats_dn)
-            loss_total += loss_dn.item()
-            self.tb_logger.add_scalar('batch/train/loss_dn', loss_dn.item(), self.checkpoint.step)
+            train_net(self.denoiser, self.optimiser_dn, self._process_batch_denoiser, 'dn')
 
         # Train the transcoder
         if self.transcoder_args.use_transcoder and self.transcoder_args.tc_trained_by == 'self':
-            outputs_t, loss_t, stats_t = self._process_batch_transcoder(
-                data,
-                outputs['Z_pred'] if 'Z_pred' in outputs else None
-            )
-            self.optimiser_t.zero_grad()
-            loss_t.backward()
-            if self.optimiser_args.clip_grad_norm != -1:
-                nn.utils.clip_grad_norm_(self.transcoder.parameters(), max_norm=self.optimiser_args.clip_grad_norm)
-            self.optimiser_t.step()
-            outputs.update(outputs_t)
-            stats.update(stats_t)
-            loss_total += loss_t.item()
-            self.tb_logger.add_scalar('batch/train/loss_tc', loss_t, self.checkpoint.step)
+            train_net(self.transcoder, self.optimiser_t, self._process_batch_transcoder, 'tc',
+                      batch_fn_args={'Z_pred': outputs['Z_pred'] if 'Z_pred' in outputs else None})
 
         # Log losses
         self.tb_logger.add_scalar('batch/train/total_loss', loss_total, self.checkpoint.step)
@@ -1411,7 +1380,8 @@ class Manager:
         dn_size = self.dn_config.data.init_args.train.params.config.size
         if self.image_shape[-1] != dn_size:
             X_target_aug = F.interpolate(X_target_aug, size=(dn_size, dn_size), mode='bilinear', align_corners=False)
-            X_target_clean = F.interpolate(X_target_clean, size=(dn_size, dn_size), mode='bilinear', align_corners=False)
+            X_target_clean = F.interpolate(X_target_clean, size=(dn_size, dn_size), mode='bilinear',
+                                           align_corners=False)
 
         # Denoise the image
         X_denoised, l_codebook, l_breakdown = self.denoiser(X_target_aug)

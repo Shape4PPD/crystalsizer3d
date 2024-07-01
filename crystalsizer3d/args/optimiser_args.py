@@ -37,6 +37,7 @@ class OptimiserArgs(BaseArgs):
             lr_cycle_limit: int = 1,
             lr_k_decay: float = 1.0,
 
+            accumulate_grad_batches: int = 1,
             weight_decay: float = 1e-5,
             clip_grad_norm: float = -1,
             freeze_pretrained: bool = False,
@@ -110,6 +111,9 @@ class OptimiserArgs(BaseArgs):
         self.lr_cycle_decay = lr_cycle_decay
         self.lr_cycle_limit = lr_cycle_limit
         self.lr_k_decay = lr_k_decay
+
+        # Gradient accumulation
+        self.accumulate_grad_batches = accumulate_grad_batches
 
         # Weight decay
         self.weight_decay = weight_decay
@@ -197,6 +201,8 @@ class OptimiserArgs(BaseArgs):
         group.add_argument('--lr-k-decay', type=float, default=1.0,
                            help='Learning rate k decay.')
 
+        group.add_argument('--accumulate-grad-batches', type=int, default=1,
+                           help='Number of batches to accumulate gradients over.')
         group.add_argument('--weight-decay', type=float, default=1e-5,
                            help='Weight decay.')
         group.add_argument('--clip-grad-norm', type=float, default=-1,
