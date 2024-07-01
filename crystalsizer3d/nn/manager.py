@@ -636,7 +636,7 @@ class Manager:
             n_epochs_adj = math.ceil(ra.n_epochs * (ra.n_epochs - oa.lr_cooldown_epochs) / n_epochs_with_cycles)
         else:
             n_epochs_adj = ra.n_epochs
-        n_epochs_p = n_epochs_g = n_epochs_d = n_epochs_t = 0
+        n_epochs_p = n_epochs_g = n_epochs_d = n_epochs_dn = n_epochs_t = 0
 
         shared_lrs_args = dict(
             sched=oa.lr_scheduler,
