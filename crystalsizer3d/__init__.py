@@ -51,6 +51,9 @@ USE_CUDA = bool(os.getenv('USE_CUDA', '1').lower() in ['1', 'true', 'yes', 'y'])
 # Check for mitsuba default variants
 MI_CPU_VARIANT = os.getenv('MI_CPU_VARIANT', 'llvm_ad_rgb')
 
+# Dataset proxy
+DATASET_PROXY_PATH = _load_env_path('DATASET_PROXY_PATH', DATA_PATH / 'dataset_proxies')
+
 # CSD proxy
 CSD_PROXY_PATH = _load_env_path('CSD_PROXY_PATH', DATA_PATH / 'csd_proxy.json')
 

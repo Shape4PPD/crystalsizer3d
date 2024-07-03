@@ -40,7 +40,7 @@ from crystalsizer3d.crystal_generator import CrystalGenerator
 from crystalsizer3d.crystal_renderer import CrystalRenderer
 from crystalsizer3d.nn.checkpoint import Checkpoint
 from crystalsizer3d.nn.data_loader import get_data_loader
-from crystalsizer3d.nn.dataset import Dataset
+from crystalsizer3d.nn.dataset import Dataset, DatasetProxy
 from crystalsizer3d.nn.models.basenet import BaseNet
 from crystalsizer3d.nn.models.densenet import DenseNet
 from crystalsizer3d.nn.models.discriminator import Discriminator
@@ -68,7 +68,7 @@ from crystalsizer3d.util.utils import calculate_model_norm, is_bad, set_seed
 
 
 class Manager:
-    ds: Dataset
+    ds: DatasetProxy
     train_loader: DataLoader
     test_loader: DataLoader
     crystal_generator: CrystalGenerator
@@ -142,7 +142,7 @@ class Manager:
         Lazy loading of the components.
         """
         if name == 'ds':
-            self.ds = Dataset(self.dataset_args)
+            self.ds = DatasetProxy(self.dataset_args)
             if self.ds.dataset_args.asymmetry is not None:
                 assert self.dataset_args.check_symmetries == 0, \
                     f'Asymmetry is set, so check_symmetries must be 0 (received {self.dataset_args.check_symmetries})'
@@ -244,6 +244,55 @@ class Manager:
                 setattr(args[arg_group], k, v)
 
         return cls(**args, save_dir=save_dir)
+
+    def load_network(self, model_path: Path, network_name: str):
+        """
+        Load a network from another checkpoint.
+        """
+        logger.info(f'Loading {network_name} network parameters from {model_path}.')
+        with open(model_path, 'r') as f:
+            data = json.load(f)
+
+        # Always set resume to True, otherwise the model won't load
+        data['runtime_args']['resume'] = True
+        data['runtime_args']['resume_only'] = True
+        data['runtime_args']['resume_from'] = model_path
+
+        # Load the checkpoint
+        checkpoint = Checkpoint(
+            dataset=self.ds,
+            runtime_args=RuntimeArgs.from_args(data['runtime_args']),
+            dataset_args=DatasetTrainingArgs.from_args(data['dataset_args']),
+            network_args=NetworkArgs.from_args(data['network_args']),
+            generator_args=GeneratorArgs.from_args(data['generator_args']),
+            denoiser_args=DenoiserArgs.from_args(data['denoiser_args']),
+            transcoder_args=TranscoderArgs.from_args(data['transcoder_args']),
+            optimiser_args=OptimiserArgs.from_args(data['optimiser_args']),
+            save_dir=self.checkpoint.save_dir,
+        )
+        assert len(checkpoint.snapshots) > 0, 'No snapshots found in the checkpoint.'
+
+        # Load the network and optimiser parameter states
+        state_path = checkpoint.get_state_path()
+        logger.info(f'Loading network parameters from {state_path}.')
+        state = torch.load(state_path, map_location=self.device)
+
+        # Load predictor network parameters and optimiser state
+        if network_name == 'denoiser':
+            self.denoiser_args = checkpoint.denoiser_args
+            if self.denoiser is None:
+                self.dataset_args.train_denoiser = True
+                self.denoiser = self._init_denoiser()
+            self.denoiser.load_state_dict(self._fix_state(state['net_dn_state_dict']), strict=False)
+            if self.optimiser_dn is None:
+                _, _, _, _, _, _, self.optimiser_dn, self.lr_scheduler_dn, _, _ = self._init_optimisers()
+                self.optimiser_dn.load_state_dict(state['optimiser_dn_state_dict'])
+
+        else:
+            raise ValueError(f'Unsupported network: {network_name}')
+
+        # Put all networks in evaluation mode
+        self.enable_eval()
 
     def _init_crystal_generator(self) -> CrystalGenerator:
         """
@@ -1376,15 +1425,13 @@ class Manager:
         X_target_aug = X_target_aug.to(self.device)
         X_target_clean = X_target_clean.to(self.device)
 
-        # Resize images
-        dn_size = self.dn_config.data.init_args.train.params.config.size
-        if self.image_shape[-1] != dn_size:
-            X_target_aug = F.interpolate(X_target_aug, size=(dn_size, dn_size), mode='bilinear', align_corners=False)
-            X_target_clean = F.interpolate(X_target_clean, size=(dn_size, dn_size), mode='bilinear',
-                                           align_corners=False)
-
         # Denoise the image
-        X_denoised, l_codebook, l_breakdown = self.denoiser(X_target_aug)
+        X_denoised, l_codebook, l_breakdown = self.denoise(X_target_aug, restore_size=False, return_losses=True)
+
+        # Resize clean image to match denoised size
+        if X_target_clean.shape[-2:] != X_denoised.shape[-2:]:
+            X_target_clean = F.interpolate(X_target_clean, size=X_denoised.shape[-2:], mode='bilinear',
+                                           align_corners=False)
 
         # Calculate losses
         dn_loss: VQLPIPSWithDiscriminator = self.denoiser.loss
@@ -1645,6 +1692,34 @@ class Manager:
         X_pred = self.generator(Y_vec)
 
         return X_pred
+
+    def denoise(
+            self,
+            X: Tensor,
+            restore_size: bool = True,
+            return_losses: bool = False
+    ) -> Union[Tensor, Tuple[Tensor, Tensor, Any]]:
+        """
+        Take a batch of images and denoise them.
+        """
+        X = X.to(self.device)
+
+        # Resize images for input
+        dn_size = self.dn_config.data.init_args.train.params.config.size
+        if self.image_shape[-1] != dn_size:
+            X = F.interpolate(X, size=(dn_size, dn_size), mode='bilinear', align_corners=False)
+
+        # Denoise the images
+        X_denoised, l_codebook, l_breakdown = self.denoiser(X)
+
+        # Resize for output
+        if restore_size:
+            X_denoised = F.interpolate(X_denoised, size=self.image_shape[-2:], mode='bilinear', align_corners=False)
+
+        if return_losses:
+            return X_denoised, l_codebook, l_breakdown
+
+        return X_denoised
 
     def calculate_predictor_losses(
             self,

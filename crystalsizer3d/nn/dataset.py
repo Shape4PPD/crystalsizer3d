@@ -12,12 +12,12 @@ from scipy.spatial.distance import cdist
 from scipy.spatial.transform import Rotation
 from trimesh import Trimesh
 
-from crystalsizer3d import logger
+from crystalsizer3d import DATASET_PROXY_PATH, logger
 from crystalsizer3d.args.dataset_synthetic_args import DatasetSyntheticArgs
 from crystalsizer3d.args.dataset_training_args import DatasetTrainingArgs
 from crystalsizer3d.crystal import Crystal, ROTATION_MODE_AXISANGLE, ROTATION_MODE_QUATERNION
 from crystalsizer3d.csd_proxy import CSDProxy
-from crystalsizer3d.util.utils import to_numpy
+from crystalsizer3d.util.utils import ArgsCompatibleJSONEncoder, hash_data, to_numpy
 
 DATASET_TYPE_SYNTHETIC = 'synthetic'
 DATASET_TYPE_IMAGES = 'images'
@@ -74,10 +74,10 @@ class Dataset:
 
     def __init__(
             self,
-            ds_args: DatasetTrainingArgs,
+            dst_args: DatasetTrainingArgs,
     ):
-        self.dst_args = ds_args
-        path = ds_args.dataset_path
+        self.dst_args = dst_args
+        path = dst_args.dataset_path
         assert path.exists(), f'Dataset path does not exist: {path}'
         self.path = path
         self.csd_proxy = CSDProxy()
@@ -620,112 +620,19 @@ class Dataset:
         copy_bumpmap: If True, copy the bumpmap from the default rendering parameters if it is missing.
         copy_bubbles: If True, copy the bubbles from the default rendering parameters if they are missing.
         """
-
-        def inverse_z_transform(z, k):
-            return float(z * np.sqrt(self.ds_stats[k]['var']) + self.ds_stats[k]['mean'])
-
-        def inverse_eps_1_normalise(z, k, eps):
-            x_min = self.ds_stats[k]['min']
-            x_max = self.ds_stats[k]['max']
-            return x_min + (z - eps) * (x_max - x_min) / (1 - eps)
-
-        r_params = {}
-        c_params = {}
-
-        # Distance parameters
-        assert 'distances' in outputs, 'Distances are missing!'
-        dist = outputs['distances']
-        if dist.ndim == 2:
-            dist = dist[idx]
-        c_params['distances'] = self.prep_distances(dist).tolist()
-
-        # Transformation parameters
-        if 'transformation' in outputs:
-            trans = outputs['transformation']
-            if trans.ndim == 2:
-                trans = trans[idx]
-            location = to_numpy(trans[:3])
-            l_max = np.array([self.ds_stats[xyz]['max'] for xyz in 'xyz'])
-            l_min = np.array([self.ds_stats[xyz]['min'] for xyz in 'xyz'])
-            ranges = l_max - l_min
-            range_max = ranges.max()
-            location = location * range_max / 2 + l_min + ranges / 2
-            c_params['origin'] = location.tolist()
-
-            # Invert the scale back to the original scale
-            c_params['scale'] = inverse_eps_1_normalise(trans[3].item(), 's', MIN_NORMALISED_SCALE)
-
-            # Rotation angles
-            c_params['rotation'] = trans[4:].tolist()
-        else:
-            assert default_rendering_params is not None, 'Need to provide defaults for missing transformation parameters.'
-            assert 'crystal' in default_rendering_params, 'Need to provide defaults for missing transformation parameters.'
-            c_params['origin'] = default_rendering_params['crystal']['origin']
-            c_params['scale'] = default_rendering_params['crystal']['scale']
-            c_params['rotation'] = default_rendering_params['crystal']['rotation']
-
-        # Material parameters
-        if 'material' in outputs:
-            m = outputs['material']
-            if m.ndim == 2:
-                m = m[idx]
-            m_idx = 0
-            if 'ior' in self.labels_material_active:
-                c_params['material_ior'] = inverse_z_transform(m[m_idx].item(), 'ior')
-                m_idx += 1
-            if 'r' in self.labels_material_active:
-                c_params['material_roughness'] = inverse_z_transform(m[m_idx].item(), 'r')
-        for k in ['ior', 'roughness']:
-            m_key = f'material_{k}'
-            if (m_key not in c_params
-                    and default_rendering_params is not None
-                    and m_key in default_rendering_params['material']):
-                c_params[m_key] = default_rendering_params[m_key]
-        r_params['crystal'] = c_params
-
-        # Light parameters
-        if 'light' in outputs:
-            light = outputs['light']
-            if light.ndim == 2:
-                light = light[idx]
-            r_params['light_radiance'] = (
-                inverse_z_transform(light[0].item(), 'er'),
-                inverse_z_transform(light[1].item(), 'eg'),
-                inverse_z_transform(light[2].item(), 'eb'),
-            )
-
-        elif default_rendering_params is not None and 'light_radiance' in default_rendering_params:
-            r_params['light_radiance'] = default_rendering_params['light_radiance']
-        else:
-            r_params['light_radiance'] = (0.5, 0.5, 0.5)
-
-        # Copy the surface bumpmap from defaults if required
-        if 'bumpmap' in outputs:
-            bumpmap = outputs['bumpmap']
-            if bumpmap.ndim == 2:
-                bumpmap = bumpmap[idx]
-            r_params['bumpmap'] = bumpmap
-        elif (default_rendering_params is not None
-              and 'bumpmap' in default_rendering_params
-              and copy_bumpmap):
-            r_params['bumpmap'] = default_rendering_params['bumpmap']
-        else:
-            r_params['bumpmap'] = None
-
-        # Bubbles
-        if 'bubbles' in outputs:
-            bubbles = outputs['bubbles']
-            if bubbles.ndim == 2:
-                bubbles = bubbles[idx]
-            r_params['bubbles'] = bubbles
-        elif (default_rendering_params is not None
-              and 'bubbles' in default_rendering_params
-              and copy_bubbles):
-            r_params['bubbles'] = default_rendering_params['bubbles']
-        else:
-            r_params['bubbles'] = []
-
-        return r_params
+        return denormalise_rendering_params(
+            dst_args=self.dst_args,
+            dataset_args=self.dataset_args,
+            ds_stats=self.ds_stats,
+            labels_distances=self.labels_distances,
+            labels_distances_active=self.labels_distances_active,
+            labels_material_active=self.labels_material_active,
+            outputs=outputs,
+            idx=idx,
+            default_rendering_params=default_rendering_params,
+            copy_bumpmap=copy_bumpmap,
+            copy_bubbles=copy_bubbles,
+        )
 
     def prep_distances(
             self,
@@ -736,43 +643,308 @@ class Dataset:
         """
         Prepare the distance values.
         """
-        strip_batch = False
-        if distance_vals.ndim == 1:
-            strip_batch = True
-            distance_vals = distance_vals[None, :]
-        bs = distance_vals.shape[0]
-
-        # Set distances to something large if the switches are off or if the distance is negative
-        if self.dst_args.use_distance_switches and switches is not None:
-            distance_vals = torch.where(switches < .5, missing_distance_val, distance_vals)
-        distance_vals[distance_vals < 0] = missing_distance_val
-
-        # Put the distances into the correct order
-        distances = torch.zeros(bs, len(self.labels_distances), device=distance_vals.device)
-        pos_active = [self.labels_distances.index(k) for k in self.labels_distances_active]
-        for i, pos in enumerate(pos_active):
-            distances[:, pos] = distance_vals[:, i]
-
-        # Add any distances that are not in the active set
-        if (self.dataset_args.asymmetry is None
-                and self.labels_distances != self.labels_distances_active):
-            for d_lbl in self.labels_distances:
-                if d_lbl not in self.labels_distances_active:
-                    d_pos = self.labels_distances.index(d_lbl)
-                    distances[:, d_pos] = self.ds_stats[d_lbl]['mean']
-
-        # Normalise the distances by the maximum (in each batch element)
-        d_max = distances.amax(dim=1, keepdim=True)
-        distances = torch.where(
-            d_max > 1e-8,
-            distances / d_max,
-            distances
+        return prep_distances(
+            dst_args=self.dst_args,
+            dataset_args=self.dataset_args,
+            ds_stats=self.ds_stats,
+            labels_distances=self.labels_distances,
+            labels_distances_active=self.labels_distances_active,
+            distance_vals=distance_vals,
+            switches=switches,
+            missing_distance_val=missing_distance_val,
         )
 
-        # Ensure negative distances are set to the missing value
-        distance_vals[distance_vals < 0] = missing_distance_val
 
-        if strip_batch:
-            distances = distances[0]
+class DatasetProxy:
+    ds_cache: Dict[str, Any] = {}
+    ds: Optional[Dataset]
 
-        return distances
+    def __init__(
+            self,
+            dst_args: DatasetTrainingArgs,
+    ):
+        self.dst_args = dst_args
+        self.path = dst_args.dataset_path
+        self.cache_path = DATASET_PROXY_PATH / f'{hash_data(str(self.path))}.json'
+        if not self._load_cache():
+            self._load_dataset()
+
+    def __getattr__(self, name):
+        # Return attributes from the cache
+        if name in self.ds_cache:
+            if name == 'dataset_args' and not isinstance(self.ds_cache[name], DatasetSyntheticArgs):
+                self.ds_cache[name] = DatasetSyntheticArgs.from_args(self.ds_cache[name])
+            return self.ds_cache[name]
+
+        # Load dataset
+        if name == 'ds':
+            self._load_dataset()
+            return self.ds
+
+        # Return attributes from the dataset
+        if hasattr(self.ds, name):
+            val = getattr(self.ds, name)
+            self._update_cache(name, val)
+            return val
+
+        raise AttributeError(f'Attribute {name} not found in DatasetProxy or Dataset.')
+
+    def _load_dataset(self):
+        self.ds = Dataset(dst_args=self.dst_args)
+
+    def _load_cache(self):
+        DATASET_PROXY_PATH.mkdir(parents=True, exist_ok=True)
+        if not self.cache_path.exists():
+            return False
+        try:
+            with open(self.cache_path, 'r') as f:
+                self.ds_cache = json.load(f)
+        except Exception as e:
+            logger.error(f'Could not load cache from {self.cache_path}: {e}. Removing file.')
+            self.cache_path.unlink()
+            return False
+        logger.info(f'Loaded dataset proxy cache from {self.cache_path}.')
+        return True
+
+    def _update_cache(self, name, val):
+        self.ds_cache[name] = val
+        with open(self.cache_path, 'w') as f:
+            json.dump(self.ds_cache, f, sort_keys=True, cls=ArgsCompatibleJSONEncoder, indent=4)
+
+    def denormalise_rendering_params(
+            self,
+            outputs: Dict[str, torch.Tensor],
+            idx: int = 0,
+            default_rendering_params: Optional[Dict[str, Any]] = None,
+            copy_bumpmap: bool = False,
+            copy_bubbles: bool = False,
+    ) -> dict:
+        """
+        Denormalise the rendering parameters.
+        copy_bumpmap: If True, copy the bumpmap from the default rendering parameters if it is missing.
+        copy_bubbles: If True, copy the bubbles from the default rendering parameters if they are missing.
+        """
+        return denormalise_rendering_params(
+            dst_args=self.dst_args,
+            dataset_args=self.dataset_args,
+            ds_stats=self.ds_stats,
+            labels_distances=self.labels_distances,
+            labels_distances_active=self.labels_distances_active,
+            labels_material_active=self.labels_material_active,
+            outputs=outputs,
+            idx=idx,
+            default_rendering_params=default_rendering_params,
+            copy_bumpmap=copy_bumpmap,
+            copy_bubbles=copy_bubbles,
+        )
+
+    def prep_distances(
+            self,
+            distance_vals: torch.Tensor,
+            switches: Optional[torch.Tensor] = None,
+            missing_distance_val: float = 100.
+    ) -> torch.Tensor:
+        """
+        Prepare the distance values.
+        """
+        return prep_distances(
+            dst_args=self.dst_args,
+            dataset_args=self.dataset_args,
+            ds_stats=self.ds_stats,
+            labels_distances=self.labels_distances,
+            labels_distances_active=self.labels_distances_active,
+            distance_vals=distance_vals,
+            switches=switches,
+            missing_distance_val=missing_distance_val,
+        )
+
+
+def denormalise_rendering_params(
+        dst_args: DatasetTrainingArgs,
+        dataset_args: DatasetSyntheticArgs,
+        ds_stats: Dict[str, Dict[str, float]],
+        labels_distances: List[str],
+        labels_distances_active: List[str],
+        labels_material_active: List[str],
+        outputs: Dict[str, torch.Tensor],
+        idx: int = 0,
+        default_rendering_params: Optional[Dict[str, Any]] = None,
+        copy_bumpmap: bool = False,
+        copy_bubbles: bool = False,
+        switches: Optional[torch.Tensor] = None,
+        missing_distance_val: float = 100.
+) -> dict:
+    """
+    Denormalise the rendering parameters.
+    copy_bumpmap: If True, copy the bumpmap from the default rendering parameters if it is missing.
+    copy_bubbles: If True, copy the bubbles from the default rendering parameters if they are missing.
+    """
+
+    def inverse_z_transform(z, k):
+        return float(z * np.sqrt(ds_stats[k]['var']) + ds_stats[k]['mean'])
+
+    def inverse_eps_1_normalise(z, k, eps):
+        x_min = ds_stats[k]['min']
+        x_max = ds_stats[k]['max']
+        return x_min + (z - eps) * (x_max - x_min) / (1 - eps)
+
+    r_params = {}
+    c_params = {}
+
+    # Distance parameters
+    assert 'distances' in outputs, 'Distances are missing!'
+    dist = outputs['distances']
+    if dist.ndim == 2:
+        dist = dist[idx]
+    c_params['distances'] = prep_distances(
+        dst_args=dst_args,
+        dataset_args=dataset_args,
+        ds_stats=ds_stats,
+        labels_distances=labels_distances,
+        labels_distances_active=labels_distances_active,
+        distance_vals=dist,
+        switches=switches,
+        missing_distance_val=missing_distance_val,
+    ).tolist()
+
+    # Transformation parameters
+    if 'transformation' in outputs:
+        trans = outputs['transformation']
+        if trans.ndim == 2:
+            trans = trans[idx]
+        location = to_numpy(trans[:3])
+        l_max = np.array([ds_stats[xyz]['max'] for xyz in 'xyz'])
+        l_min = np.array([ds_stats[xyz]['min'] for xyz in 'xyz'])
+        ranges = l_max - l_min
+        range_max = ranges.max()
+        location = location * range_max / 2 + l_min + ranges / 2
+        c_params['origin'] = location.tolist()
+
+        # Invert the scale back to the original scale
+        c_params['scale'] = inverse_eps_1_normalise(trans[3].item(), 's', MIN_NORMALISED_SCALE)
+
+        # Rotation angles
+        c_params['rotation'] = trans[4:].tolist()
+    else:
+        assert default_rendering_params is not None, 'Need to provide defaults for missing transformation parameters.'
+        assert 'crystal' in default_rendering_params, 'Need to provide defaults for missing transformation parameters.'
+        c_params['origin'] = default_rendering_params['crystal']['origin']
+        c_params['scale'] = default_rendering_params['crystal']['scale']
+        c_params['rotation'] = default_rendering_params['crystal']['rotation']
+
+    # Material parameters
+    if 'material' in outputs:
+        m = outputs['material']
+        if m.ndim == 2:
+            m = m[idx]
+        m_idx = 0
+        if 'ior' in labels_material_active:
+            c_params['material_ior'] = inverse_z_transform(m[m_idx].item(), 'ior')
+            m_idx += 1
+        if 'r' in labels_material_active:
+            c_params['material_roughness'] = inverse_z_transform(m[m_idx].item(), 'r')
+    for k in ['ior', 'roughness']:
+        m_key = f'material_{k}'
+        if (m_key not in c_params
+                and default_rendering_params is not None
+                and m_key in default_rendering_params['material']):
+            c_params[m_key] = default_rendering_params[m_key]
+    r_params['crystal'] = c_params
+
+    # Light parameters
+    if 'light' in outputs:
+        light = outputs['light']
+        if light.ndim == 2:
+            light = light[idx]
+        r_params['light_radiance'] = (
+            inverse_z_transform(light[0].item(), 'er'),
+            inverse_z_transform(light[1].item(), 'eg'),
+            inverse_z_transform(light[2].item(), 'eb'),
+        )
+
+    elif default_rendering_params is not None and 'light_radiance' in default_rendering_params:
+        r_params['light_radiance'] = default_rendering_params['light_radiance']
+    else:
+        r_params['light_radiance'] = (0.5, 0.5, 0.5)
+
+    # Copy the surface bumpmap from defaults if required
+    if 'bumpmap' in outputs:
+        bumpmap = outputs['bumpmap']
+        if bumpmap.ndim == 2:
+            bumpmap = bumpmap[idx]
+        r_params['bumpmap'] = bumpmap
+    elif (default_rendering_params is not None
+          and 'bumpmap' in default_rendering_params
+          and copy_bumpmap):
+        r_params['bumpmap'] = default_rendering_params['bumpmap']
+    else:
+        r_params['bumpmap'] = None
+
+    # Bubbles
+    if 'bubbles' in outputs:
+        bubbles = outputs['bubbles']
+        if bubbles.ndim == 2:
+            bubbles = bubbles[idx]
+        r_params['bubbles'] = bubbles
+    elif (default_rendering_params is not None
+          and 'bubbles' in default_rendering_params
+          and copy_bubbles):
+        r_params['bubbles'] = default_rendering_params['bubbles']
+    else:
+        r_params['bubbles'] = []
+
+    return r_params
+
+
+def prep_distances(
+        dst_args: DatasetTrainingArgs,
+        dataset_args: DatasetSyntheticArgs,
+        ds_stats: Dict[str, Dict[str, float]],
+        labels_distances: List[str],
+        labels_distances_active: List[str],
+        distance_vals: torch.Tensor,
+        switches: Optional[torch.Tensor] = None,
+        missing_distance_val: float = 100.
+) -> torch.Tensor:
+    """
+    Prepare the distance values.
+    """
+    strip_batch = False
+    if distance_vals.ndim == 1:
+        strip_batch = True
+        distance_vals = distance_vals[None, :]
+    bs = distance_vals.shape[0]
+
+    # Set distances to something large if the switches are off or if the distance is negative
+    if dst_args.use_distance_switches and switches is not None:
+        distance_vals = torch.where(switches < .5, missing_distance_val, distance_vals)
+    distance_vals[distance_vals < 0] = missing_distance_val
+
+    # Put the distances into the correct order
+    distances = torch.zeros(bs, len(labels_distances), device=distance_vals.device)
+    pos_active = [labels_distances.index(k) for k in labels_distances_active]
+    for i, pos in enumerate(pos_active):
+        distances[:, pos] = distance_vals[:, i]
+
+    # Add any distances that are not in the active set
+    if (dataset_args.asymmetry is None and labels_distances != labels_distances_active):
+        for d_lbl in labels_distances:
+            if d_lbl not in labels_distances_active:
+                d_pos = labels_distances.index(d_lbl)
+                distances[:, d_pos] = ds_stats[d_lbl]['mean']
+
+    # Normalise the distances by the maximum (in each batch element)
+    d_max = distances.amax(dim=1, keepdim=True)
+    distances = torch.where(
+        d_max > 1e-8,
+        distances / d_max,
+        distances
+    )
+
+    # Ensure negative distances are set to the missing value
+    distance_vals[distance_vals < 0] = missing_distance_val
+
+    if strip_batch:
+        distances = distances[0]
+
+    return distances
