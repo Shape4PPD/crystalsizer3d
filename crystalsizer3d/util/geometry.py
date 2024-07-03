@@ -160,7 +160,7 @@ def align_points_to_xy_plane(
         points: torch.Tensor,
         centroid: Optional[torch.Tensor] = None,
         cross_idx: int = 1,
-        tol: float = 1e-3
+        tol: float = 1e-2
 ) -> torch.Tensor:
     """
     Align a set of 3D points to the xy plane.
@@ -232,7 +232,7 @@ def rotate_2d_points_to_square(
 
 
 # @torch.jit.script
-def calculate_relative_angles(vertices: torch.Tensor, centroid: torch.Tensor, tol: float = 1e-3) -> torch.Tensor:
+def calculate_relative_angles(vertices: torch.Tensor, centroid: torch.Tensor, tol: float = 1e-2) -> torch.Tensor:
     """
     Calculate the angles of a set of vertices relative to the centroid.
     """

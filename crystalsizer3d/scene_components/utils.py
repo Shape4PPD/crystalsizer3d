@@ -1,14 +1,15 @@
-from typing import Optional, Tuple
+from typing import Optional, TYPE_CHECKING, Tuple
 
 import drjit as dr
 import mitsuba as mi
 import torch
 import trimesh.remesh
+from crystalsizer3d.crystal import Crystal
+from crystalsizer3d.util.utils import to_numpy
 from trimesh import Trimesh
 
-from crystalsizer3d.crystal import Crystal
-from crystalsizer3d.scene_components.textures import NoiseTexture
-from crystalsizer3d.util.utils import to_numpy
+if TYPE_CHECKING:
+    from crystalsizer3d.scene_components.scene import Scene
 
 
 class RenderError(RuntimeError):
@@ -118,3 +119,14 @@ def get_projection_components(mi_scene: mi.Scene) -> Tuple[torch.Tensor, int]:
         projection_components_cache[mi_scene.ptr] = (torch.tensor((prj @ wti).matrix)[0], film.crop_size())
 
     return projection_components_cache[mi_scene.ptr]
+
+
+def orthographic_scale_factor(scene: 'Scene') -> float:
+    """
+    Estimate the unit scale factor for orthographic projection
+    """
+    z = scene.crystal.vertices[:, 2].mean()
+    pts = torch.tensor([[0, -1, z], [0, 1, z]], device=scene.device)
+    uv_pts = project_to_image(scene.mi_scene, pts)
+    zoom = torch.abs(uv_pts[0, 1] - uv_pts[1, 1]) / scene.res
+    return float(zoom)

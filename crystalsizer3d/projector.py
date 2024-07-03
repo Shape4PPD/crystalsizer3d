@@ -1,23 +1,23 @@
-from typing import List, Optional, Tuple
+from typing import List, Optional, Tuple, Union
 
 import numpy as np
 import torch
+from crystalsizer3d.crystal import Crystal
+from crystalsizer3d.util.geometry import is_point_in_bounds, line_equation_coefficients, line_intersection, normalise
+from crystalsizer3d.util.utils import init_tensor
 from kornia.core.check import KORNIA_CHECK, KORNIA_CHECK_SHAPE
 from kornia.geometry import axis_angle_to_rotation_matrix, center_crop, quaternion_to_rotation_matrix
 from kornia.utils import draw_line
 from kornia.utils.draw import _batch_polygons, _get_convex_edges
+from torch import Tensor
 from torch.nn.functional import interpolate
-
-from crystalsizer3d.crystal import Crystal
-from crystalsizer3d.util.geometry import is_point_in_bounds, line_equation_coefficients, line_intersection, normalise
-from crystalsizer3d.util.utils import init_tensor
 
 
 def replace_convex_polygon(
-        images: torch.Tensor,
-        polygons: torch.Tensor,
-        replacement: torch.Tensor
-) -> torch.Tensor:
+        images: Tensor,
+        polygons: Tensor,
+        replacement: Tensor
+) -> Tensor:
     """
     Replaces a convex polygons with an image on a batch of image tensors.
     This is modified from the kornia function draw_convex_polygon, to allow full image replacement.
@@ -55,12 +55,12 @@ def replace_convex_polygon(
 
 
 class Projector:
-    vertices: torch.Tensor
-    faces: List[torch.Tensor]
-    face_normals: torch.Tensor
-    distances: torch.Tensor
-    vertices_2d: torch.Tensor
-    image: torch.Tensor
+    vertices: Tensor
+    faces: List[Tensor]
+    face_normals: Tensor
+    distances: Tensor
+    vertices_2d: Tensor
+    image: Tensor
 
     def __init__(
             self,
@@ -89,22 +89,8 @@ class Projector:
         self.y_range = init_tensor([-1, 1], device=self.device) / self.zoom
 
         # Background image
-        if background_image is not None:
-            assert background_image.ndim == 3, 'Background image must be a three-channel colour image.'
-            if background_image.shape[-1] == 3:
-                background_image = background_image.transpose(2, 0, 1)  # Convert to CxHxW
-            background_image = init_tensor(background_image, device=self.device)
-            if background_image.amax() > 1:  # Convert from 0-255 to 0-1
-                background_image = background_image / 255
-            if background_image.shape[-2:] != image_size:  # Resize the image to match
-                background_image = center_crop(background_image[None, ...], min(background_image.shape[-2:]))
-                background_image = interpolate(
-                    background_image,
-                    size=image_size,
-                    mode='bilinear',
-                    align_corners=False
-                )[0]
-        self.background_image = background_image
+        self.background_image = None
+        self.set_background(background_image)
 
         # Colours
         self.colour_facing_towards = init_tensor(colour_facing_towards, device=self.device)
@@ -128,7 +114,29 @@ class Projector:
         # Do the projection
         self.image = self.project()
 
-    def project(self) -> torch.Tensor:
+    def set_background(self, background_image: Optional[Union[Tensor, np.ndarray]] = None):
+        """
+        Set the background image for the projector.
+        """
+        if background_image is not None:
+            assert background_image.ndim == 3, 'Background image must be a three-channel colour image.'
+            background_image = init_tensor(background_image, device=self.device)
+            if background_image.shape[-1] == 3:
+                background_image = background_image.permute(2, 0, 1)  # Convert to CxHxW
+            if background_image.amax() > 1:  # Convert from 0-255 to 0-1
+                background_image = background_image / 255
+            if background_image.shape[-2:] != self.image_size:  # Resize the image to match
+                min_size = min(background_image.shape[-2:])
+                background_image = center_crop(background_image[None, ...], (min_size, min_size))
+                background_image = interpolate(
+                    background_image,
+                    size=self.image_size,
+                    mode='bilinear',
+                    align_corners=False
+                )[0]
+        self.background_image = background_image
+
+    def project(self) -> Tensor:
         """
         Project the crystal onto an image.
         """
@@ -155,7 +163,7 @@ class Projector:
 
         return self.image
 
-    def _generate_image(self) -> torch.Tensor:
+    def _generate_image(self) -> Tensor:
         """
         Generate the projected wireframe image including all refractions.
         """
@@ -192,7 +200,7 @@ class Projector:
 
         return image
 
-    def _refract_points(self, normal: torch.Tensor, distance: torch.Tensor) -> torch.Tensor:
+    def _refract_points(self, normal: Tensor, distance: Tensor) -> Tensor:
         """
         Refract the crystal vertices in the plane given by the normal and the distance.
         """
@@ -215,7 +223,7 @@ class Projector:
 
         return points
 
-    def _orthogonal_projection(self, vertices: torch.Tensor) -> torch.Tensor:
+    def _orthogonal_projection(self, vertices: Tensor) -> Tensor:
         """
         Orthogonally project 3D vertices with custom x and y ranges.
 
@@ -239,10 +247,10 @@ class Projector:
 
     def _draw_edges(
             self,
-            vertices: torch.Tensor,
-            image: Optional[torch.Tensor] = None,
+            vertices: Tensor,
+            image: Optional[Tensor] = None,
             facing_camera: bool = True,
-    ) -> torch.Tensor:
+    ) -> Tensor:
         """
         Draw edges on an image, colouring them based on visibility.
 

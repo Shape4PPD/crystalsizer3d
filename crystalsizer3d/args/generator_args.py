@@ -2,7 +2,7 @@ from argparse import ArgumentParser, _ArgumentGroup
 from pathlib import Path
 from typing import Tuple, Union
 
-from crystalsizer3d import ROOT_PATH
+from crystalsizer3d import DATA_PATH
 from crystalsizer3d.args.base_args import BaseArgs
 from crystalsizer3d.util.utils import str2bool
 
@@ -50,7 +50,7 @@ class GeneratorArgs(BaseArgs):
 
             # RCF model args
             use_rcf: bool = False,
-            rcf_model_path: Union[str, Path] = ROOT_PATH / 'data' / 'bsds500_pascal_model.pth',
+            rcf_model_path: Union[str, Path] = DATA_PATH / 'bsds500_pascal_model.pth',
             rcf_loss_type: str = 'l2',
 
             **kwargs
@@ -177,7 +177,7 @@ class GeneratorArgs(BaseArgs):
         # RCF model args
         group.add_argument('--use-rcf', type=str2bool, default=False,
                            help='Use the Richer Convolutional Features model for edge detection.')
-        group.add_argument('--rcf-model-path', type=Path, default=ROOT_PATH / 'data' / 'bsds500_pascal_model.pth',
+        group.add_argument('--rcf-model-path', type=Path, default=DATA_PATH / 'bsds500_pascal_model.pth',
                            help='Path to the RCF model checkpoint.')
         group.add_argument('--rcf-loss-type', type=str, default='l2', choices=['l1', 'l2'],
                            help='Loss function to use for the RCF features comparison.')

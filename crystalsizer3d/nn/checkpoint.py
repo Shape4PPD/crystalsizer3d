@@ -13,14 +13,14 @@ from crystalsizer3d.args.network_args import NetworkArgs
 from crystalsizer3d.args.optimiser_args import OptimiserArgs
 from crystalsizer3d.args.runtime_args import RuntimeArgs
 from crystalsizer3d.args.transcoder_args import TranscoderArgs
-from crystalsizer3d.nn.dataset import Dataset
+from crystalsizer3d.nn.dataset import DatasetProxy
 from crystalsizer3d.util.utils import hash_data
 
 
 class Checkpoint:
     def __init__(
             self,
-            dataset: Dataset,
+            dataset: DatasetProxy,
             dataset_args: DatasetTrainingArgs,
             network_args: NetworkArgs,
             generator_args: GeneratorArgs,
@@ -137,9 +137,9 @@ class Checkpoint:
                 if len(old_args) > 0:
                     self.old_args[time.strftime('%Y%m%d%H%M%S')] = old_args
                 logger.info(f'Loaded checkpoint data from {load_path}, created={self.created}')
-                logger.info(f'Test loss = {self.loss_test:.4E}')
-                for key, val in self.metrics_test.items():
-                    logger.info(f'\t{key}: {val:.4E}')
+                # logger.info(f'Test loss = {self.loss_test:.4E}')
+                # for key, val in self.metrics_test.items():
+                #     logger.info(f'\t{key}: {val:.4E}')
 
         # Otherwise, create a new checkpoint
         if resume_from is None:

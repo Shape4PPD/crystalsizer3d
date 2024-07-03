@@ -7,14 +7,15 @@ from argparse import Namespace
 from json import JSONEncoder
 from math import log2
 from pathlib import Path
-from typing import List, Optional, Union
+from typing import List, Optional, Tuple, Union
 
 import matplotlib.colors as mcolors
 import numpy as np
 import torch
-from matplotlib.axes import Axes
-
+import torch.nn.functional as F
 from crystalsizer3d import logger
+from matplotlib.axes import Axes
+from torchvision.transforms import GaussianBlur
 
 SEED = 0
 
@@ -83,8 +84,7 @@ def to_uint8(arr: np.ndarray) -> np.ndarray:
 
 
 def init_tensor(
-        tensor: Union[torch.Tensor,
-        np.ndarray, List[float], float, int],
+        tensor: Union[torch.Tensor, np.ndarray, List[float], Tuple[float, ...], float, int],
         dtype: torch.dtype = torch.float32,
         device: Optional[torch.device] = None
 ) -> torch.Tensor:
@@ -93,7 +93,7 @@ def init_tensor(
     """
     if isinstance(tensor, np.ndarray):
         tensor = torch.from_numpy(tensor)
-    if isinstance(tensor, list) or isinstance(tensor, float) or isinstance(tensor, int):
+    if isinstance(tensor, list) or isinstance(tensor, tuple) or isinstance(tensor, float) or isinstance(tensor, int):
         tensor = torch.tensor(tensor)
     tensor = tensor.to(dtype).detach().clone()
     if device is not None:
@@ -105,6 +105,14 @@ class NumpyCompatibleJSONEncoder(JSONEncoder):
     def default(self, obj):
         if isinstance(obj, np.generic) or isinstance(obj, np.ndarray):
             return obj.tolist()
+        return JSONEncoder.default(self, obj)
+
+
+class ArgsCompatibleJSONEncoder(JSONEncoder):
+    def default(self, obj):
+        from crystalsizer3d.args.base_args import BaseArgs
+        if isinstance(obj, BaseArgs):
+            return obj.to_dict()
         return JSONEncoder.default(self, obj)
 
 
@@ -158,3 +166,18 @@ def to_rgb(c: Union[str, np.ndarray]):
     if type(c) == str:
         return mcolors.to_rgb(c)
     return c
+
+
+# @torch.jit.script
+def to_multiscale(img: torch.Tensor, blur: GaussianBlur) -> List[torch.Tensor]:
+    """
+    Generate downsampled and blurred images.
+    """
+    assert img.ndim == 3, 'Input image must have 3 dimensions.'
+    if img.shape[-1] in [1, 3]:
+        img = img.clone().permute(2, 0, 1)
+    imgs = [img.clone()[None, ...]]
+    while min(imgs[-1].shape[-2:]) > blur.kernel_size[0] + 2:
+        imgs.append(blur(F.interpolate(imgs[-1], scale_factor=0.5, mode='bilinear')))
+    imgs = [i[0].permute(1, 2, 0) for i in imgs]
+    return imgs

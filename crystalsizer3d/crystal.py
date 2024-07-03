@@ -27,6 +27,7 @@ ROTATION_MODES = [
 class Crystal(nn.Module):
     all_distances: torch.Tensor
     N: torch.Tensor
+    vertices_og: torch.Tensor
     vertices: torch.Tensor
     faces: Dict[Tuple[int, int, int], torch.Tensor]
     areas: Dict[Tuple[int, int, int], float]
@@ -220,19 +221,22 @@ class Crystal(nn.Module):
         Override the "to" method to ensure that the uv_faces are also moved to the correct device.
         """
         super().to(*args, **kwargs)
+        for k, v in self.faces.items():
+            self.faces[k] = v.to(*args, **kwargs)
         for k, v in self.uv_faces.items():
             self.uv_faces[k] = v.to(*args, **kwargs)
 
-    def clamp_parameters(self):
+    def clamp_parameters(self, rescale: bool = True):
         """
         Clamp the parameters to a valid range.
         """
         with torch.no_grad():
             d = torch.clamp(self.distances, 1e-4, None)
-            d = torch.sort(d, descending=True).values  # todo: parameterise or remove
-            sf = 1 / d.amax()  # Fix the max distance to 1 and adjust scale
-            self.distances.data = d * sf
-            self.scale.data = torch.clamp(self.scale / sf, 1e-8, 1e8)
+            if rescale:
+                sf = 1 / d.amax()  # Fix the max distance to 1 and adjust scale
+                d = d * sf
+                self.scale.data = torch.clamp(self.scale / sf, 1e-8, 1e8)
+            self.distances.data = d
 
             self.origin.data = torch.clamp(self.origin, -1e3, 1e3)
             if self.rotation_mode == ROTATION_MODE_AXISANGLE:
@@ -245,6 +249,9 @@ class Crystal(nn.Module):
                 self.rotation.data = self.rotation / rv_norm
             else:
                 raise ValueError(f'Unsupported rotation mode: {self.rotation_mode}')
+
+            self.material_roughness.data = torch.clamp(self.material_roughness, 1e-4, None)
+            self.material_ior.data = torch.clamp(self.material_ior, 1. + 1e-4, None)
 
     def _init(self):
         """
@@ -391,7 +398,20 @@ class Crystal(nn.Module):
             sorted_vertices = face_vertices[sorted_idxs]
 
             # Flip the order if the normal is pointing inwards
-            normal = torch.cross(sorted_vertices[0] - centroid, sorted_vertices[1] - centroid, dim=0)
+            normal = torch.zeros(3)
+            normal_norm = 0
+            largest_normal = normal
+            largest_normal_norm = 0
+            i = 0
+            while normal_norm < 1e-3 and i < len(sorted_vertices) - 1:
+                normal = torch.cross(sorted_vertices[i] - centroid, sorted_vertices[i + 1] - centroid, dim=0)
+                normal_norm = normal.norm()
+                if normal_norm > largest_normal_norm:
+                    largest_normal = normal
+                    largest_normal_norm = normal_norm
+                i += 1
+            if normal_norm < 1e-3:
+                normal = largest_normal
             if torch.dot(normal, centroid) < 0:
                 sorted_idxs = sorted_idxs.flip(0)
             sorted_face_vertex_idxs = face_vertex_idxs[sorted_idxs]
@@ -418,6 +438,7 @@ class Crystal(nn.Module):
 
         if len(mesh_faces) < 3:
             raise ValueError('Not enough faces to build a mesh!')
+        vertices_og = vertices.clone()
 
         # Step 4: Merge mesh vertices and correct face indices
         mesh_vertices = torch.cat(mesh_vertices)
@@ -449,6 +470,7 @@ class Crystal(nn.Module):
         mesh_vertices = mesh_vertices + origin
 
         # Set properties to self
+        self.vertices_og = vertices_og
         self.vertices = vertices
         self.faces = faces
         self.areas = areas

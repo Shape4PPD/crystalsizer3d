@@ -172,6 +172,7 @@ class DatasetSyntheticArgs(BaseArgs):
             f'Number of miller indices must be greater than 0. {len(miller_indices)} received.'
         for hkl in miller_indices:
             assert len(hkl) == 3, f'Miller indices must have 3 values. {hkl} received.'
+        miller_indices = [tuple(hkl) for hkl in miller_indices]  # Ensure tuples
         self.miller_indices = miller_indices
         assert len(ratio_means) == len(miller_indices), \
             f'Number of ratio means must equal number of miller indices. {len(ratio_means)} != {len(miller_indices)}'

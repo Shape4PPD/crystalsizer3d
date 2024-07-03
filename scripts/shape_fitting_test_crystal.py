@@ -7,20 +7,18 @@ import mitsuba as mi
 import numpy as np
 import timm
 import torch
-import torch.nn.functional as F
 from PIL import Image
 from ccdc.io import EntryReader
+from crystalsizer3d import LOGS_PATH, ROOT_PATH, START_TIMESTAMP, USE_CUDA, logger
+from crystalsizer3d.crystal import Crystal
+from crystalsizer3d.nn.models.rcf import RCF
+from crystalsizer3d.util.ema import EMA
+from crystalsizer3d.util.utils import to_multiscale, to_numpy
 from timm.optim import create_optimizer_v2
 from torch import nn
 from torch.optim import LBFGS
 from torchmin import Minimizer
 from torchvision.transforms import Compose, GaussianBlur
-
-from crystalsizer3d import LOGS_PATH, ROOT_PATH, START_TIMESTAMP, USE_CUDA, logger
-from crystalsizer3d.crystal import Crystal
-from crystalsizer3d.nn.models.rcf import RCF
-from crystalsizer3d.util.ema import EMA
-from crystalsizer3d.util.utils import to_numpy
 
 if USE_CUDA:
     if 'cuda_ad_rgb' not in mi.variants():
@@ -244,18 +242,6 @@ def load_rcf() -> Tuple[RCF, List[EMA]]:
     rcf_emas = [[EMA(decay=0.99) for _ in range(2)] for _ in range(6)]
 
     return rcf, rcf_emas
-
-
-# @torch.jit.script
-def to_multiscale(img: torch.Tensor, blur: GaussianBlur) -> List[torch.Tensor]:
-    """
-    Generate downsampled and blurred images.
-    """
-    imgs = [img.clone().permute(2, 0, 1)[None, ...]]
-    while min(imgs[-1].shape[-2:]) > blur.kernel_size[0] + 2:
-        imgs.append(blur(F.interpolate(imgs[-1], scale_factor=0.5, mode='bilinear')))
-    imgs = [i[0].permute(1, 2, 0) for i in imgs]
-    return imgs
 
 
 # @torch.jit.script

@@ -13,6 +13,7 @@ from scipy.spatial.transform import Rotation
 from trimesh import Trimesh
 
 from crystalsizer3d import DATASET_PROXY_PATH, logger
+from crystalsizer3d.args.base_args import BaseArgs
 from crystalsizer3d.args.dataset_synthetic_args import DatasetSyntheticArgs
 from crystalsizer3d.args.dataset_training_args import DatasetTrainingArgs
 from crystalsizer3d.crystal import Crystal, ROTATION_MODE_AXISANGLE, ROTATION_MODE_QUATERNION
@@ -684,7 +685,8 @@ class DatasetProxy:
         # Return attributes from the dataset
         if hasattr(self.ds, name):
             val = getattr(self.ds, name)
-            self._update_cache(name, val)
+            if isinstance(val, (int, float, str, list, dict, tuple, BaseArgs)):
+                self._update_cache(name, val)
             return val
 
         raise AttributeError(f'Attribute {name} not found in DatasetProxy or Dataset.')

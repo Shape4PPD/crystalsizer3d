@@ -4,9 +4,6 @@ from typing import List, Optional, Tuple, Union
 import mitsuba as mi
 import numpy as np
 import torch
-from scipy.optimize import minimize
-from scipy.spatial import ConvexHull
-
 from crystalsizer3d import MI_CPU_VARIANT, USE_CUDA
 from crystalsizer3d.args.dataset_synthetic_args import ROTATION_MODE_AXISANGLE
 from crystalsizer3d.crystal import Crystal
@@ -14,7 +11,10 @@ from crystalsizer3d.scene_components.bubble import Bubble
 from crystalsizer3d.scene_components.textures import NoiseTexture, NormalMapNoiseTexture
 from crystalsizer3d.scene_components.utils import RenderError, build_crystal_mesh, project_to_image
 from crystalsizer3d.util.geometry import normalise
-from crystalsizer3d.util.utils import hash_data, to_numpy
+from crystalsizer3d.util.utils import hash_data, init_tensor, to_numpy
+from scipy.optimize import minimize
+from scipy.spatial import ConvexHull
+from torch import Tensor
 
 if USE_CUDA:
     if 'cuda_ad_rgb' not in mi.variants():
@@ -34,6 +34,9 @@ class Scene:
     FACES_KEY = SHAPE_NAME + '.faces'
     BSDF_KEY = SHAPE_NAME + '.bsdf'
     COLOUR_KEY = BSDF_KEY + '.reflectance.value'
+    ETA_KEY = BSDF_KEY + '.eta'
+    ROUGHNESS_KEY = BSDF_KEY + '.alpha.value'
+    RADIANCE_KEY = 'light.emitter.radiance.value'
     mi_scene_dict: dict
     mi_scene: mi.Scene
     hash_id: str
@@ -52,6 +55,7 @@ class Scene:
             integrator_max_depth: int = 64,
             integrator_rr_depth: int = 5,
 
+            camera_type: str = 'perspective',
             camera_distance: float = 100.,
             focus_distance: float = 90.,
             focal_length: Optional[float] = None,
@@ -62,11 +66,11 @@ class Scene:
             light_z_position: float = -10.1,
             light_scale: float = 50.,
             light_radiance: Tuple[float, float, float] = (0.5, 0.5, 0.5),
-            light_st_texture: Optional[Union[NoiseTexture, torch.Tensor]] = None,
+            light_st_texture: Optional[Union[NoiseTexture, Tensor]] = None,
 
             cell_z_positions: List[float] = [-10., 0., 50., 60.],
             cell_surface_scale: float = 100.,
-            cell_bumpmap: Optional[Union[NormalMapNoiseTexture, torch.Tensor]] = None,
+            cell_bumpmap: Optional[Union[NormalMapNoiseTexture, Tensor]] = None,
             cell_bumpmap_idx: int = 1,
             cell_render_blanks: bool = False,
 
@@ -91,6 +95,7 @@ class Scene:
         self.integrator_rr_depth = integrator_rr_depth
 
         # Sensor parameters
+        self.camera_type = camera_type
         self.camera_distance = camera_distance
         self.focus_distance = focus_distance
         assert focal_length is not None or camera_fov is not None, 'Either focal length or camera FOV must be provided.'
@@ -104,7 +109,7 @@ class Scene:
         # Light parameters
         self.light_z_position = light_z_position
         self.light_scale = light_scale
-        self.light_radiance = light_radiance
+        self.light_radiance = init_tensor(light_radiance)
         self.light_st_texture = light_st_texture
 
         # Growth cell parameters
@@ -116,6 +121,10 @@ class Scene:
 
         # Build the scene
         self.build_mi_scene()
+
+    @property
+    def device(self) -> torch.device:
+        return device
 
     def to_dict(self) -> dict:
         """
@@ -129,6 +138,7 @@ class Scene:
             'integrator_max_depth': self.integrator_max_depth,
             'integrator_rr_depth': self.integrator_rr_depth,
 
+            'camera_type': self.camera_type,
             'camera_distance': self.camera_distance,
             'focus_distance': self.focus_distance,
             'focal_length': self.focal_length,
@@ -138,7 +148,7 @@ class Scene:
 
             'light_z_position': self.light_z_position,
             'light_scale': self.light_scale,
-            'light_radiance': self.light_radiance,
+            'light_radiance': self.light_radiance.tolist(),
             'light_st_texture': self.light_st_texture.to_dict()
             if isinstance(self.light_st_texture, NoiseTexture) else None,
 
@@ -193,9 +203,13 @@ class Scene:
 
     @property
     def sensor_params(self) -> dict:
+        type_params = {
+            'type': self.camera_type
+        }
+        if self.camera_type == 'thinlens':
+            type_params['aperture_radius'] = self.aperture_radius
         return {
-            'type': 'thinlens',
-            'aperture_radius': self.aperture_radius,
+            **type_params,
             'focus_distance': self.focus_distance,
             'focal_length' if self.focal_length is not None else 'fov':
                 f'{self.focal_length}mm' if self.focal_length is not None else self.camera_fov,
@@ -219,6 +233,7 @@ class Scene:
 
     @property
     def light_params(self) -> dict:
+        radiance = self.light_radiance.tolist() if isinstance(self.light_radiance, Tensor) else self.light_radiance
         light_params = {
             'light': {
                 'type': 'rectangle',
@@ -227,7 +242,7 @@ class Scene:
                     'type': 'area',
                     'radiance': {
                         'type': 'rgb',
-                        'value': self.light_radiance
+                        'value': radiance
                     }
                 },
             }
@@ -235,7 +250,7 @@ class Scene:
         if self.light_st_texture is not None:
             if isinstance(self.light_st_texture, NoiseTexture):
                 tex = self.light_st_texture.build(device=device)
-            elif isinstance(self.light_st_texture, torch.Tensor):
+            elif isinstance(self.light_st_texture, Tensor):
                 tex = self.light_st_texture
             else:
                 raise ValueError(f'Invalid light specular transmittance texture type: {type(self.light_st_texture)}')
@@ -263,7 +278,7 @@ class Scene:
             'distribution': 'beckmann',
             'alpha': mi.ScalarFloat(self.crystal.material_roughness),
             'int_ior': mi.ScalarFloat(self.crystal.material_ior),
-            'ext_ior': 'water',  # 1.333
+            'ext_ior': 1.333,  # water
         }
 
     @property
@@ -287,7 +302,7 @@ class Scene:
             if self.cell_bumpmap is not None and i == self.cell_bumpmap_idx:
                 if isinstance(self.cell_bumpmap, NormalMapNoiseTexture):
                     tex = self.cell_bumpmap.build(device=device)
-                elif isinstance(self.cell_bumpmap, torch.Tensor):
+                elif isinstance(self.cell_bumpmap, Tensor):
                     tex = self.cell_bumpmap
                 else:
                     raise ValueError(f'Invalid cell bumpmap texture type: {type(self.cell_bumpmap)}')
@@ -393,7 +408,7 @@ class Scene:
             self.xy_bounds[self.hash_id][z] = (min_x, max_x), (min_y, max_y)
         return self.xy_bounds[self.hash_id][z]
 
-    def get_crystal_image_coords(self) -> torch.Tensor:
+    def get_crystal_image_coords(self) -> Tensor:
         """
         Get the coordinates of the crystal vertices in the image.
         """
