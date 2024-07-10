@@ -339,7 +339,8 @@ def plot_distances(
         colour_pred: str = 'cornflowerblue',
         colour_target: str = 'darkorange',
         colour_pred2: str = 'green',
-        share_ax: Optional[Dict[str, Axes]] = None
+        share_ax: Optional[Dict[str, Axes]] = None,
+        show_legend: bool = True
 ):
     """
     Plot the distances on the axis.
@@ -434,7 +435,8 @@ def plot_distances(
     ax.set_ylim(0, 1)
     ax.set_yticks([0, 0.5, 1])
     ax.set_yticklabels(['0', '', '1'])
-    _shared_ax_legend(share_ax, ax, 'distances')
+    if show_legend:
+        _shared_ax_legend(share_ax, ax, 'distances')
 
 
 def plot_areas(
@@ -448,6 +450,7 @@ def plot_areas(
         colour_pred: str = 'cornflowerblue',
         colour_target: str = 'darkorange',
         share_ax: Optional[Dict[str, Axes]] = None,
+        show_legend: bool = True,
         **kwargs
 ):
     """
@@ -523,7 +526,8 @@ def plot_areas(
     ax.set_xticklabels(xlabels)
     if len(xlabels) > 5:
         ax.tick_params(axis='x', labelsize='small')
-    _shared_ax_legend(share_ax, ax, 'areas')
+    if show_legend:
+        _shared_ax_legend(share_ax, ax, 'areas')
 
 
 def plot_transformation(
@@ -536,7 +540,8 @@ def plot_transformation(
         colour_pred: str = 'cornflowerblue',
         colour_target: str = 'darkorange',
         colour_pred2: str = 'green',
-        share_ax: Optional[Dict[str, Axes]] = None
+        share_ax: Optional[Dict[str, Axes]] = None,
+        show_legend: bool = True
 ):
     """
     Plot the transformation parameters.
@@ -595,7 +600,8 @@ def plot_transformation(
     ylabels = [str(int(y)) if y == int(y) else '' for y in ax.get_yticks()]
     ax.set_yticks(ax.get_yticks())  # Suppress warning
     ax.set_yticklabels(ylabels)
-    _shared_ax_legend(share_ax, ax, 'transformation')
+    if show_legend:
+        _shared_ax_legend(share_ax, ax, 'transformation')
 
 
 def plot_material(
@@ -608,7 +614,8 @@ def plot_material(
         colour_pred: str = 'cornflowerblue',
         colour_target: str = 'darkorange',
         colour_pred2: str = 'green',
-        share_ax: Optional[Dict[str, Axes]] = None
+        share_ax: Optional[Dict[str, Axes]] = None,
+        show_legend: bool = True
 ):
     """
     Plot the material parameters.
@@ -639,7 +646,8 @@ def plot_material(
     if 'r' in manager.ds.labels_material_active:
         labels.append('Roughness')
     ax.set_xticklabels(labels)
-    _shared_ax_legend(share_ax, ax, 'material')
+    if show_legend:
+        _shared_ax_legend(share_ax, ax, 'material')
 
 
 def plot_light(
@@ -652,6 +660,7 @@ def plot_light(
         colour_target: str = 'darkorange',
         colour_pred2: str = 'green',
         share_ax: Optional[Dict[str, Axes]] = None,
+        show_legend: bool = True,
         **kwargs
 ):
     """
@@ -676,7 +685,8 @@ def plot_light(
     ax.set_xticks(locs)
     ax.set_xticklabels(['R', 'G', 'B'])
     ax.axhline(0, color='grey', linestyle='--', linewidth=1)
-    _shared_ax_legend(share_ax, ax, 'light')
+    if show_legend:
+        _shared_ax_legend(share_ax, ax, 'light')
 
 
 def plot_training_samples(

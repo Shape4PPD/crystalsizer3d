@@ -8,20 +8,22 @@ import torch
 import torch.nn.functional as F
 import yaml
 from PIL import Image
-from crystalsizer3d import LOGS_PATH, START_TIMESTAMP, USE_CUDA, logger
-from crystalsizer3d.args.base_args import BaseArgs
-from crystalsizer3d.nn.manager import Manager
-from crystalsizer3d.projector import Projector
-from crystalsizer3d.scene_components.utils import orthographic_scale_factor
-from crystalsizer3d.util.plots import make_3d_digital_crystal_image, make_error_image, plot_distances, plot_light, \
-    plot_material, plot_transformation
-from crystalsizer3d.util.utils import print_args, to_dict, to_numpy
 from matplotlib import pyplot as plt
 from matplotlib.figure import Figure
 from matplotlib.gridspec import GridSpec
 from mayavi import mlab
 from torch.utils.data import default_collate
 from torchvision.transforms.functional import crop, gaussian_blur, to_tensor
+
+from crystalsizer3d import LOGS_PATH, START_TIMESTAMP, USE_CUDA, logger
+from crystalsizer3d.args.base_args import BaseArgs
+from crystalsizer3d.nn.manager import Manager
+from crystalsizer3d.projector import Projector
+from crystalsizer3d.refiner.denoising import denoise_batch, stitch_image, tile_image
+from crystalsizer3d.scene_components.utils import orthographic_scale_factor
+from crystalsizer3d.util.plots import make_3d_digital_crystal_image, make_error_image, plot_distances, plot_light, \
+    plot_material, plot_transformation
+from crystalsizer3d.util.utils import print_args, to_dict, to_numpy
 
 # Off-screen rendering
 mlab.options.offscreen = True
@@ -420,7 +422,7 @@ def plot_denoised_prediction(args: Optional[RuntimeArgs] = None):
 
     # Progressively add more noise to the remainder of the batch
     X_denoised = X_denoised.repeat(args.batch_size - 1, 1, 1, 1)
-    noise = torch.randn_like(X_target)[:args.batch_size // 2] \
+    noise = torch.randn_like(X_denoised) \
             * torch.linspace(0, 0.2, args.batch_size - 1, device=manager.device)[:, None, None, None]
     X_denoised = X_denoised + noise
 
@@ -434,12 +436,85 @@ def plot_denoised_prediction(args: Optional[RuntimeArgs] = None):
         _make_plots(args, save_dir, manager, X_target, Y_pred, Y_target, r_params_target, idx=i)
 
 
+def plot_denoised_patches(args: Optional[RuntimeArgs] = None):
+    """
+    Try denoising the full-size image in patches... is it better?
+    """
+    args, manager, save_dir, X_target, Y_target, r_params_target = _init(args, 'denoised_patches')
+
+    # Patch settings
+    n_tiles = 9
+    overlap = 0.05
+
+    # Load the denoising model
+    assert args.dn_model_path.exists(), f'DN model path does not exist: {args.dn_model_path}.'
+    manager.load_network(args.dn_model_path, 'denoiser')
+
+    # Load the full-size image and make square
+    X_target_og = to_tensor(Image.open(args.image_path))
+    d = min(X_target_og.shape[-2:])
+    X_target_og = crop(X_target_og, top=0, left=X_target_og.shape[-1] - d, height=d, width=d)
+
+    # Split it up into patches
+    X_patches, patch_positions = tile_image(X_target_og, n_tiles=n_tiles, overlap=overlap)
+
+    # Resize the patches to the working image size
+    X_patches = F.interpolate(
+        X_patches,
+        size=manager.image_shape[-1],
+        mode='bilinear',
+        align_corners=False
+    ).to(manager.device)
+    X = torch.cat([X_target, X_patches])
+
+    # Denoise the patches
+    logger.info('Denoising the patches.')
+    X_denoised = denoise_batch(manager, X, batch_size=3)
+    X_target_denoised = X_denoised[0]
+    X_patches_denoised = X_denoised[1:]
+
+    # Plot the full denoising attempt
+    logger.info('Plotting.')
+    img = to_numpy(X_target * 255).astype(np.uint8).squeeze().transpose(1, 2, 0)
+    Image.fromarray(img).save(save_dir / f'target.png')
+    img = to_numpy(X_target_denoised * 255).astype(np.uint8).squeeze().transpose(1, 2, 0)
+    Image.fromarray(img).save(save_dir / f'target_denoised.png')
+
+    # Plot patches
+    for i in range(len(X_patches_denoised)):
+        patch = to_numpy(X_patches[i] * 255).astype(np.uint8).squeeze().transpose(1, 2, 0)
+        Image.fromarray(patch).save(save_dir / f'patch_{i:02d}.png')
+        patch_dn = to_numpy(X_patches_denoised[i] * 255).astype(np.uint8).squeeze().transpose(1, 2, 0)
+        Image.fromarray(patch_dn).save(save_dir / f'patch_{i:02d}_denoised.png')
+
+    # Plot the reconstituted image from the patches
+    X_stitched = stitch_image(X_patches, patch_positions, overlap=overlap)
+    img = to_numpy(X_stitched * 255).astype(np.uint8).squeeze().transpose(1, 2, 0)
+    Image.fromarray(img).save(save_dir / f'target_restitched.png')
+
+    # Plot the reconstituted denoised image from the patches
+    X_denoised_stitched = stitch_image(X_patches_denoised, patch_positions, overlap=overlap)
+    img = to_numpy(X_denoised_stitched * 255).astype(np.uint8).squeeze().transpose(1, 2, 0)
+    Image.fromarray(img).save(save_dir / f'target_denoised_stitched.png')
+
+    # Resize the reconstituted denoised image to the working image size
+    X_dns2 = F.interpolate(
+        X_denoised_stitched[None, ...],
+        size=manager.image_shape[-1],
+        mode='bilinear',
+        align_corners=False
+    )[0]
+    img = to_numpy(X_dns2 * 255).astype(np.uint8).squeeze().transpose(1, 2, 0)
+    Image.fromarray(img).save(save_dir / f'target_denoised_stitched2.png')
+
+
 if __name__ == '__main__':
     start_time = time.time()
 
     # plot_prediction()
     # plot_prediction_noise_batch()
-    plot_denoised_prediction()
+    # plot_denoised_prediction()
+    plot_denoised_patches()
 
     # # Iterate over all images in the image_path directory
     # args_ = parse_arguments()
