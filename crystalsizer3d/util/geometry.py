@@ -2,36 +2,37 @@ from typing import List, Optional, Tuple, Union
 
 import numpy as np
 import torch
-from kornia.geometry import axis_angle_to_rotation_matrix, quaternion_to_rotation_matrix, rotation_matrix_to_axis_angle, \
-    rotation_matrix_to_quaternion
+from kornia.geometry import quaternion_to_rotation_matrix, rotation_matrix_to_axis_angle, rotation_matrix_to_quaternion
+from torch import Tensor
 
 from crystalsizer3d.util.utils import to_numpy
 
 
-def normalise(v: Union[np.ndarray, torch.Tensor]) -> Union[np.ndarray, torch.Tensor]:
+def normalise(v: Union[np.ndarray, Tensor]) -> Union[np.ndarray, Tensor]:
     """
     Normalise an array along its final dimension.
     """
-    if isinstance(v, torch.Tensor):
+    if isinstance(v, Tensor):
         return normalise_pt(v)
     else:
         return v / np.linalg.norm(v, axis=-1, keepdims=True)
 
 
 @torch.jit.script
-def normalise_pt(v: torch.Tensor) -> torch.Tensor:
+def normalise_pt(v: Tensor) -> Tensor:
     """
     Normalise a tensor along its final dimension.
     """
     return v / torch.norm(v, dim=-1, keepdim=True)
 
 
+@torch.jit.script
 def line_equation_coefficients(
-        p1: torch.Tensor,
-        p2: torch.Tensor,
+        p1: Tensor,
+        p2: Tensor,
         perpendicular: bool = False,
         eps: float = 1e-6
-) -> torch.Tensor:
+) -> Tensor:
     """
     Calculate the coefficients of the line that passes through p1 and p2 in the form ax + by + c = 0.
     If perpendicular is True, the coefficients of the line perpendicular to this line that passes through the midpoint of p1 and p2 are returned.
@@ -56,15 +57,17 @@ def line_equation_coefficients(
     return torch.stack([-m, one, -b])
 
 
+@torch.jit.script
 def line_intersection(
-        l1: Tuple[float, float, float],
-        l2: Tuple[float, float, float]
-) -> Optional[torch.Tensor]:
+        l1: Tensor,
+        l2: Tensor
+) -> Optional[Tensor]:
     """
     Calculate the intersection point of two lines in the form ax + by + c = 0.
     """
-    a1, b1, c1 = l1
-    a2, b2, c2 = l2
+    assert l1.shape == l2.shape == (3,), 'Invalid line equation coefficients.'
+    a1, b1, c1 = l1[0], l1[1], l1[2]
+    a2, b2, c2 = l2[0], l2[1], l2[2]
 
     # Compute determinant
     det = a1 * b2 - a2 * b1
@@ -80,34 +83,37 @@ def line_intersection(
     return torch.stack([x, y])
 
 
-def is_point_in_bounds(p: torch.Tensor, bounds: List[torch.Tensor], eps: float = 1e-6) -> bool:
+@torch.jit.script
+def is_point_in_bounds(p: Tensor, bounds: List[Tensor], eps: float = 1e-6) -> bool:
     """
     Check if point p lies within the bounds defined by bounds.
     """
-    min_x = min([b[0].item() for b in bounds])
-    max_x = max([b[0].item() for b in bounds])
-    min_y = min([b[1].item() for b in bounds])
-    max_y = max([b[1].item() for b in bounds])
-    return (min_x - eps <= p[0] <= max_x + eps) \
-        and (min_y - eps <= p[1] <= max_y + eps)
+    bounds = torch.stack(bounds)
+    mins = bounds.amin(dim=0)
+    maxs = bounds.amax(dim=0)
+    min_x, min_y = mins[0], mins[1]
+    max_x, max_y = maxs[0], maxs[1]
+    return bool((min_x - eps <= p[0] <= max_x + eps)
+                and (min_y - eps <= p[1] <= max_y + eps))
 
 
-def geodesic_distance(R1: torch.Tensor, R2: torch.Tensor, EPS: float = 1e-4) -> torch.Tensor:
+@torch.jit.script
+def geodesic_distance(R1: Tensor, R2: Tensor, eps: float = 1e-4) -> Tensor:
     """
     Compute the geodesic distance between two rotation matrices.
     """
     R = torch.matmul(R2, R1.transpose(-2, -1))
     trace = torch.einsum('...ii', R)
     trace_temp = (trace - 1) / 2
-    trace_temp = torch.clamp(trace_temp, -1 + EPS, 1 - EPS)
+    trace_temp = torch.clamp(trace_temp, -1 + eps, 1 - eps)
     theta = torch.acos(trace_temp)
     return theta
 
 
 def get_closest_rotation(
-        R0: Union[np.ndarray, torch.Tensor],
-        rotation_group: torch.Tensor,
-) -> Union[np.ndarray, torch.Tensor]:
+        R0: Union[np.ndarray, Tensor],
+        rotation_group: Tensor,
+) -> Union[np.ndarray, Tensor]:
     """
     Get the closest rotation in a group to a target rotation matrix.
     """
@@ -156,12 +162,83 @@ def get_closest_rotation(
     return R_star.to(R0_dev)
 
 
+@torch.jit.script
+def _compute_rotation_matrix(axis_angle: Tensor, theta2: Tensor, eps: float = 1e-6) -> Tensor:
+    """
+    Taken from kornia/geometry/conversions.py, adapted to be jit compatible.
+    """
+    # We want to be careful to only evaluate the square root if the
+    # norm of the axis_angle vector is greater than zero. Otherwise
+    # we get a division by zero.
+    k_one = 1.0
+    theta = torch.sqrt(theta2)
+    wxyz = axis_angle / (theta + eps)
+    wx, wy, wz = torch.chunk(wxyz, 3, dim=1)
+    cos_theta = torch.cos(theta)
+    sin_theta = torch.sin(theta)
+
+    r00 = cos_theta + wx * wx * (k_one - cos_theta)
+    r10 = wz * sin_theta + wx * wy * (k_one - cos_theta)
+    r20 = -wy * sin_theta + wx * wz * (k_one - cos_theta)
+    r01 = wx * wy * (k_one - cos_theta) - wz * sin_theta
+    r11 = cos_theta + wy * wy * (k_one - cos_theta)
+    r21 = wx * sin_theta + wy * wz * (k_one - cos_theta)
+    r02 = wy * sin_theta + wx * wz * (k_one - cos_theta)
+    r12 = -wx * sin_theta + wy * wz * (k_one - cos_theta)
+    r22 = cos_theta + wz * wz * (k_one - cos_theta)
+    rotation_matrix = torch.cat([r00, r01, r02, r10, r11, r12, r20, r21, r22], dim=1)
+    return rotation_matrix.view(-1, 3, 3)
+
+
+@torch.jit.script
+def _compute_rotation_matrix_taylor(axis_angle: Tensor) -> Tensor:
+    """
+    Taken from kornia/geometry/conversions.py, adapted to be jit compatible.
+    """
+    rx, ry, rz = torch.chunk(axis_angle, 3, dim=1)
+    k_one = torch.ones_like(rx)
+    rotation_matrix = torch.cat([k_one, -rz, ry, rz, k_one, -rx, -ry, rx, k_one], dim=1)
+    return rotation_matrix.view(-1, 3, 3)
+
+
+@torch.jit.script
+def axis_angle_to_rotation_matrix(axis_angle: Tensor) -> Tensor:
+    """
+    Convert 3d vector of axis-angle rotation to 3x3 rotation matrix.
+     -- Taken from kornia/geometry/conversions.py, adapted to be jit compatible
+    """
+    if not isinstance(axis_angle, Tensor):
+        raise TypeError(f"Input type is not a Tensor. Got {type(axis_angle)}")
+
+    if not axis_angle.shape[-1] == 3:
+        raise ValueError(f"Input size must be a (*, 3) tensor. Got {axis_angle.shape}")
+
+    # stolen from ceres/rotation.h
+    _axis_angle = torch.unsqueeze(axis_angle, dim=1)
+    theta2 = torch.matmul(_axis_angle, _axis_angle.transpose(1, 2))
+    theta2 = torch.squeeze(theta2, dim=1)
+
+    # compute rotation matrices
+    rotation_matrix_normal = _compute_rotation_matrix(axis_angle, theta2)
+    rotation_matrix_taylor = _compute_rotation_matrix_taylor(axis_angle)
+
+    # create mask to handle both cases
+    eps = 1e-6
+    mask = (theta2 > eps).view(-1, 1, 1).to(theta2.device)
+    mask_pos = (mask).type_as(theta2)
+    mask_neg = (~mask).type_as(theta2)
+
+    # create output pose matrix with masked values
+    rotation_matrix = mask_pos * rotation_matrix_normal + mask_neg * rotation_matrix_taylor
+    return rotation_matrix  # Nx3x3
+
+
+@torch.jit.script
 def align_points_to_xy_plane(
-        points: torch.Tensor,
-        centroid: Optional[torch.Tensor] = None,
-        cross_idx: int = 1,
+        points: Tensor,
+        centroid: Optional[Tensor] = None,
         tol: float = 1e-2
-) -> torch.Tensor:
+) -> Tuple[Tensor, bool]:
     """
     Align a set of 3D points to the xy plane.
     """
@@ -174,47 +251,48 @@ def align_points_to_xy_plane(
 
     # Check if the points are too close together
     if translated_points.norm(dim=-1, p=2).amax() < tol:
-        raise ValueError('Points are too close together')
+        return points, False
 
-    # Step 3: Compute normal vector of the plane
-    normal_vector = torch.cross(translated_points[0], translated_points[cross_idx], dim=0)
-    normal_vector = normalise(normal_vector)
-    z_axis = torch.tensor([0.0, 0.0, 1.0], dtype=centroid.dtype, device=centroid.device)
+    cross_idx = 1
+    while cross_idx < len(points):
+        # Step 3: Compute normal vector of the plane
+        normal_vector = torch.cross(translated_points[0], translated_points[cross_idx], dim=0)
+        normal_vector = normalise_pt(normal_vector)
+        z_axis = torch.tensor([0.0, 0.0, 1.0], dtype=centroid.dtype, device=centroid.device)
 
-    # If the normal vector is already aligned with the z-axis, return the points
-    if torch.allclose(normal_vector, z_axis):
-        return translated_points
+        # If the normal vector is already aligned with the z-axis, return the points
+        if torch.allclose(normal_vector, z_axis):
+            return translated_points, True
 
-    # If the normal vector is aligned with the negative z-axis, rotate around the x-axis
-    if torch.allclose(normal_vector, -z_axis):
-        rotated_points = translated_points
-        rotated_points[:, 0] = -rotated_points[:, 0]
-        return rotated_points
+        # If the normal vector is aligned with the negative z-axis, rotate around the x-axis
+        if torch.allclose(normal_vector, -z_axis):
+            rotated_points = translated_points
+            rotated_points[:, 0] = -rotated_points[:, 0]
+            return rotated_points, True
 
-    # Step 4: Compute rotation matrix
-    rotation_axis = normalise(torch.cross(normal_vector, z_axis, dim=0))
-    rotation_angle = torch.acos(torch.dot(normal_vector, z_axis))
-    rotvec = rotation_axis * rotation_angle
-    R = axis_angle_to_rotation_matrix(rotvec[None, :]).squeeze(0)
+        # Step 4: Compute rotation matrix
+        rotation_axis = normalise_pt(torch.cross(normal_vector, z_axis, dim=0))
+        rotation_angle = torch.acos(torch.dot(normal_vector, z_axis))
+        rotvec = rotation_axis * rotation_angle
+        R = axis_angle_to_rotation_matrix(rotvec[None, :]).squeeze(0)
 
-    # Step 5: Apply rotation to points
-    rotated_points = (R @ translated_points.T).T
+        # Step 5: Apply rotation to points
+        rotated_points = (R @ translated_points.T).T
 
-    # Step 6: Verify that the points are aligned to the xy plane, if not try calculating the normal vector with a different point
-    if rotated_points[:, 2].abs().amax() > torch.norm(rotated_points, dim=-1).max() * tol:
-        if cross_idx < len(points) - 1:
-            return align_points_to_xy_plane(points, centroid, cross_idx + 1)
-        raise ValueError('Points are not aligned to the xy plane')
+        # Step 6: Verify that the points are aligned to the xy plane, if not try calculating the normal vector with a different point
+        if rotated_points[:, 2].abs().amax() < torch.norm(rotated_points, dim=-1).max() * tol:
+            return rotated_points, True
+        cross_idx += 1
 
-    return rotated_points
+    return points, False
 
 
-# @torch.jit.script
+@torch.jit.script
 def rotate_2d_points_to_square(
-        points: torch.Tensor,
+        points: Tensor,
         max_adjustments: int = 20,
         tol: float = 5 * (np.pi / 180)
-) -> torch.Tensor:
+) -> Tensor:
     """
     Rotate a set of 2D points to a square.
     """
@@ -231,21 +309,21 @@ def rotate_2d_points_to_square(
     return points
 
 
-# @torch.jit.script
-def calculate_relative_angles(vertices: torch.Tensor, centroid: torch.Tensor, tol: float = 1e-2) -> torch.Tensor:
+@torch.jit.script
+def calculate_relative_angles(vertices: Tensor, centroid: Tensor, tol: float = 1e-2) -> Tensor:
     """
     Calculate the angles of a set of vertices relative to the centroid.
     """
-    try:
-        vertices = align_points_to_xy_plane(vertices, centroid, tol=tol)
-        angles = torch.atan2(vertices[:, 1], vertices[:, 0])
-    except ValueError:
+    vertices, success = align_points_to_xy_plane(vertices, centroid, tol=tol)
+    if not success:
         angles = torch.linspace(0, 2 * torch.pi, steps=len(vertices) + 1, device=vertices.device)[:-1]
+    else:
+        angles = torch.atan2(vertices[:, 1], vertices[:, 0])
     return angles
 
 
 @torch.jit.script
-def merge_vertices(vertices: torch.Tensor, epsilon: float = 1e-3) -> Tuple[torch.Tensor, torch.Tensor]:
+def merge_vertices(vertices: Tensor, epsilon: float = 1e-3) -> Tuple[Tensor, Tensor]:
     """
     Cluster a set of vertices based on spatial quantisation.
     """
