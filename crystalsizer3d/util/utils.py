@@ -96,7 +96,7 @@ def init_tensor(
     if isinstance(tensor, np.ndarray):
         tensor = torch.from_numpy(tensor)
     if isinstance(tensor, list) or isinstance(tensor, tuple) or isinstance(tensor, float) or isinstance(tensor, int):
-        tensor = Tensor(tensor)
+        tensor = torch.tensor(tensor)
     tensor = tensor.to(dtype).detach().clone()
     if device is not None:
         tensor = tensor.to(device)
