@@ -13,9 +13,11 @@ import matplotlib.colors as mcolors
 import numpy as np
 import torch
 import torch.nn.functional as F
-from crystalsizer3d import logger
 from matplotlib.axes import Axes
+from torch import Tensor
 from torchvision.transforms import GaussianBlur
+
+from crystalsizer3d import logger
 
 SEED = 0
 
@@ -37,7 +39,7 @@ def get_seed() -> int:
     return SEED
 
 
-def to_numpy(t: torch.Tensor) -> np.ndarray:
+def to_numpy(t: Tensor) -> np.ndarray:
     """Converts a torch tensor to a numpy array."""
     return t.detach().cpu().numpy()
 
@@ -84,17 +86,17 @@ def to_uint8(arr: np.ndarray) -> np.ndarray:
 
 
 def init_tensor(
-        tensor: Union[torch.Tensor, np.ndarray, List[float], Tuple[float, ...], float, int],
+        tensor: Union[Tensor, np.ndarray, List[float], Tuple[float, ...], float, int],
         dtype: torch.dtype = torch.float32,
         device: Optional[torch.device] = None
-) -> torch.Tensor:
+) -> Tensor:
     """
     Create a clone of a tensor or numpy array.
     """
     if isinstance(tensor, np.ndarray):
         tensor = torch.from_numpy(tensor)
     if isinstance(tensor, list) or isinstance(tensor, tuple) or isinstance(tensor, float) or isinstance(tensor, int):
-        tensor = torch.tensor(tensor)
+        tensor = Tensor(tensor)
     tensor = tensor.to(dtype).detach().clone()
     if device is not None:
         tensor = tensor.to(device)
@@ -123,7 +125,7 @@ def hash_data(data) -> str:
     ).hexdigest()
 
 
-def is_bad(t: torch.Tensor) -> bool:
+def is_bad(t: Tensor) -> bool:
     """Checks if any of the elements in the tensor are infinite or nan."""
     if torch.isinf(t).any():
         return True
@@ -136,12 +138,12 @@ def calculate_model_norm(
         model: torch.nn.Module,
         p: int = 2,
         device: torch.device = torch.device('cpu')
-) -> torch.Tensor:
+) -> Tensor:
     """Calculate the cumulative Lp norms of the model parameters."""
     if isinstance(model, torch.nn.DataParallel):  # Check if the model is a DataParallel object
         model = model.module
     with torch.no_grad():
-        norm = torch.tensor(0., dtype=torch.float32, device=device)
+        norm = Tensor(0., dtype=torch.float32, device=device)
         for name, m in model.named_modules():
             if hasattr(m, 'parameters'):
                 p_norm = 0
@@ -169,7 +171,7 @@ def to_rgb(c: Union[str, np.ndarray]):
 
 
 # @torch.jit.script
-def to_multiscale(img: torch.Tensor, blur: GaussianBlur) -> List[torch.Tensor]:
+def to_multiscale(img: Tensor, blur: GaussianBlur) -> List[Tensor]:
     """
     Generate downsampled and blurred images.
     """
@@ -181,3 +183,13 @@ def to_multiscale(img: torch.Tensor, blur: GaussianBlur) -> List[torch.Tensor]:
         imgs.append(blur(F.interpolate(imgs[-1], scale_factor=0.5, mode='bilinear')))
     imgs = [i[0].permute(1, 2, 0) for i in imgs]
     return imgs
+
+
+@torch.jit.script
+def gumbel_sigmoid(logits: Tensor, temperature: float = 1.0) -> Tensor:
+    """
+    Sample from a Gumbel-Sigmoid distribution.
+    """
+    gumbel_noise = -torch.log(-torch.log(torch.rand_like(logits)))
+    y = logits + gumbel_noise
+    return torch.sigmoid(y / temperature)

@@ -42,7 +42,7 @@ from crystalsizer3d.refiner.denoising import denoise_image
 from crystalsizer3d.scene_components.scene import Scene
 from crystalsizer3d.scene_components.utils import orthographic_scale_factor
 from crystalsizer3d.util.plots import _add_bars, plot_material, plot_transformation
-from crystalsizer3d.util.utils import hash_data, init_tensor, is_bad, set_seed, to_multiscale, to_numpy
+from crystalsizer3d.util.utils import gumbel_sigmoid, hash_data, init_tensor, is_bad, set_seed, to_multiscale, to_numpy
 
 
 # torch.autograd.set_detect_anomaly(True)
@@ -68,6 +68,8 @@ class Refiner:
     scene_params: mi.SceneParameters = None
     crystal: Crystal = None
     symmetry_idx: Tensor = None
+    conj_pairs: List[Tuple[int, int]] = None
+    conj_switch_probs: Tensor = None
 
     rcf_feats_og: Optional[List[Tensor]] = None
     rcf_feats: Optional[List[Tensor]] = None
@@ -401,8 +403,11 @@ class Refiner:
                 {'params': [self.crystal.distances], 'lr': self.args.lr_distances},
                 {'params': [self.crystal.origin], 'lr': self.args.lr_origin},
                 {'params': [self.crystal.rotation], 'lr': self.args.lr_rotation},
-                {'params': [self.crystal.material_roughness, self.crystal.material_ior], 'lr': self.args.lr_material},
+                # {'params': [self.crystal.material_roughness, self.crystal.material_ior], 'lr': self.args.lr_material},
+                {'params': [self.crystal.material_roughness], 'lr': self.args.lr_material / 10},
+                {'params': [self.crystal.material_ior], 'lr': self.args.lr_material},
                 {'params': [self.scene.light_radiance], 'lr': self.args.lr_light},
+                {'params': [self.conj_switch_probs], 'lr': self.args.lr_switches},
             ],
         )
 
@@ -575,6 +580,20 @@ class Refiner:
         )
         self.symmetry_idx = sym_crystal.symmetry_idx
 
+        # Initialise the conjugate switching probabilities
+        miller_idxs = scene.crystal.all_miller_indices
+        pairs = []
+        for i, mi1 in enumerate(miller_idxs):
+            for j, mi2 in enumerate(miller_idxs):
+                if i >= j or mi1[-1] == 0 or mi2[-1] == 0 or torch.any(mi1[:2] != mi2[:2]):
+                    continue
+                pairs.append((i, j))
+        self.conj_pairs = pairs
+        self.conj_switch_probs = nn.Parameter(
+            self.args.conj_switch_prob_init * torch.ones(len(pairs)),
+            requires_grad=True
+        )
+
         # Set variables
         self.X_pred = X_pred
         self.scene = scene
@@ -605,6 +624,12 @@ class Refiner:
             # Log the material parameter values
             self.tb_logger.add_scalar('params/roughness', self.crystal.material_roughness.item(), step)
             self.tb_logger.add_scalar('params/ior', self.crystal.material_ior.item(), step)
+
+            # Log the conjugate switching probabilities
+            if self.args.use_conj_switching:
+                for i, (pair, prob) in enumerate(zip(self.conj_pairs, self.conj_switch_probs)):
+                    ab = ','.join([f'{k}' for k in self.crystal.all_miller_indices[pair[0]][:2].tolist()])
+                    self.tb_logger.add_scalar(f'params/conj_switch_probs/{ab}', prob.item(), step)
 
             # Log learning rates and update them
             for i, param_group in enumerate(['distances', 'origin', 'rotation', 'material', 'light']):
@@ -656,6 +681,11 @@ class Refiner:
             self.optimiser.step()
             self.optimiser.zero_grad()
             self.crystal.clamp_parameters(rescale=False)
+            self.conj_switch_probs.data = torch.clamp(
+                self.conj_switch_probs,
+                min=self.args.conj_switch_prob_min,
+                max=self.args.conj_switch_prob_max
+            )
 
         # Log losses
         for key, val in stats.items():
@@ -668,22 +698,47 @@ class Refiner:
         Process a single step.
         """
         device = self.scene.device
+        rotation = self.crystal.rotation
+        distances = self.crystal.distances
+        roughness = self.crystal.material_roughness
+        ior = self.crystal.material_ior
 
         # Rebuild the mesh, update the scene parameters and move to GPU
         if add_noise:
-            v, f = self.crystal.build_mesh(
-                distances=self.crystal.distances + torch.randn_like(self.crystal.distances) * self.args.distances_noise,
-                rotation=self.crystal.rotation + torch.randn_like(self.crystal.rotation) * self.args.rotation_noise,
-                update_uv_map=False
-            )
-            roughness = self.crystal.material_roughness \
-                        + torch.randn_like(self.crystal.material_roughness) * self.args.material_roughness_noise
-            ior = self.crystal.material_ior \
-                  + torch.randn_like(self.crystal.material_ior) * self.args.material_ior_noise
-        else:
-            v, f = self.crystal.build_mesh(update_uv_map=False)
-            roughness = self.crystal.material_roughness
-            ior = self.crystal.material_ior
+            # Add parameter noise
+            rotation = rotation + torch.randn_like(rotation) * self.args.rotation_noise
+            distances = distances + torch.randn_like(distances) * self.args.distances_noise
+            roughness = roughness + torch.randn_like(roughness) * self.args.material_roughness_noise
+            ior = ior + torch.randn_like(ior) * self.args.material_ior_noise
+
+            # Randomly switch distances with their "conjugates" - the faces flipped in the c-axis
+            if self.args.use_conj_switching:
+                d = distances.clone()
+                for i, p in enumerate(self.conj_pairs):
+                    prob = self.conj_switch_probs[i]
+                    # Use Gumbel-Sigmoid for a smooth, differentiable approximation
+                    switch_prob = gumbel_sigmoid(torch.log(prob / (1 - prob)))
+
+                    # Straight-through estimator
+                    switch_hard = (switch_prob > 0.5).float()
+                    switch = switch_hard.detach() + switch_prob - switch_prob.detach()
+
+                    d[p[0]] = switch * distances[p[1]] + (1 - switch) * distances[p[0]]
+                    d[p[1]] = switch * distances[p[0]] + (1 - switch) * distances[p[1]]
+                distances = d
+
+        # Switch distances according to the probabilities
+        elif self.args.use_conj_switching:
+            d = distances.clone()
+            for i, p in enumerate(self.conj_pairs):
+                switch_prob = self.conj_switch_probs[i]
+                if switch_prob > 0.5:
+                    d[p[0]] = distances[p[1]]
+                    d[p[1]] = distances[p[0]]
+            distances = d
+
+        # Rebuild the mesh
+        v, f = self.crystal.build_mesh(distances=distances, rotation=rotation, update_uv_map=False)
         v, f = v.to(device), f.to(device)
         eta = ior.to(device) / self.scene.crystal_material_bsdf['ext_ior']
         roughness = roughness.to(device).clone()
@@ -738,8 +793,10 @@ class Refiner:
         overshoot_loss, overshoot_stats = self._overshoot_loss()
         symmetry_loss, symmetry_stats = self._symmetry_loss()
         z_pos_loss, z_pos_stats = self._z_pos_loss()
+        rxy_loss, rxy_stats = self._rotation_xy_loss()
         if not is_patch:
             patch_loss, patch_stats = self._patches_loss()
+        switch_loss, switch_stats = self._switch_loss()
 
         # Combine losses
         loss = l1_loss * self.args.w_img_l1 \
@@ -749,7 +806,9 @@ class Refiner:
                + rcf_loss * self.args.w_rcf \
                + overshoot_loss * self.args.w_overshoot \
                + symmetry_loss * self.args.w_symmetry \
-               + z_pos_loss * self.args.w_z_pos
+               + z_pos_loss * self.args.w_z_pos \
+               + rxy_loss * self.args.w_rotation_xy \
+               + switch_loss * self.args.w_switch_probs
 
         if not is_patch:
             loss = loss * self.args.w_fullsize + patch_loss * self.args.w_patches
@@ -758,7 +817,7 @@ class Refiner:
         stats = {
             'losses/total': loss.item(),
             **l1_stats, **l2_stats, **percept_stats, **latent_stats, **rcf_stats, **overshoot_stats, **symmetry_stats,
-            **z_pos_stats
+            **z_pos_stats, **rxy_stats, **switch_stats
         }
         if not is_patch:
             stats.update(patch_stats)
@@ -981,6 +1040,14 @@ class Refiner:
         stats = {'losses/z_pos': loss.item()}
         return loss, stats
 
+    def _rotation_xy_loss(self) -> Tuple[Tensor, Dict[str, float]]:
+        """
+        Calculate the rotation loss - assuming the crystal should by lying flat on the xy plane.
+        """
+        loss = self.crystal.rotation[:2].abs().mean()
+        stats = {'losses/rotation_xy': loss.item()}
+        return loss, stats
+
     def _patches_loss(self) -> Tuple[Tensor, Dict[str, float]]:
         """
         Calculate the super-resolution patches loss.
@@ -1061,6 +1128,25 @@ class Refiner:
         self.patch_centres = patch_centres
         self.X_pred_patches = torch.stack(X_pred_patches)
         self.X_target_patches = torch.stack(X_target_patches)
+
+        return loss, stats
+
+    def _switch_loss(self) -> Tuple[Tensor, Dict[str, float]]:
+        """
+        Calculate the conjugate switching loss.
+        """
+        loss = torch.tensor(0., device=self.device)
+        stats = {}
+        if not self.args.use_conj_switching or self.conj_switch_probs is None:
+            return loss, stats
+
+        # Add a term to encourage selecting 0 or 1
+        loss = torch.where(
+            self.conj_switch_probs < 0.5,
+            self.conj_switch_probs**2,
+            (1 - self.conj_switch_probs)**2
+        ).mean()
+        stats['losses/switch'] = loss.item()
 
         return loss, stats
 
