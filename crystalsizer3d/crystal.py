@@ -207,14 +207,44 @@ class Crystal(nn.Module):
         req_fields = ['lattice_unit_cell', 'lattice_angles', 'miller_indices', 'point_group_symbol', 'distances']
         for req_field in req_fields:
             assert req_field in data, f'{req_field} not found in JSON file'
-        args = {k: data[k] for k in req_fields}
+        optional_fields = ['scale', 'origin', 'rotation', 'rotation_mode', 'material_roughness', 'material_ior', ]
+        args = {k: data[k] for k in req_fields + optional_fields if k in data}
 
-        if 'material_ior' in data:
-            args['material_ior'] = data['material_ior']
-        elif 'refrcIdx' in data:
-            args['material_ior'] = data['refrcIdx']
+        legacy_fields = ['crysRot', 'crysPosX', 'crysPosY', 'refrcIdx']
+        if any(k in data for k in legacy_fields):
+            logger.warning('Legacy JSON file detected, updating fields')
+            if 'crysRot' in data:
+                args['rotation'] = [0, 0, np.deg2rad(data['crysRot'])]
+            if 'crysPosX' in data:
+                args['origin'] = [data['crysPosX'], data['crysPosY'], 0]
+            if 'refrcIdx' in data:
+                args['material_ior'] = data['refrcIdx']
+            with open(path, 'w') as f:
+                json.dump(args, f, indent=4)
 
         return cls(**args)
+
+    def to_json(self, path: Path, overwrite: bool = False):
+        """
+        Save the crystal to a JSON file.
+        """
+        if not overwrite:
+            assert not path.exists(), f'JSON file already exists at {path}'
+        data = {
+            'lattice_unit_cell': self.lattice_unit_cell,
+            'lattice_angles': self.lattice_angles,
+            'miller_indices': self.miller_indices,
+            'point_group_symbol': self.point_group_symbol,
+            'scale': self.scale.item(),
+            'distances': self.distances.tolist(),
+            'origin': self.origin.tolist(),
+            'rotation': self.rotation.tolist(),
+            'rotation_mode': self.rotation_mode,
+            'material_roughness': self.material_roughness.item(),
+            'material_ior': self.material_ior.item(),
+        }
+        with open(path, 'w') as f:
+            json.dump(data, f, indent=4)
 
     def to(self, *args, **kwargs):
         """
