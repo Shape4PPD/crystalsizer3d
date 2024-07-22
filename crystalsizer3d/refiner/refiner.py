@@ -403,9 +403,9 @@ class Refiner:
                 {'params': [self.crystal.distances], 'lr': self.args.lr_distances},
                 {'params': [self.crystal.origin], 'lr': self.args.lr_origin},
                 {'params': [self.crystal.rotation], 'lr': self.args.lr_rotation},
-                # {'params': [self.crystal.material_roughness, self.crystal.material_ior], 'lr': self.args.lr_material},
-                {'params': [self.crystal.material_roughness], 'lr': self.args.lr_material / 10},
-                {'params': [self.crystal.material_ior], 'lr': self.args.lr_material},
+                {'params': [self.crystal.material_roughness, self.crystal.material_ior], 'lr': self.args.lr_material},
+                # {'params': [self.crystal.material_roughness], 'lr': self.args.lr_material / 10},
+                # {'params': [self.crystal.material_ior], 'lr': self.args.lr_material},
                 {'params': [self.scene.light_radiance], 'lr': self.args.lr_light},
                 {'params': [self.conj_switch_probs], 'lr': self.args.lr_switches},
             ],
@@ -634,7 +634,8 @@ class Refiner:
             # Log learning rates and update them
             for i, param_group in enumerate(['distances', 'origin', 'rotation', 'material', 'light']):
                 self.tb_logger.add_scalar(f'lr/{param_group}', self.optimiser.param_groups[i]['lr'], step)
-            self.lr_scheduler.step(step, loss)
+            if self.args.lr_scheduler != 'none':
+                self.lr_scheduler.step(step, loss)
 
             # Track running loss and metrics
             running_loss += loss
@@ -673,8 +674,10 @@ class Refiner:
         """
         loss, stats = self._process_step(add_noise=True)
 
-        # Backpropagate and optimise
+        # Backpropagate errors
         (loss / self.args.acc_grad_steps).backward()
+
+        # Take optimisation step
         if (self.step + 1) % self.args.acc_grad_steps == 0:
             if self.args.clip_grad_norm > 0:
                 nn.utils.clip_grad_norm_([self.crystal.distances], max_norm=self.args.clip_grad_norm)
@@ -686,6 +689,15 @@ class Refiner:
                 min=self.args.conj_switch_prob_min,
                 max=self.args.conj_switch_prob_max
             )
+
+            # Actually switch the distances where the switch prob is high enough
+            if self.args.use_conj_switching:
+                with torch.no_grad():
+                    for i, p in enumerate(self.conj_pairs):
+                        if self.conj_switch_probs[i] > 0.7:
+                            self.crystal.distances.data[p[0]], self.crystal.distances.data[p[1]] = \
+                                self.crystal.distances[p[1]], self.crystal.distances[p[0]]
+                            self.conj_switch_probs.data[i] = 1 - self.conj_switch_probs[i]
 
         # Log losses
         for key, val in stats.items():
@@ -702,18 +714,22 @@ class Refiner:
         distances = self.crystal.distances
         roughness = self.crystal.material_roughness
         ior = self.crystal.material_ior
+        radiance = self.scene.light_radiance
 
-        # Rebuild the mesh, update the scene parameters and move to GPU
+        # Add parameter noise
         if add_noise:
-            # Add parameter noise
             rotation = rotation + torch.randn_like(rotation) * self.args.rotation_noise
             distances = distances + torch.randn_like(distances) * self.args.distances_noise
             roughness = roughness + torch.randn_like(roughness) * self.args.material_roughness_noise
             ior = ior + torch.randn_like(ior) * self.args.material_ior_noise
+            radiance = radiance + torch.randn_like(radiance) * self.args.radiance_noise
 
-            # Randomly switch distances with their "conjugates" - the faces flipped in the c-axis
-            if self.args.use_conj_switching:
-                d = distances.clone()
+        # Randomly switch distances with their "conjugates" - the faces flipped in the c-axis
+        if self.args.use_conj_switching:
+            d = distances.clone()
+
+            # Sample from the Bernoulli distribution
+            if add_noise:
                 for i, p in enumerate(self.conj_pairs):
                     prob = self.conj_switch_probs[i]
                     # Use Gumbel-Sigmoid for a smooth, differentiable approximation
@@ -723,18 +739,23 @@ class Refiner:
                     switch_hard = (switch_prob > 0.5).float()
                     switch = switch_hard.detach() + switch_prob - switch_prob.detach()
 
-                    d[p[0]] = switch * distances[p[1]] + (1 - switch) * distances[p[0]]
-                    d[p[1]] = switch * distances[p[0]] + (1 - switch) * distances[p[1]]
-                distances = d
+                    # If the distances are switched then detach the values
+                    d0 = distances[p[0]]
+                    d1 = distances[p[1]]
+                    if switch_hard == 1:
+                        d0 = d0.detach()
+                        d1 = d1.detach()
+                    d[p[0]] = switch * d1 + (1 - switch) * d0
+                    d[p[1]] = switch * d0 + (1 - switch) * d1
 
-        # Switch distances according to the probabilities
-        elif self.args.use_conj_switching:
-            d = distances.clone()
-            for i, p in enumerate(self.conj_pairs):
-                switch_prob = self.conj_switch_probs[i]
-                if switch_prob > 0.5:
-                    d[p[0]] = distances[p[1]]
-                    d[p[1]] = distances[p[0]]
+            # Switch distances according to the probabilities
+            else:
+                for i, p in enumerate(self.conj_pairs):
+                    switch_prob = self.conj_switch_probs[i]
+                    if switch_prob > 0.5:
+                        d[p[0]] = distances[p[1]]
+                        d[p[1]] = distances[p[0]]
+
             distances = d
 
         # Rebuild the mesh
@@ -742,7 +763,7 @@ class Refiner:
         v, f = v.to(device), f.to(device)
         eta = ior.to(device) / self.scene.crystal_material_bsdf['ext_ior']
         roughness = roughness.to(device).clone()
-        radiance = self.scene.light_radiance.to(device).clone()
+        radiance = radiance.to(device).clone()
 
         # Render new image
         X_pred = self._render_image(v, f, eta, roughness, radiance, seed=self.step)
@@ -754,7 +775,7 @@ class Refiner:
         # Use denoised target if available
         X_target = self.X_target_denoised if self.X_target_denoised is not None else self.X_target
 
-        # Add a bit of noise to the target
+        # Add some noise to the target image
         if isinstance(X_target, list):
             X_target_aug = [X + torch.randn_like(X) * self.args.input_noise_std for X in X_target]
             X_target_aug = [X.clip(0, 1) for X in X_target_aug]
@@ -764,7 +785,7 @@ class Refiner:
         self.X_target_aug = X_target_aug
 
         # Calculate losses
-        loss, stats = self._calculate_losses()
+        loss, stats = self._calculate_losses(distances=distances)
         self.loss = loss.item()
 
         return loss, stats
@@ -779,7 +800,11 @@ class Refiner:
         self.scene_params.update()
         return mi.render(self.scene.mi_scene, self.scene_params, seed=seed)
 
-    def _calculate_losses(self, is_patch: bool = False) -> Tuple[Tensor, Dict[str, float]]:
+    def _calculate_losses(
+            self,
+            is_patch: bool = False,
+            distances: Optional[Tensor] = None
+    ) -> Tuple[Tensor, Dict[str, float]]:
         """
         Calculate losses.
         """
@@ -790,7 +815,7 @@ class Refiner:
         percept_loss, percept_stats = self._perceptual_loss()
         latent_loss, latent_stats = self._latents_loss()
         rcf_loss, rcf_stats = self._rcf_loss(is_patch=is_patch)
-        overshoot_loss, overshoot_stats = self._overshoot_loss()
+        overshoot_loss, overshoot_stats = self._overshoot_loss(distances=distances)
         symmetry_loss, symmetry_stats = self._symmetry_loss()
         z_pos_loss, z_pos_stats = self._z_pos_loss()
         rxy_loss, rxy_stats = self._rotation_xy_loss()
@@ -1001,12 +1026,14 @@ class Refiner:
 
         return loss, stats
 
-    def _overshoot_loss(self) -> Tuple[Tensor, Dict[str, float]]:
+    def _overshoot_loss(self, distances: Optional[Tensor] = None) -> Tuple[Tensor, Dict[str, float]]:
         """
         Calculate the distances overshoot loss - to regularise the distances to touch the polyhedron.
         """
+        if distances is None:
+            distances = self.crystal.distances
         d_min = (self.crystal.N @ self.crystal.vertices_og.T).amax(dim=1)[:len(self.crystal.miller_indices)]
-        overshoot = self.crystal.distances - d_min
+        overshoot = distances - d_min
         loss = torch.where(
             overshoot > 0,
             overshoot**2,
@@ -1017,7 +1044,7 @@ class Refiner:
 
     def _symmetry_loss(self) -> Tuple[Tensor, Dict[str, float]]:
         """
-        Calculate the symmetry loss - how close are the faces within each group.
+        Calculate the symmetry loss - how close are the face distances within each group.
         """
         loss = torch.tensor(0., device=self.device)
         if self.symmetry_idx is None:

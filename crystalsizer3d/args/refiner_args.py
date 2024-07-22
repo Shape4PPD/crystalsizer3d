@@ -51,6 +51,7 @@ class RefinerArgs(BaseArgs):
             rotation_noise: float = 0.02,
             material_roughness_noise: float = 0.01,
             material_ior_noise: float = 0.1,
+            radiance_noise: float = 0.01,
 
             # Conjugate face switching
             use_conj_switching: bool = False,
@@ -183,6 +184,7 @@ class RefinerArgs(BaseArgs):
         self.rotation_noise = rotation_noise
         self.material_roughness_noise = material_roughness_noise
         self.material_ior_noise = material_ior_noise
+        self.radiance_noise = radiance_noise
 
         # Conjugate face switching
         self.use_conj_switching = use_conj_switching
@@ -242,8 +244,8 @@ class RefinerArgs(BaseArgs):
         # Helper models
         self.perceptual_model = perceptual_model
         # self.perceptual_model = None
-        # self.latents_model = latents_model
-        self.latents_model = None
+        self.latents_model = latents_model
+        # self.latents_model = None
         self.mv2_config_path = mv2_config_path
         self.mv2_checkpoint_path = mv2_checkpoint_path
         # self.rcf_model_path = rcf_model_path
@@ -309,13 +311,13 @@ class RefinerArgs(BaseArgs):
                            help='Maximum noise to add to the initial prediction.')
 
         # Rendering settings
-        group.add_argument('--working-image-size', type=int, default=200,
+        group.add_argument('--working-image-size', type=int, default=300,
                            help='Size of the working image.')
-        group.add_argument('--spp', type=int, default=128,
+        group.add_argument('--spp', type=int, default=32,
                            help='Samples per pixel.')
-        group.add_argument('--integrator-max-depth', type=int, default=32,
+        group.add_argument('--integrator-max-depth', type=int, default=16,
                            help='Maximum depth of the integrator.')
-        group.add_argument('--integrator-rr-depth', type=int, default=5,
+        group.add_argument('--integrator-rr-depth', type=int, default=4,
                            help='Russian roulette depth.')
 
         # Superresolution settings
@@ -337,25 +339,27 @@ class RefinerArgs(BaseArgs):
                            help='Number of gradient accumulation steps.')
         group.add_argument('--clip-grad-norm', type=float, default=10,
                            help='Clip the gradient norm of the distances to this value.')
-        group.add_argument('--opt-algorithm', type=str, default='sgd',
+        group.add_argument('--opt-algorithm', type=str, default='adabelief',
                            help='Optimisation algorithm to use.')
 
         # Noise
-        group.add_argument('--image-noise-std', type=float, default=0.02,
+        group.add_argument('--image-noise-std', type=float, default=0.0,
                            help='Standard deviation of the noise to add to the image.')
-        group.add_argument('--distances-noise', type=float, default=0.05,
+        group.add_argument('--distances-noise', type=float, default=0.0,
                            help='Standard deviation of the noise to add to the distances.')
-        group.add_argument('--rotation-noise', type=float, default=0.05,
+        group.add_argument('--rotation-noise', type=float, default=0.0,
                            help='Standard deviation of the noise to add to the rotation.')
-        group.add_argument('--material-roughness-noise', type=float, default=0.01,
+        group.add_argument('--material-roughness-noise', type=float, default=0.0,
                            help='Standard deviation of the noise to add to the material roughness.')
-        group.add_argument('--material-ior-noise', type=float, default=0.05,
+        group.add_argument('--material-ior-noise', type=float, default=0.0,
                            help='Standard deviation of the noise to add to the material IOR.')
+        group.add_argument('--radiance-noise', type=float, default=0.,
+                            help='Standard deviation of the noise to add to the light radiance.')
 
         # Conjugate face switching
         group.add_argument('--use-conj-switching', type=str2bool, default=True,
                             help='Use conjugate face switching.')
-        group.add_argument('--conj-switch-prob-init', type=float, default=0.5,
+        group.add_argument('--conj-switch-prob-init', type=float, default=0.4,
                             help='Initial probability of switching a face.')
         group.add_argument('--conj-switch-prob-min', type=float, default=1e-2,
                             help='Minimum probability of switching a face.')
@@ -365,21 +369,21 @@ class RefinerArgs(BaseArgs):
         # Learning rates
         group.add_argument('--lr-scale', type=float, default=0.,
                            help='Learning rate for the scale parameter.')
-        group.add_argument('--lr-distances', type=float, default=1e-3,
+        group.add_argument('--lr-distances', type=float, default=5e-3,
                            help='Learning rate for the distances.')
-        group.add_argument('--lr-origin', type=float, default=1e-3,
+        group.add_argument('--lr-origin', type=float, default=5e-3,
                            help='Learning rate for the origin.')
-        group.add_argument('--lr-rotation', type=float, default=1e-3,
+        group.add_argument('--lr-rotation', type=float, default=5e-3,
                            help='Learning rate for the rotation.')
-        group.add_argument('--lr-material', type=float, default=1e-2,
+        group.add_argument('--lr-material', type=float, default=1e-3,
                            help='Learning rate for the material.')
-        group.add_argument('--lr-light', type=float, default=1e-4,
+        group.add_argument('--lr-light', type=float, default=5e-3,
                            help='Learning rate for the light.')
         group.add_argument('--lr-switches', type=float, default=1e-1,
                             help='Learning rate for the conjugate switching probabilities.')
 
         # Learning rate scheduler
-        group.add_argument('--lr-scheduler', type=str, default='cosine',
+        group.add_argument('--lr-scheduler', type=str, default='none',
                            help='Learning rate scheduler.')
         group.add_argument('--lr-min', type=float, default=1e-3,
                            help='Minimum learning rate.')
@@ -407,13 +411,13 @@ class RefinerArgs(BaseArgs):
                            help='Learning rate k decay.')
 
         # Loss weightings
-        group.add_argument('--w-img-l1', type=float, default=1.,
+        group.add_argument('--w-img-l1', type=float, default=10.,
                            help='Weight of the L1 image loss.')
         group.add_argument('--w-img-l2', type=float, default=0.,
                            help='Weight of the L2 image loss.')
-        group.add_argument('--w-perceptual', type=float, default=1e-1,
+        group.add_argument('--w-perceptual', type=float, default=1e-2,
                            help='Weight of the perceptual loss.')
-        group.add_argument('--w-latent', type=float, default=0.,
+        group.add_argument('--w-latent', type=float, default=1e-1,
                            help='Weight of the latent encoding loss.')
         group.add_argument('--w-rcf', type=float, default=0.,
                            help='Weight of the RCF loss.')
@@ -423,13 +427,13 @@ class RefinerArgs(BaseArgs):
                            help='Weight of the symmetry loss.')
         group.add_argument('--w-z-pos', type=float, default=10.0,
                            help='Weight of the z position loss.')
-        group.add_argument('--w-rotation-xy', type=float, default=10.0,
+        group.add_argument('--w-rotation-xy', type=float, default=1.0,
                             help='Weight of the rotation xy loss.')
         group.add_argument('--w-patches', type=float, default=0.,
                            help='Weight of the patch loss.')
         group.add_argument('--w-fullsize', type=float, default=1.,
                            help='Weight of the combined losses on the full sized image. Only needed when using patches.')
-        group.add_argument('--w-switch-probs', type=float, default=1e-2,
+        group.add_argument('--w-switch-probs', type=float, default=0.1,
                             help='Weight of the conjugate face switching probabilities loss regulariser term.')
 
         # Loss decay factors
