@@ -1,0 +1,17 @@
+aperture_radius: 0.3
+camera_distance: 32.0
+camera_fov: 10.2
+cell_surface_scale: 3.0
+cell_z_positions:
+- -5.0
+- 0.0
+- 5.0
+- 10.0
+focus_distance: 30.0
+image_size: 300
+integrator_max_depth: 32
+integrator_rr_depth: 5
+light_scale: 8.0
+light_z_position: -5.1
+sampler_type: stratified
+spp: 324

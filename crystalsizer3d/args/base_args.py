@@ -19,10 +19,12 @@ class BaseArgs(ABC):
         """
         Create a BaseArgs instance from command-line arguments.
         """
-        if type(args) == dict:
+        if isinstance(args, dict):
             return cls(**args)
-        elif type(args) == Namespace:
+        elif isinstance(args, Namespace):
             return cls(**vars(args))
+        else:
+            raise ValueError(f'Unrecognised args type: {type(args)}')
 
     def to_dict(self) -> dict:
         """

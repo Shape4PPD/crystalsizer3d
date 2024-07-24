@@ -428,6 +428,17 @@ class Manager:
             predictor = nn.DataParallel(predictor)
         predictor.to(self.device)
 
+        # Load the network parameters - useful when predictor was destroyed to clear memory
+        if hasattr(self, 'checkpoint'):
+            state_path = self.checkpoint.get_state_path()
+            logger.info(f'Loading network parameters from {state_path}.')
+            state = torch.load(state_path, map_location=self.device)
+            if self.net_args.base_net in ['vitnet', 'timm'] and self.optimiser_args.freeze_pretrained:
+                predictor.classifier.load_state_dict(self._fix_state(state['net_p_state_dict']), strict=False)
+            else:
+                predictor.load_state_dict(self._fix_state(state['net_p_state_dict']), strict=False)
+            self.optimiser_p.load_state_dict(state['optimiser_p_state_dict'])
+
         # Instantiate an exponential moving average tracker for the predictor loss
         self.p_loss_ema = EMA()
 

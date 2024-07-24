@@ -134,21 +134,20 @@ class ControlPanel(AppPanel):
         if loadImgDiag.ShowModal() == wx.ID_CANCEL:
             return
         filepath = loadImgDiag.GetPath()
-        self._log(f'Loading image from {filepath}.')
         try:
             image = wx.Image(filepath, wx.BITMAP_TYPE_ANY)
             assert image.IsOk(), 'Invalid image file'
             self.app_frame.image_path = filepath
             self.config.Write('image_path', filepath)
+            self.config.Flush()
             wx.PostEvent(self.app_frame, ImagePathChangedEvent())
-            self._log('Image loaded.')
         except Exception as e:
             self._log('Loading image failed.')
             logger.error(f'Loading image failed: {e}')
             wx.MessageBox(message=str(e), caption='Error', style=wx.OK | wx.ICON_ERROR)
         loadImgDiag.Destroy()
 
-    def on_load_crystal(self, event):
+    def on_load_crystal(self, event: wx.Event):
         """
         Load a crystal from json file.
         """

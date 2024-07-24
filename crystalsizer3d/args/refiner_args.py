@@ -46,7 +46,7 @@ class RefinerArgs(BaseArgs):
             opt_algorithm: str = 'sgd',
 
             # Noise
-            input_noise_std: float = 0.0,
+            image_noise_std: float = 0.0,
             distances_noise: float = 0.01,
             rotation_noise: float = 0.02,
             material_roughness_noise: float = 0.01,
@@ -137,6 +137,21 @@ class RefinerArgs(BaseArgs):
 
             **kwargs
     ):
+        # Ensure all paths are Paths
+        if isinstance(predictor_model_path, str):
+            predictor_model_path = Path(predictor_model_path)
+        if isinstance(image_path, str):
+            image_path = Path(image_path)
+        if isinstance(denoiser_model_path, str):
+            denoiser_model_path = Path(denoiser_model_path)
+        if isinstance(mv2_config_path, str):
+            mv2_config_path = Path(mv2_config_path)
+        if isinstance(mv2_checkpoint_path, str):
+            mv2_checkpoint_path = Path(mv2_checkpoint_path)
+        if isinstance(rcf_model_path, str):
+            rcf_model_path = Path(rcf_model_path)
+
+        # Predictor model and target image
         assert predictor_model_path.exists(), f'Predictor model path does not exist: {predictor_model_path}'
         assert predictor_model_path.suffix == '.json', f'Predictor model path must be a json file: {predictor_model_path}'
         self.predictor_model_path = predictor_model_path
@@ -179,7 +194,7 @@ class RefinerArgs(BaseArgs):
         self.opt_algorithm = opt_algorithm
 
         # Noise
-        self.input_noise_std = input_noise_std
+        self.image_noise_std = image_noise_std
         self.distances_noise = distances_noise
         self.rotation_noise = rotation_noise
         self.material_roughness_noise = material_roughness_noise

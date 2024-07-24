@@ -1,0 +1,110 @@
+# Predictor model and target image
+predictor_model_path: %%DATA_PATH%%/trained_models/7032b75ee391155a7428e49a5ad44ce9_202406201141.json
+image_path: %%ROOT_PATH%%/app/assets/default_crystal_image.jpg
+
+# Denoising settings
+denoiser_model_path: %%DATA_PATH%%/trained_models/f8dcc5adb74d4cd7461ab97b1a814bba_202407011944.json
+denoiser_n_tiles: 9
+denoiser_tile_overlap: 0.05
+denoiser_batch_size: 3
+
+# Initial prediction settings
+initial_pred_from: denoised
+initial_pred_batch_size: 8
+initial_pred_noise_min: 0.0
+initial_pred_noise_max: 0.1
+
+# Rendering settings
+working_image_size: 300
+spp: 32
+integrator_max_depth: 16
+integrator_rr_depth: 4
+
+# Superresolution settings
+superres_n_patches: 0
+superres_patch_size: 40
+
+# Optimisation settings
+seed: null
+max_steps: 5000
+multiscale: false
+acc_grad_steps: 10
+clip_grad_norm: 10.0
+opt_algorithm: adabelief
+
+# Noise
+image_noise_std: 0.0
+distances_noise: 0.0
+rotation_noise: 0.0
+material_ior_noise: 0.0
+material_roughness_noise: 0.0
+radiance_noise: 0.0
+
+# Conjugate face switching
+use_conj_switching: true
+conj_switch_prob_init: 0.4
+conj_switch_prob_min: 0.01
+conj_switch_prob_max: 0.99
+
+# Learning rates
+lr_scale: 0.0
+lr_distances: 5.0e-03
+lr_origin: 5.0e-03
+lr_rotation: 5.0e-03
+lr_material: 1.0e-03
+lr_light: 5.0e-03
+lr_switches: 1.0e-01
+
+# Learning rate scheduler
+lr_scheduler: none
+lr_min: 1.0e-03
+lr_warmup: 1.0e-03
+lr_warmup_steps: 1
+lr_decay_steps: 30
+lr_decay_milestones: []
+lr_cooldown_steps: 0
+lr_patience_steps: 10
+lr_decay_rate: 0.1
+lr_cycle_mul: 2.0
+lr_cycle_decay: 0.9
+lr_cycle_limit: 1
+lr_k_decay: 1.0
+
+# Loss weightings
+w_img_l1: 10.0
+w_img_l2: 0.0
+w_perceptual: 1.0e-02
+w_latent: 1.0e-01
+w_rcf: 0.0
+w_overshoot: 10.0
+w_symmetry: 0.1
+w_z_pos: 10.0
+w_rotation_xy: 1.0
+w_patches: 0.0
+w_fullsize: 1.0
+w_switch_probs: 1.0e-01
+
+# Loss decay factors
+l_decay_l1: 0.5
+l_decay_l2: 1.0
+l_decay_perceptual: 1.0
+l_decay_latent: 1.0
+l_decay_rcf: 0.5
+
+# Helper models
+perceptual_model: timm/regnetz_d8.ra3_in1k
+latents_model: MAGVIT2
+mv2_config_path: %%DATA_PATH%%/MAGVIT2/imagenet_lfqgan_256_B.yaml
+mv2_checkpoint_path: %%DATA_PATH%%/MAGVIT2/imagenet_256_B.ckpt
+rcf_model_path: null
+rcf_loss_type: l2
+
+# Runtime args
+log_every_n_steps: 1
+plot_every_n_steps: 10
+plot_n_samples: 2
+plot_n_patches: -1
+plot_rcf_feats:
+- 0
+- 5
+plot_colour_pred: cornflowerblue

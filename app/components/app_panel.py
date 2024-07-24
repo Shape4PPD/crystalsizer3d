@@ -1,4 +1,5 @@
 from abc import ABCMeta, abstractmethod
+from pathlib import Path
 
 import wx
 
@@ -31,6 +32,10 @@ class AppPanel(wx.Panel, metaclass=AppPanelMeta):
     @property
     def crystal(self) -> Crystal:
         return self.app_frame.crystal
+
+    @property
+    def image_path(self) -> Path:
+        return self.app_frame.image_path
 
     def _log(self, message: str):
         """

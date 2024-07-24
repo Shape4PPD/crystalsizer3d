@@ -4,9 +4,10 @@ import drjit as dr
 import mitsuba as mi
 import torch
 import trimesh.remesh
+from trimesh import Trimesh
+
 from crystalsizer3d.crystal import Crystal
 from crystalsizer3d.util.utils import to_numpy
-from trimesh import Trimesh
 
 if TYPE_CHECKING:
     from crystalsizer3d.scene_components.scene import Scene
@@ -38,8 +39,8 @@ def build_crystal_mesh(
         faces = torch.from_numpy(f2).to(vertices.device)
 
     nv, nf = len(vertices), len(faces)
-    vertices = mi.TensorXf(vertices)
-    faces = mi.TensorXi64(faces)
+    vertices = mi.TensorXf(vertices.cuda())
+    faces = mi.TensorXi64(faces.cuda())
 
     # Set up the material properties
     if crystal.use_bumpmap:

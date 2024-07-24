@@ -4,6 +4,7 @@ import re
 import shutil
 import time
 from datetime import timedelta
+from pathlib import Path
 from typing import Dict, List, Optional, Tuple, Union
 
 import drjit as dr
@@ -77,6 +78,7 @@ class Refiner:
     def __init__(
             self,
             args: RefinerArgs,
+            output_dir: Optional[Path] = None,
     ):
         self.args = args
 
@@ -85,7 +87,7 @@ class Refiner:
             set_seed(self.args.seed)
 
         # Set up the log directory
-        self._init_save_dir()
+        self._init_save_dir(output_dir)
 
         # Load the optimisation target
         self._init_targets()
@@ -126,7 +128,7 @@ class Refiner:
             return self.device
         raise AttributeError(f"'{self.__class__.__name__}' object has no attribute '{name}'")
 
-    def _init_save_dir(self):
+    def _init_save_dir(self, output_dir: Optional[Path] = None):
         """
         Set up the output directory.
         """
@@ -143,7 +145,11 @@ class Refiner:
                            f'_res{self.args.working_image_size}' +
                            (f'_ms' if self.args.multiscale else '') +
                            f'_{self.args.opt_algorithm}')
-        base_dir = LOGS_PATH / model_str / target_str / base_params_str
+        if output_dir is None:
+            base_dir = LOGS_PATH
+        else:
+            base_dir = output_dir
+        base_dir = base_dir / model_str / target_str / base_params_str
         dir_name = hash_data(self.args.to_dict())
 
         # Check for existing directory
@@ -361,6 +367,7 @@ class Refiner:
             torch.cuda.empty_cache()
             gc.collect()
         else:
+            assert self.args.initial_pred_from != 'denoised', 'No denoiser set, so can\'t predict using a denoised image'
             X_denoised = None
 
         # Resize target image to the working image size for inverse rendering
@@ -600,7 +607,7 @@ class Refiner:
         self.scene_params = scene_params
         self.crystal = scene.crystal
 
-    def train(self):
+    def train(self, callback: Optional[callable] = None):
         """
         Train the parameters for a number of steps.
         """
@@ -662,6 +669,10 @@ class Refiner:
 
             # Plots
             self._make_plots(force=step == 0)
+
+            # Callback
+            if callback is not None:
+                callback()
 
         # Final plots
         self._make_plots(force=True)
@@ -777,10 +788,10 @@ class Refiner:
 
         # Add some noise to the target image
         if isinstance(X_target, list):
-            X_target_aug = [X + torch.randn_like(X) * self.args.input_noise_std for X in X_target]
+            X_target_aug = [X + torch.randn_like(X) * self.args.image_noise_std for X in X_target]
             X_target_aug = [X.clip(0, 1) for X in X_target_aug]
         else:
-            X_target_aug = X_target + torch.randn_like(X_target) * self.args.input_noise_std
+            X_target_aug = X_target + torch.randn_like(X_target) * self.args.image_noise_std
             X_target_aug.clip_(0, 1)
         self.X_target_aug = X_target_aug
 
