@@ -212,11 +212,14 @@ class Projector:
         n_norm = normal.norm()
         cos_theta_inc = torch.cos(-normal @ incident / n_norm)
         cos_theta_t = torch.sqrt(1 - (eta**2) * (1 - cos_theta_inc**2))
+        # need to calculate new distance value, relative to the shifted origin
+        origin = self.crystal.origin
+        offset_distance = (origin @ normal)/ n_norm
         T = eta * incident + (eta * cos_theta_inc - cos_theta_t) * normal / n_norm
         dot_product = points @ normal
 
         # Calculate the distance from each point to the plane
-        d = torch.abs(dot_product - distance * self.crystal.scale) / n_norm
+        d = torch.abs(dot_product - distance * self.crystal.scale - offset_distance) / n_norm
 
         # Add distance to plane
         points = points + (d[:, None] / cos_theta_t) * T / T.norm()

@@ -16,6 +16,9 @@ from crystalsizer3d.util.utils import init_tensor, to_numpy
 # device = torch.device('cpu')
 device = torch.device('cuda')
 
+import os
+os.environ["KMP_DUPLICATE_LIB_OK"]="TRUE"
+
 TEST_CRYSTALS = {
     'cube': {
         'lattice_unit_cell': [1, 1, 1],
@@ -79,7 +82,7 @@ TEST_CRYSTALS = {
                       0.9178063273429871, 0.8962163925170898, 0.9747581481933594],
         'point_group_symbol': '1',
         'scale': 1,
-        # 'origin': [-2.8313868045806885, -0.6120783090591431, 18.232881367206573],
+        'origin': [-2.8313868045806885, -0.6120783090591431, 18.232881367206573],
         # 'origin': [0, 0, 18.232881367206573],
         # 'rotation': [1.2772717475891113, 0.77781081199646, 1.0901552438735962],
         'rotation': [0, 0.1, 0.2],
@@ -94,6 +97,23 @@ TEST_CRYSTALS = {
         'point_group_symbol': '222',
         'scale': 25.0,
     },
+    'alpha5': {
+        'lattice_unit_cell': [7.068, 10.277, 8.755],
+        'lattice_angles': [np.pi / 2, np.pi / 2, np.pi / 2],
+        'miller_indices': [(0, 0, 1), (0, 1, 1), (1, 1, 1), (-1, -1, -1), (1, 0, 0), (1, 1, 0), (0, 0, -1), (0, -1, -1),
+                           (0, 1, -1), (0, -1, 1), (1, -1, -1), (-1, 1, -1), (-1, -1, 1), (-1, 1, 1), (1, -1, 1),
+                           (1, 1, -1), (-1, 0, 0), (1, -1, 0), (-1, 1, 0), (-1, -1, 0)],
+        'distances': [0.2410222887992859, 0.8811460137367249, 0.6749506592750549, 0.7014448046684265,
+                      0.9037846326828003, 0.7973584532737732, 0.27292102575302124, 0.8122904300689697,
+                      0.9151954650878906, 0.9412405490875244, 0.6824771761894226, 0.7488821744918823,
+                      0.653540313243866, 0.7903946042060852, 0.6622034907341003, 0.6827501654624939,
+                      1.0, 0.8102344870567322, 0.8926759362220764, 0.8574218153953552],
+        'origin': [-0.3571832776069641, -0.19568444788455963, 0.6160652711987495],
+        'scale': 1.1607864066598905,
+        'rotation': [-0.0032918453216552734, -0.12640732526779175, -1.6554943323135376],
+        'material_ior': 1.7000342640124446,
+        'material_roughness': 0.13993626928782799
+    }
 }
 
 
@@ -125,10 +145,11 @@ def show_projected_image(which='alpha'):
     else:
         zoom = 0.1
     crystal.to(device)
+    zoom = 0.356
     # v, f = crystal.build_mesh()
     # m = Trimesh(vertices=to_numpy(v), faces=to_numpy(f))
     # m.show()
-    projector = Projector(crystal, external_ior=1., image_size=image_size, zoom=zoom, camera_axis=[0, 0, 1])
+    projector = Projector(crystal, external_ior=1., image_size=image_size, zoom=zoom, camera_axis=[0, 0, -1])
     projector.image[:, projector.image.sum(dim=0) == 0] = 1
     plt.imshow(tensor_to_image(projector.image))
     plt.show()
@@ -359,7 +380,7 @@ if __name__ == '__main__':
     # show_projected_image('beta')
     # show_projected_image('alpha2')
     # show_projected_image('alpha3')
-    # show_projected_image('alpha4')
-    match_to_scene()
+    show_projected_image('alpha5')
+    # match_to_scene()
     # make_rotation_video()
     # make_ior_video()
