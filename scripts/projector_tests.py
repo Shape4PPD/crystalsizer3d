@@ -16,8 +16,6 @@ from crystalsizer3d.util.utils import init_tensor, to_numpy
 # device = torch.device('cpu')
 device = torch.device('cuda')
 
-import os
-os.environ["KMP_DUPLICATE_LIB_OK"]="TRUE"
 
 TEST_CRYSTALS = {
     'cube': {
@@ -89,14 +87,6 @@ TEST_CRYSTALS = {
         'material_ior': 1.8,
         'material_roughness': 0.01
     },
-    'beta': {
-        'lattice_unit_cell': [7.068, 10.277, 8.755],
-        'lattice_angles': [np.pi / 2, np.pi / 2, np.pi / 2],
-        'miller_indices': [(1, 1, 1), (0, 2, 1), (1, 0, -1), (0, 2, -1), (0, 1, 0)],
-        'distances': [16.0, 5.0, 16.0, 5.0, 2.39],
-        'point_group_symbol': '222',
-        'scale': 25.0,
-    },
     'alpha5': {
         'lattice_unit_cell': [7.068, 10.277, 8.755],
         'lattice_angles': [np.pi / 2, np.pi / 2, np.pi / 2],
@@ -109,11 +99,19 @@ TEST_CRYSTALS = {
                       0.653540313243866, 0.7903946042060852, 0.6622034907341003, 0.6827501654624939,
                       1.0, 0.8102344870567322, 0.8926759362220764, 0.8574218153953552],
         'origin': [-0.3571832776069641, -0.19568444788455963, 0.6160652711987495],
-        'scale': 1.1607864066598905,
+        'scale': 5.1607864066598905,
         'rotation': [-0.0032918453216552734, -0.12640732526779175, -1.6554943323135376],
         'material_ior': 1.7000342640124446,
         'material_roughness': 0.13993626928782799
-    }
+    },
+    'beta': {
+        'lattice_unit_cell': [7.068, 10.277, 8.755],
+        'lattice_angles': [np.pi / 2, np.pi / 2, np.pi / 2],
+        'miller_indices': [(1, 1, 1), (0, 2, 1), (1, 0, -1), (0, 2, -1), (0, 1, 0)],
+        'distances': [16.0, 5.0, 16.0, 5.0, 2.39],
+        'point_group_symbol': '222',
+        'scale': 25.0,
+    },
 }
 
 
@@ -137,7 +135,8 @@ def show_projected_image(which='alpha'):
     Show the projected crystal wireframe.
     """
     # image_size = (256, 256)
-    image_size = (1000, 1000)
+    # image_size = (1000, 1000)
+    image_size = (300, 300)
     assert which in TEST_CRYSTALS
     crystal = Crystal(**TEST_CRYSTALS[which])
     if which == 'beta':
@@ -145,7 +144,6 @@ def show_projected_image(which='alpha'):
     else:
         zoom = 0.1
     crystal.to(device)
-    zoom = 0.356
     # v, f = crystal.build_mesh()
     # m = Trimesh(vertices=to_numpy(v), faces=to_numpy(f))
     # m.show()
@@ -380,6 +378,7 @@ if __name__ == '__main__':
     # show_projected_image('beta')
     # show_projected_image('alpha2')
     # show_projected_image('alpha3')
+    # show_projected_image('alpha4')
     show_projected_image('alpha5')
     # match_to_scene()
     # make_rotation_video()
