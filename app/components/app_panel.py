@@ -3,7 +3,10 @@ from pathlib import Path
 
 import wx
 
+from app.components.refiner_proxy import RefinerProxy
 from crystalsizer3d.crystal import Crystal
+from crystalsizer3d.projector import Projector
+from crystalsizer3d.scene_components.scene import Scene
 
 
 class AppPanelMeta(ABCMeta, type(wx.Panel)):
@@ -32,6 +35,24 @@ class AppPanel(wx.Panel, metaclass=AppPanelMeta):
     @property
     def crystal(self) -> Crystal:
         return self.app_frame.crystal
+
+    @property
+    def refiner(self) -> RefinerProxy:
+        if self.app_frame.refiner is None:
+            self.app_frame.init_refiner()
+        return self.app_frame.refiner
+
+    @property
+    def scene(self) -> Scene:
+        if self.app_frame.scene is None:
+            self.app_frame.init_scene()
+        return self.app_frame.scene
+
+    @property
+    def projector(self) -> Projector:
+        if self.app_frame.projector is None:
+            self.app_frame.init_projector()
+        return self.app_frame.projector
 
     @property
     def image_path(self) -> Path:

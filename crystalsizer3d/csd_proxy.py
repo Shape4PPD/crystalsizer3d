@@ -2,9 +2,12 @@ import json
 from typing import List, Optional
 
 from crystalsizer3d import CSD_PROXY_PATH, logger
+from crystalsizer3d.util.utils import is_main_thread
 
 
-def _check_for_csd():
+def _check_for_csd() -> bool:
+    if not is_main_thread():
+        return False
     try:
         import ccdc
         return True

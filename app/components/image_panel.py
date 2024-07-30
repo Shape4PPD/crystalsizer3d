@@ -1,21 +1,15 @@
 import math
-import shutil
 from pathlib import Path
 from typing import Optional
 
 import cv2
 import numpy as np
-import torch
 import wx
-from ruamel.yaml import YAML
 
-from app import APP_ASSETS_PATH, DENOISED_IMAGE_PATH, SCENE_ARGS_PATH, SCENE_IMAGE_PATH
+from app import DENOISED_IMAGE_PATH, SCENE_IMAGE_PATH
 from app.components.app_panel import AppPanel
-from app.components.utils import EVT_CRYSTAL_CHANGED, EVT_DENOISED_IMAGE_CHANGED, EVT_IMAGE_PATH_CHANGED, \
-    EVT_SCENE_IMAGE_CHANGED, numpy_to_wx_image
-from crystalsizer3d.projector import Projector
-from crystalsizer3d.scene_components.scene import Scene
-from crystalsizer3d.scene_components.utils import orthographic_scale_factor
+from app.components.utils import EVT_CRYSTAL_MESH_CHANGED, EVT_DENOISED_IMAGE_CHANGED, EVT_IMAGE_PATH_CHANGED, \
+    EVT_SCENE_IMAGE_CHANGED, ImagePathChangedEvent, numpy_to_wx_image
 from crystalsizer3d.util.utils import to_numpy
 
 
@@ -24,8 +18,6 @@ class ImagePanel(AppPanel):
     image_denoised: Optional[wx.Image] = None
     image_scene: Optional[wx.Image] = None
     wireframe: Optional[wx.Image] = None
-    scene: Optional[Scene] = None
-    projector: Optional[Projector] = None
     STEP_ZOOM = 0.1
 
     def __init__(self, app_frame: 'AppFrame'):
@@ -42,35 +34,6 @@ class ImagePanel(AppPanel):
     @property
     def image_path(self) -> Path:
         return self.app_frame.image_path
-
-    def _init_scene(self):
-        """
-        Initialise the scene for rendering.
-        """
-        self._log('Initialising scene...')
-        yaml = YAML()
-        yaml.preserve_quotes = True
-
-        # Copy over default scene args if they don't exist
-        if not SCENE_ARGS_PATH.exists():
-            shutil.copy(APP_ASSETS_PATH / 'default_scene_args.yml', SCENE_ARGS_PATH)
-
-        # Load the scene args from file
-        with open(SCENE_ARGS_PATH, 'r') as f:
-            args = yaml.load(f)
-
-        # Instantiate the scene
-        try:
-            self.scene = Scene(
-                crystal=self.crystal,
-                res=min(self.image.GetHeight(), self.image.GetWidth()),
-                **args
-            )
-        except Exception as e:
-            wx.MessageBox(message=str(e), caption='Error initialising scene',
-                          style=wx.OK | wx.ICON_ERROR)
-            self._log(f'Error initialising scene.')
-            return
 
     def _init_components(self):
         """
@@ -175,9 +138,9 @@ class ImagePanel(AppPanel):
         self.app_frame.Bind(EVT_IMAGE_PATH_CHANGED, self.load_image)
         self.app_frame.Bind(EVT_DENOISED_IMAGE_CHANGED, self.load_denoised_image)
         self.app_frame.Bind(EVT_SCENE_IMAGE_CHANGED, self.load_scene_image)
-        self.app_frame.Bind(EVT_CRYSTAL_CHANGED, self.update_wireframe)
+        self.app_frame.Bind(EVT_CRYSTAL_MESH_CHANGED, self.update_wireframe)
 
-    def load_image(self, event: wx.Event):
+    def load_image(self, event: ImagePathChangedEvent):
         """
         Load an image from disk.
         """
@@ -188,17 +151,15 @@ class ImagePanel(AppPanel):
             self._log('Failed to load image: Invalid image file.')
             return
         self.image = image
-        self.image_denoised = None
-        self.image_scene = None
-        if DENOISED_IMAGE_PATH.exists():
-            DENOISED_IMAGE_PATH.unlink()
-        if SCENE_IMAGE_PATH.exists():
-            SCENE_IMAGE_PATH.unlink()
-        if self.scene is not None:
-            self.scene.res = min(image.GetHeight(), image.GetWidth())
-        if self.projector is not None:
-            self.projector.background_image = None
-            self.update_wireframe(update_images=False)
+        initial_load = event.initial_load if hasattr(event, 'initial_load') else False
+        if not initial_load:
+            self.image_denoised = None
+            self.image_scene = None
+            if DENOISED_IMAGE_PATH.exists():
+                DENOISED_IMAGE_PATH.unlink()
+            if SCENE_IMAGE_PATH.exists():
+                SCENE_IMAGE_PATH.unlink()
+        self.update_wireframe(update_images=False)
 
         # Find the best zoom level for the image that fits it all in the frame
         def find_best_zoom():
@@ -243,15 +204,20 @@ class ImagePanel(AppPanel):
 
             if self.wireframe is not None:
                 sf = self.image.GetHeight() / self.wireframe.GetHeight()
+                scaled_wireframe_width = round(self.wireframe.GetWidth() * sf * self.zoom)
+                scaled_wireframe_height = round(self.wireframe.GetHeight() * sf * self.zoom)
                 scaled_wireframe = self.wireframe.Scale(
-                    round(self.wireframe.GetWidth() * sf * self.zoom),
-                    round(self.wireframe.GetHeight() * sf * self.zoom),
+                    scaled_wireframe_width,
+                    scaled_wireframe_height,
                     wx.IMAGE_QUALITY_HIGH
                 )
+                image_width, image_height = bitmap_img.GetSize()
+                wireframe_x = (image_width - scaled_wireframe_width) // 2
+                wireframe_y = (image_height - scaled_wireframe_height) // 2
                 wireframe_bitmap = wx.Bitmap(scaled_wireframe)
                 mem_dc = wx.MemoryDC()
                 mem_dc.SelectObject(bitmap_img)
-                mem_dc.DrawBitmap(wireframe_bitmap, 0, 0, True)
+                mem_dc.DrawBitmap(wireframe_bitmap, wireframe_x, wireframe_y, True)
                 mem_dc.SelectObject(wx.NullBitmap)
 
             bitmap.SetBitmap(bitmap_img)
@@ -265,26 +231,8 @@ class ImagePanel(AppPanel):
         """
         if self.crystal is None:
             return
+        assert id(self.crystal) == id(self.projector.crystal)
         self._log('Updating wireframe...')
-
-        # Rebuild the crystal mesh
-        with torch.no_grad():
-            self.crystal.build_mesh()
-
-        # Initialise the projector
-        w, h = self.image.GetSize()
-        if self.projector is None or self.projector.image_size != (h, w):
-            self._init_scene()
-            self._log('Initialising projector...')
-            self.projector = Projector(
-                crystal=self.crystal,
-                image_size=(h, w),
-                zoom=orthographic_scale_factor(self.scene)
-            )
-
-        # Check that the crystal is the same
-        if id(self.crystal) != id(self.projector.crystal):
-            self.projector.crystal = self.crystal
 
         # Convert the overlay to a wx.Image
         self._log('Projecting crystal wireframe...')
@@ -316,11 +264,11 @@ class ImagePanel(AppPanel):
                 image = wx.Image()
         else:
             image = numpy_to_wx_image(to_numpy(self.app_frame.refiner.X_target_denoised * 255).astype(np.uint8))
-        self._log('Loading denoised image...')
-        if not image.IsOk():
+        if not image.IsSameAs(wx.Image()) and not image.IsOk():
             wx.MessageBox(message='Invalid image file', caption='Error', style=wx.OK | wx.ICON_ERROR),
             self._log('Failed to load denoised image: Invalid image file.')
             return
+        self._log('Loading denoised image...')
         self.image_denoised = image
         self.update_images()
         image.SaveFile(str(DENOISED_IMAGE_PATH), wx.BITMAP_TYPE_PNG)
@@ -338,12 +286,16 @@ class ImagePanel(AppPanel):
             else:
                 image = wx.Image()
         else:
-            image = numpy_to_wx_image(to_numpy(self.app_frame.refiner.X_pred * 255).astype(np.uint8))
-        self._log('Loading scene image...')
-        if not image.IsOk():
+            X_pred = self.app_frame.refiner.X_pred
+            if X_pred is not None:
+                image = numpy_to_wx_image(to_numpy(X_pred * 255).astype(np.uint8))
+            else:
+                image = wx.Image()
+        if not image.IsSameAs(wx.Image()) and not image.IsOk():
             wx.MessageBox(message='Invalid image file', caption='Error', style=wx.OK | wx.ICON_ERROR),
             self._log('Failed to load scene image: Invalid image file.')
             return
+        self._log('Loading scene image...')
         self.image_scene = image
         self.update_images()
         image.SaveFile(str(SCENE_IMAGE_PATH), wx.BITMAP_TYPE_PNG)

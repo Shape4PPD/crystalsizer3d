@@ -31,7 +31,7 @@ from torch.optim import Optimizer
 from torch.utils.data import default_collate
 from torch.utils.tensorboard import SummaryWriter
 from torchvision.transforms import Compose, GaussianBlur
-from torchvision.transforms.functional import crop, to_tensor
+from torchvision.transforms.functional import center_crop, crop, to_tensor
 
 from crystalsizer3d import DATA_PATH, LOGS_PATH, START_TIMESTAMP, USE_CUDA, logger
 from crystalsizer3d.args.refiner_args import RefinerArgs
@@ -336,9 +336,9 @@ class Refiner:
             r_params_target = None
 
             # Crop and resize the image to the working image size
-            # X_target = center_crop(X_target, min(X_target.shape[-2:]))
-            d = min(X_target.shape[-2:])
-            X_target = crop(X_target, top=0, left=X_target.shape[-1] - d, height=d, width=d)
+            X_target = center_crop(X_target, min(X_target.shape[-2:]))
+            # d = min(X_target.shape[-2:])
+            # X_target = crop(X_target, top=0, left=X_target.shape[-1] - d, height=d, width=d)
             X_target = F.interpolate(
                 X_target[None, ...],
                 size=self.manager.image_shape[-1],
@@ -672,7 +672,10 @@ class Refiner:
 
             # Callback
             if callback is not None:
-                callback()
+                continue_signal = callback(step)
+                if continue_signal is False:
+                    logger.info('Received stop signal. Stopping training.')
+                    break
 
         # Final plots
         self._make_plots(force=True)
@@ -1196,7 +1199,7 @@ class Refiner:
         """
         Generate some example plots.
         """
-        if force or (self.args.plot_every_n_steps > -1 and (self.step + 1) % self.args.plot_every_n_steps == 0):
+        if self.args.plot_every_n_steps > -1 and (force or (self.step + 1) % self.args.plot_every_n_steps == 0):
             logger.info('Plotting.')
             # Re-process the step with no noise for plotting
             self._process_step(add_noise=False)

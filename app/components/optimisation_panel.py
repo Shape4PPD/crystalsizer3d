@@ -1,20 +1,16 @@
-import wx
-from ruamel.yaml import YAML
+import threading
+import time
 
-from app import APP_ASSETS_PATH, APP_DATA_PATH, REFINER_ARGS_PATH
+import wx
+
 from app.components.app_panel import AppPanel
-from app.components.utils import CrystalChangedEvent, DenoisedImageChangedEvent, EVT_CRYSTAL_CHANGED, \
-    EVT_IMAGE_PATH_CHANGED, ImagePathChangedEvent, RefinerChangedEvent, SceneImageChangedEvent
-from crystalsizer3d import DATA_PATH, ROOT_PATH, logger
-from crystalsizer3d.args.refiner_args import RefinerArgs
-from crystalsizer3d.refiner.refiner import Refiner
+from app.components.parallelism import start_thread, stop_event
+from app.components.utils import CrystalChangedEvent, DenoisedImageChangedEvent, EVT_IMAGE_PATH_CHANGED, \
+    ImagePathChangedEvent, RefinerChangedEvent, SceneChangedEvent, SceneImageChangedEvent
+from crystalsizer3d import logger
 
 
 class OptimisationPanel(AppPanel):
-    @property
-    def refiner(self):
-        return self.app_frame.refiner
-
     def _init_components(self):
         """
         Initialise the optimisation panel components.
@@ -59,49 +55,6 @@ class OptimisationPanel(AppPanel):
         wx.PostEvent(self.app_frame, RefinerChangedEvent())
         event.Skip()
 
-    def _init_refiner(self):
-        """
-        Initialise the refiner.
-        """
-        assert self.image_path is not None
-        self._log('Initialising refiner...')
-        yaml = YAML()
-        yaml.preserve_quotes = True
-
-        # Copy over default refiner args if they don't exist
-        if not REFINER_ARGS_PATH.exists():
-            with open(APP_ASSETS_PATH / 'default_refiner_args.yml') as f:
-                default_args = f.read()
-            default_args = default_args.replace('%%ROOT_PATH%%', str(ROOT_PATH))
-            default_args = default_args.replace('%%DATA_PATH%%', str(DATA_PATH))
-            with open(REFINER_ARGS_PATH, 'w') as f:
-                f.write(default_args)
-
-        # Load the refiner args from file
-        with open(REFINER_ARGS_PATH, 'r') as f:
-            args_yml = yaml.load(f)
-            args = RefinerArgs.from_args(args_yml)
-
-        # Check that the image path is correct
-        if self.image_path != args.image_path:
-            args.image_path = self.image_path
-            for k, v in args.to_dict().items():
-                if k in args_yml:
-                    args_yml[k] = v
-            with open(REFINER_ARGS_PATH, 'w') as f:
-                yaml.dump(args_yml, f)
-
-        # Instantiate the refiner
-        try:
-            self.app_frame.refiner = Refiner(args=args, output_dir=APP_DATA_PATH / 'refiner')
-        except Exception as e:
-            wx.MessageBox(message=str(e), caption='Error initialising refiner',
-                          style=wx.OK | wx.ICON_ERROR)
-            self._log(f'Error initialising refiner.')
-            return
-
-        wx.PostEvent(self.app_frame, RefinerChangedEvent())
-
     def make_initial_prediction(self, event: wx.Event):
         """
         Get the initial crystal prediction using a trained neural network predictor model.
@@ -111,10 +64,6 @@ class OptimisationPanel(AppPanel):
                           style=wx.OK | wx.ICON_ERROR)
             return
         self._log('Getting initial prediction...')
-        if self.refiner is None:
-            self._init_refiner()
-            if self.refiner is None:
-                return
         try:
             self.refiner.make_initial_prediction()
         except Exception as e:
@@ -124,9 +73,11 @@ class OptimisationPanel(AppPanel):
             logger.error(str(e))
             return
         self.app_frame.crystal = self.refiner.crystal
-        wx.PostEvent(self.app_frame, CrystalChangedEvent())
+        wx.PostEvent(self.app_frame, SceneChangedEvent())
         wx.PostEvent(self.app_frame, DenoisedImageChangedEvent())
         wx.PostEvent(self.app_frame, SceneImageChangedEvent())
+        self._log('Sending crystal changed event.')
+        wx.CallAfter(wx.PostEvent, self.app_frame, CrystalChangedEvent(build_mesh=False))
         self._log('Initial prediction complete.')
 
     def refine_prediction(self, event: wx.Event):
@@ -134,23 +85,43 @@ class OptimisationPanel(AppPanel):
         Refine the prediction.
         """
         event.Skip()
-        if self.refiner is None:
-            self._init_refiner()
+        if self.refiner.is_training():
+            self.refiner.stop_training()
+            event.EventObject.SetLabel('Refine')
+            self.Refresh()
+            wx.Yield()
+            return
+        event.EventObject.SetLabel('Stop refining')
+        self.Refresh()
+        wx.Yield()
 
         # If the refiner has no crystal, use the current crystal or make an initial prediction
         if self.refiner.crystal is None:
             if self.crystal is None:
                 self.make_initial_prediction(event)
             else:
-                self.refiner.crystal = self.crystal
+                # self.refiner.set_initial_data(
+                #     crystal=self.crystal,
+                # )
+                # self.refiner.crystal = self.crystal
+                pass
 
         # Callback
-        def after_refine_step():
-            wx.PostEvent(self.app_frame, CrystalChangedEvent())
-            wx.PostEvent(self.app_frame, SceneImageChangedEvent())
+        def after_refine_step(step: int):
+            if step % 5 != 0:
+                return
+            wx.CallAfter(wx.PostEvent, self.app_frame, CrystalChangedEvent(build_mesh=False))
+            wx.CallAfter(wx.PostEvent, self.app_frame, SceneImageChangedEvent())
 
         # Refine the prediction
-        self._log('Refining prediction...')
-        self.refiner.train(after_refine_step)
-        after_refine_step()
-        self._log('Prediction refined.')
+        def training_thread(stop_event: threading.Event):
+            self._log('Refining prediction...')
+            self.refiner.train(after_refine_step)
+            while self.refiner.is_training() and not stop_event.is_set():
+                time.sleep(1)
+            after_refine_step(self.refiner.step)
+            event.EventObject.SetLabel('Refine')
+            self._log('Prediction refined.')
+
+        thread = threading.Thread(target=training_thread, args=(stop_event,))
+        start_thread(thread)

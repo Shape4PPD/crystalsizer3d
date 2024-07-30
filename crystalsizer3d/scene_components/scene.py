@@ -1,9 +1,15 @@
 import math
+from pathlib import Path
 from typing import List, Optional, Tuple, Union
 
 import mitsuba as mi
 import numpy as np
 import torch
+import yaml
+from scipy.optimize import minimize
+from scipy.spatial import ConvexHull
+from torch import Tensor
+
 from crystalsizer3d import MI_CPU_VARIANT, USE_CUDA
 from crystalsizer3d.args.dataset_synthetic_args import ROTATION_MODE_AXISANGLE
 from crystalsizer3d.crystal import Crystal
@@ -12,9 +18,6 @@ from crystalsizer3d.scene_components.textures import NoiseTexture, NormalMapNois
 from crystalsizer3d.scene_components.utils import RenderError, build_crystal_mesh, project_to_image
 from crystalsizer3d.util.geometry import normalise
 from crystalsizer3d.util.utils import hash_data, init_tensor, to_numpy
-from scipy.optimize import minimize
-from scipy.spatial import ConvexHull
-from torch import Tensor
 
 if USE_CUDA:
     if 'cuda_ad_rgb' not in mi.variants():
@@ -189,6 +192,51 @@ class Scene:
                 })
 
         return spec
+
+    @classmethod
+    def from_dict(cls, spec: dict) -> 'Scene':
+        """
+        Create a scene from a dictionary.
+        """
+        args = {k: v for k, v in spec.items() if k not in ['crystal', 'crystal_seed', 'bubbles']}
+
+        if 'crystal' in spec:
+            if isinstance(spec['crystal'], Crystal):
+                args['crystal'] = spec['crystal']
+            else:
+                args['crystal'] = Crystal(**spec['crystal'])
+
+        if 'crystal_seed' in spec:
+            args['crystal_seed'] = Crystal(**spec['crystal_seed'])
+
+        if 'bubbles' in spec:
+            bubbles = []
+            for bubble_spec in spec['bubbles']:
+                bubble = Bubble(**bubble_spec)
+                bubbles.append(bubble)
+            args['bubbles'] = bubbles
+
+        return cls(**args)
+
+    def to_yml(self, path: Path, overwrite: bool = False):
+        """
+        Save the scene to a yaml file.
+        """
+        if not overwrite:
+            assert not path.exists(), f'YAML file already exists at {path}'
+        data = self.to_dict()
+        with open(path, 'w') as f:
+            yaml.dump(data, f)
+
+    @classmethod
+    def from_yml(cls, path: Path) -> 'Scene':
+        """
+        Instantiate a scene from a YAML file.
+        """
+        assert path.exists(), f'YAML file not found at {path}'
+        with open(path, 'r') as f:
+            scene_args = yaml.load(f)
+        return cls.from_dict(scene_args)
 
     @property
     def integrator_params(self) -> dict:
