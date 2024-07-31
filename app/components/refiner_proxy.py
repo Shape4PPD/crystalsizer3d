@@ -95,7 +95,10 @@ def refiner_worker(
                 'check_type': 'method' if callable(getattr(refiner, check_key)) else 'attribute'
             })
         else:
-            response_queue.put({'type': 'error', 'message': f'Invalid attribute/method: {check_key}'})
+            response_queue.put({
+                'type': 'error',
+                'message': f'Invalid attribute/method: {check_key}'
+            })
 
     def monitor_queue(channel: str, stop_event: threading.Event):
         nonlocal callback_signals, requests
@@ -145,11 +148,9 @@ def refiner_worker(
         channel, req = req['queue'], req['request']
         key, args = req
 
-        # Property and method requests
+        # Method requests
         wrapped_args = wrap_callables(channel, args)
         handle_attribute_request(channel, key, wrapped_args)
-
-        time.sleep(1)
 
 
 class RefinerProxy:

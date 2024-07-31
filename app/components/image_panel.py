@@ -18,6 +18,7 @@ class ImagePanel(AppPanel):
     image_denoised: Optional[wx.Image] = None
     image_scene: Optional[wx.Image] = None
     wireframe: Optional[wx.Image] = None
+    is_zooming: bool = False
     STEP_ZOOM = 0.1
 
     def __init__(self, app_frame: 'AppFrame'):
@@ -48,6 +49,7 @@ class ImagePanel(AppPanel):
         self.image_window.SetScrollRate(20, 20)
         self.image_window.AlwaysShowScrollbars(True, True)
         self.img_bitmap = wx.StaticBitmap(self.image_window)
+        self.img_bitmap.Bind(wx.EVT_MOTION, self.on_mouse_hover)
         self.img_bitmap.Bind(wx.EVT_LEFT_DOWN, self.on_click_image_L)
         self.img_bitmap.Bind(wx.EVT_RIGHT_DOWN, self.on_click_image_R)
         img_frame = wx.StaticBox(self, label='Image')
@@ -184,6 +186,19 @@ class ImagePanel(AppPanel):
         """
         if self.image is None:
             return
+        self._log('Updating images...')
+
+        # Scale the wireframe overlay for use on all images
+        if self.wireframe is not None:
+            sf = self.image.GetHeight() / self.wireframe.GetHeight()
+            scaled_wireframe_width = round(self.wireframe.GetWidth() * sf * self.zoom)
+            scaled_wireframe_height = round(self.wireframe.GetHeight() * sf * self.zoom)
+            scaled_wireframe = self.wireframe.Scale(
+                scaled_wireframe_width,
+                scaled_wireframe_height,
+                wx.IMAGE_QUALITY_HIGH
+            )
+            wireframe_bitmap = wx.Bitmap(scaled_wireframe)
 
         images = [self.image, self.image_denoised, self.image_scene]
         bitmaps = [self.img_bitmap, self.img_bitmap_dn, self.img_bitmap_scene]
@@ -194,6 +209,7 @@ class ImagePanel(AppPanel):
                 bitmap.SetBitmap(wx.NullBitmap)
                 continue
 
+            # Scale the image to match the height of the main image
             sf = self.image.GetHeight() / image.GetHeight()
             scaled_image = image.Scale(
                 round(image.GetWidth() * sf * self.zoom),
@@ -202,19 +218,11 @@ class ImagePanel(AppPanel):
             )
             bitmap_img = wx.Bitmap(scaled_image)
 
+            # Draw the wireframe overlay on the image
             if self.wireframe is not None:
-                sf = self.image.GetHeight() / self.wireframe.GetHeight()
-                scaled_wireframe_width = round(self.wireframe.GetWidth() * sf * self.zoom)
-                scaled_wireframe_height = round(self.wireframe.GetHeight() * sf * self.zoom)
-                scaled_wireframe = self.wireframe.Scale(
-                    scaled_wireframe_width,
-                    scaled_wireframe_height,
-                    wx.IMAGE_QUALITY_HIGH
-                )
                 image_width, image_height = bitmap_img.GetSize()
                 wireframe_x = (image_width - scaled_wireframe_width) // 2
                 wireframe_y = (image_height - scaled_wireframe_height) // 2
-                wireframe_bitmap = wx.Bitmap(scaled_wireframe)
                 mem_dc = wx.MemoryDC()
                 mem_dc.SelectObject(bitmap_img)
                 mem_dc.DrawBitmap(wireframe_bitmap, wireframe_x, wireframe_y, True)
@@ -224,6 +232,7 @@ class ImagePanel(AppPanel):
             window.SetVirtualSize(bitmap_img.GetSize())
             window.SetScrollbars(1, 1, bitmap_img.GetWidth(), bitmap_img.GetHeight())
         self.Refresh()
+        self._log('Images updated.')
 
     def update_wireframe(self, event: wx.Event = None, update_images: bool = True):
         """
@@ -234,17 +243,11 @@ class ImagePanel(AppPanel):
         assert id(self.crystal) == id(self.projector.crystal)
         self._log('Updating wireframe...')
 
-        # Convert the overlay to a wx.Image
+        # Project and convert to a wx.Image
         self._log('Projecting crystal wireframe...')
         wireframe = to_numpy(self.projector.project() * 255).astype(np.uint8).squeeze().transpose(1, 2, 0)
-
-        # Add alpha channel to wireframe
-        alpha = np.zeros((wireframe.shape[0], wireframe.shape[1], 1), dtype=np.uint8)
-        alpha[wireframe.sum(axis=2) == 0] = 0
-        alpha[wireframe.sum(axis=2) != 0] = 255
-        wireframe = np.concatenate([wireframe, alpha], axis=2)
-
         self.wireframe = numpy_to_wx_image(wireframe)
+
         if update_images:
             self.update_images()
         self._log('Crystal wireframe updated.')
@@ -325,8 +328,11 @@ class ImagePanel(AppPanel):
         """
         Zoom in the image.
         """
+        if self.is_zooming:
+            return
         if self.zoom + self.STEP_ZOOM > 10:
             return
+        self.is_zooming = True
         self.zoom += self.STEP_ZOOM
         self.on_zoom_changed()
 
@@ -334,8 +340,11 @@ class ImagePanel(AppPanel):
         """
         Zoom out the image.
         """
+        if self.is_zooming:
+            return
         if self.zoom - self.STEP_ZOOM < 0.1:
             return
+        self.is_zooming = True
         self.zoom -= self.STEP_ZOOM
         self.on_zoom_changed()
 
@@ -345,6 +354,42 @@ class ImagePanel(AppPanel):
         """
         self.lbl_zoom.SetLabel(label=f'Zoom: {self.zoom:.1f}x')
         self.update_images()
+        self.is_zooming = False
+
+    def on_mouse_hover(self, event: wx.MouseEvent):
+        """
+        Handle mouse hover events.
+        """
+        if self.crystal is None:
+            return
+        x, y = event.GetPosition()
+
+        # Adjust for scroll position
+        scroll_x, scroll_y = self.image_window.GetViewStart()
+        x += scroll_x * self.image_window.GetScrollPixelsPerUnit()[0]
+        y += scroll_y * self.image_window.GetScrollPixelsPerUnit()[1]
+
+        # Get the size of the bitmap and the actual image
+        bitmap_width, bitmap_height = self.img_bitmap.GetSize()
+        img_width, img_height = self.img_bitmap.GetBitmap().GetSize()
+
+        # Calculate the offsets if the image is centered
+        offset_x = (bitmap_width - img_width) / 2
+        offset_y = (bitmap_height - img_height) / 2
+
+        # Adjust the coordinates to the actual image position
+        x -= offset_x
+        y -= offset_y
+
+        # Check if the coordinates are within the image bounds
+        if 0 <= x < img_width and 0 <= y < img_height:
+            # Normalize coordinates relative to the center of the image
+            norm_x = (x - img_width / 2) / (img_width / 2)
+            norm_y = (y - img_height / 2) / (img_height / 2)
+            norm_y = -norm_y  # Flip y-axis to make it -1 at bottom and +1 at top
+            self._log(f"Mouse hover at: ({norm_x:.2f}, {norm_y:.2f})")
+        else:
+            self._log("Mouse hover outside the image")
 
     def on_click_image_L(self, event):
         self.clicL = event.GetPosition()

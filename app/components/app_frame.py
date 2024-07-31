@@ -251,6 +251,7 @@ class AppFrame(wx.Frame):
             crystal=self.crystal,
             image_size=image_size,
             zoom=orthographic_scale_factor(self.scene),
+            transparent_background=True
         )
 
     def on_optim(self, event):

@@ -27,7 +27,7 @@ TEST_CRYSTALS = {
         'origin': [0.5, 0, 0],
         'distances': [1., 1., 1.],
         'rotation': [0.2, -2.2, 0.2],
-        'material_ior': 1.8,
+        'material_ior': 1.6,
         'material_roughness': 0.01
     },
     'alpha': {
@@ -217,7 +217,7 @@ def check_bounds():
 
 def match_to_scene():
     res = 400
-    crystal = Crystal(**TEST_CRYSTALS['alpha3'])
+    crystal = Crystal(**TEST_CRYSTALS['cube'])
     crystal.origin.data[2] -= crystal.vertices[:, 2].min()
     crystal.build_mesh()
     crystal.to(device)
@@ -235,6 +235,7 @@ def match_to_scene():
 
         light_z_position=-5.1,
         light_scale=5.,
+        light_radiance=.5,
 
         cell_z_positions=[-5, 0., 5., 10.],
         cell_surface_scale=3,
@@ -256,13 +257,12 @@ def match_to_scene():
         external_ior=1.333,
         image_size=(res, res),
         zoom=zoom,
-        background_image=img,
-        camera_axis=[0, 0, -1]
+        transparent_background=True,
     )
     img_overlay = to_numpy(projector.image * 255).astype(np.uint8).squeeze().transpose(1, 2, 0)
     fig, ax = plt.subplots(figsize=(8, 8))
-    ax.imshow(img_overlay)
     ax.imshow(img)
+    ax.imshow(img_overlay)
     uv_crystal = to_numpy(scene.get_crystal_image_coords())
     ax.scatter(uv_crystal[:, 0], uv_crystal[:, 1], marker='x', c='r', s=50)
     uv_pts2 = to_numpy(uv_pts2)
@@ -379,7 +379,7 @@ if __name__ == '__main__':
     # show_projected_image('alpha2')
     # show_projected_image('alpha3')
     # show_projected_image('alpha4')
-    show_projected_image('alpha5')
-    # match_to_scene()
+    # show_projected_image('alpha5')
+    match_to_scene()
     # make_rotation_video()
     # make_ior_video()

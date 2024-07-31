@@ -69,6 +69,7 @@ class Projector:
             camera_axis: List[int] = [0, 0, -1],
             zoom: float = 1.,
             background_image: np.ndarray = None,
+            transparent_background: bool = False,
             external_ior: float = 1.333,  # water
             colour_facing_towards: List[float] = [1, 0, 0],
             colour_facing_away: List[float] = [0, 0, 1]
@@ -88,9 +89,10 @@ class Projector:
         self.x_range = init_tensor([-self.aspect_ratio, self.aspect_ratio], device=self.device) / self.zoom
         self.y_range = init_tensor([-1, 1], device=self.device) / self.zoom
 
-        # Background image
+        # Background
         self.background_image = None
         self.set_background(background_image)
+        self.transparent_background = transparent_background
 
         # Colours
         self.colour_facing_towards = init_tensor(colour_facing_towards, device=self.device)
@@ -197,6 +199,13 @@ class Projector:
             composite = self.background_image.clone()
             composite[:, ~bg] = image[:, ~bg]
             image = composite
+
+        # Add transparency to the image
+        if self.transparent_background:
+            alpha = torch.zeros((1, *self.image_size), dtype=torch.uint8, device=image.device)
+            alpha[0, image.sum(dim=0) == 0] = 0
+            alpha[0, image.sum(dim=0) != 0] = 1
+            image = torch.cat([image, alpha], dim=0)
 
         return image
 

@@ -219,6 +219,8 @@ class Crystal(nn.Module):
             'rotation_mode': self.rotation_mode,
             'material_roughness': self.material_roughness.item(),
             'material_ior': self.material_ior.item(),
+            'use_bumpmap': self.use_bumpmap,
+            'bumpmap_texture': self.bumpmap_texture.to_dict() if self.bumpmap_texture is not None else None,
         }
 
         if include_buffers:
@@ -236,7 +238,6 @@ class Crystal(nn.Module):
                 'mesh_vertices': self.mesh_vertices.detach().cpu(),
                 'mesh_faces': self.mesh_faces.detach().cpu(),
                 'bumpmap': self.bumpmap.detach().cpu(),
-                'bumpmap_texture': self.bumpmap_texture.to_dict() if self.bumpmap_texture is not None else None,
                 'uv_map': self.uv_map.detach().cpu() if hasattr(self, 'uv_map') else None,
                 'uv_faces': ({k: v.detach().cpu() for k, v in self.uv_faces.items()}
                              if hasattr(self, 'uv_faces') else None),

@@ -68,7 +68,7 @@ class Scene:
 
             light_z_position: float = -10.1,
             light_scale: float = 50.,
-            light_radiance: Tuple[float, float, float] = (0.5, 0.5, 0.5),
+            light_radiance: Union[float, Tuple[float, float, float]] = (0.5, 0.5, 0.5),
             light_st_texture: Optional[Union[NoiseTexture, Tensor]] = None,
 
             cell_z_positions: List[float] = [-10., 0., 50., 60.],
@@ -112,6 +112,8 @@ class Scene:
         # Light parameters
         self.light_z_position = light_z_position
         self.light_scale = light_scale
+        if isinstance(light_radiance, float):
+            light_radiance = (light_radiance, light_radiance, light_radiance)
         self.light_radiance = init_tensor(light_radiance)
         self.light_st_texture = light_st_texture
 
@@ -164,22 +166,9 @@ class Scene:
         }
 
         if self.crystal is not None:
-            spec['crystal'] = {
-                'scale': self.crystal.scale.item(),
-                'distances': self.crystal.distances.tolist(),
-                'origin': self.crystal.origin.tolist(),
-                'rotation': self.crystal.rotation.tolist(),
-                'material_roughness': self.crystal.material_roughness.item(),
-                'material_ior': self.crystal.material_ior.item(),
-                'use_bumpmap': self.crystal.use_bumpmap,
-            }
+            spec['crystal'] = self.crystal.to_dict(include_buffers=False)
         if self.crystal_seed is not None:
-            spec['crystal_seed'] = {
-                'scale': self.crystal_seed.scale.item(),
-                'distances': self.crystal_seed.distances.tolist(),
-                'origin': self.crystal_seed.origin.tolist(),
-                'bumpmap_texture': self.crystal_seed.bumpmap_texture.to_dict()
-            }
+            spec['crystal_seed'] = self.crystal_seed.to_dict(include_buffers=False)
 
         if len(self.bubbles) > 0:
             spec['bubbles'] = []

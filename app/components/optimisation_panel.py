@@ -87,13 +87,9 @@ class OptimisationPanel(AppPanel):
         event.Skip()
         if self.refiner.is_training():
             self.refiner.stop_training()
-            event.EventObject.SetLabel('Refine')
-            self.Refresh()
-            wx.Yield()
+            self.btn_refine.SetLabel('Stopping...')
             return
-        event.EventObject.SetLabel('Stop refining')
-        self.Refresh()
-        wx.Yield()
+        self.btn_refine.SetLabel('Stop refining')
 
         # If the refiner has no crystal, use the current crystal or make an initial prediction
         if self.refiner.crystal is None:
@@ -110,8 +106,8 @@ class OptimisationPanel(AppPanel):
         def after_refine_step(step: int):
             if step % 5 != 0:
                 return
-            wx.CallAfter(wx.PostEvent, self.app_frame, CrystalChangedEvent(build_mesh=False))
-            wx.CallAfter(wx.PostEvent, self.app_frame, SceneImageChangedEvent())
+            wx.PostEvent(self.app_frame, CrystalChangedEvent(build_mesh=False))
+            wx.PostEvent(self.app_frame, SceneImageChangedEvent())
 
         # Refine the prediction
         def training_thread(stop_event: threading.Event):
@@ -119,8 +115,10 @@ class OptimisationPanel(AppPanel):
             self.refiner.train(after_refine_step)
             while self.refiner.is_training() and not stop_event.is_set():
                 time.sleep(1)
-            after_refine_step(self.refiner.step)
-            event.EventObject.SetLabel('Refine')
+            self._log('Refining prediction complete.')
+            self._log(f'Stopped at step = {self.refiner.step}')
+            after_refine_step(0)  # Force the events by setting step to 0
+            self.btn_refine.SetLabel('Refine')
             self._log('Prediction refined.')
 
         thread = threading.Thread(target=training_thread, args=(stop_event,))
