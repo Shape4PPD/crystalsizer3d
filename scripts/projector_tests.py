@@ -27,7 +27,7 @@ TEST_CRYSTALS = {
         'origin': [0.5, 0, 0],
         'distances': [1., 1., 1.],
         'rotation': [0.2, -2.2, 0.2],
-        'material_ior': 1.6,
+        'material_ior': 1.2,
         'material_roughness': 0.01
     },
     'alpha': {
@@ -217,15 +217,20 @@ def check_bounds():
 
 def match_to_scene():
     res = 400
-    crystal = Crystal(**TEST_CRYSTALS['cube'])
+    crystal = Crystal(**TEST_CRYSTALS['alpha2'])
+    crystal.scale.data= init_tensor(1.2, device=crystal.scale.device)
+    crystal.origin.data[:2] = torch.tensor([0, 0], device=crystal.origin.device)
     crystal.origin.data[2] -= crystal.vertices[:, 2].min()
-    crystal.build_mesh()
+    v, f = crystal.build_mesh()
     crystal.to(device)
+    # m = Trimesh(vertices=to_numpy(v), faces=to_numpy(f))
+    # m.show()
 
     # Create and render a scene
     scene = Scene(
         crystal=crystal,
         res=res,
+        spp=512,
 
         camera_distance=32.,
         focus_distance=30.,
@@ -234,8 +239,9 @@ def match_to_scene():
         aperture_radius=0.3,
 
         light_z_position=-5.1,
-        light_scale=5.,
-        light_radiance=.5,
+        # light_scale=5.,
+        light_scale=10000.,
+        light_radiance=.3,
 
         cell_z_positions=[-5, 0., 5., 10.],
         cell_surface_scale=3,
@@ -260,13 +266,19 @@ def match_to_scene():
         transparent_background=True,
     )
     img_overlay = to_numpy(projector.image * 255).astype(np.uint8).squeeze().transpose(1, 2, 0)
+    img_overlay[:, :, 3] = (img_overlay[:, :, 3] * 0.5).astype(np.uint8)
     fig, ax = plt.subplots(figsize=(8, 8))
     ax.imshow(img)
     ax.imshow(img_overlay)
-    uv_crystal = to_numpy(scene.get_crystal_image_coords())
-    ax.scatter(uv_crystal[:, 0], uv_crystal[:, 1], marker='x', c='r', s=50)
-    uv_pts2 = to_numpy(uv_pts2)
-    ax.scatter(uv_pts2[:, 0], uv_pts2[:, 1], marker='o', c='purple', s=100)
+    # uv_crystal = to_numpy(scene.get_crystal_image_coords())
+    # ax.scatter(uv_crystal[:, 0], uv_crystal[:, 1], marker='x', c='r', s=50)
+    # uv_pts2 = to_numpy(uv_pts2)
+    # ax.scatter(uv_pts2[:, 0], uv_pts2[:, 1], marker='o', c='purple', s=100)
+
+    # uv_vertices = to_numpy(projector.vertices_2d)
+    # ax.scatter(uv_vertices[:, 0], uv_vertices[:, 1], marker='o', c='g', s=70)
+
+
     fig.tight_layout()
     plt.show()
 
