@@ -27,8 +27,8 @@ TEST_CRYSTALS = {
         'origin': [0.5, 0, 0],
         'distances': [1., 1., 1.],
         'rotation': [0.2, -2.2, 0.2],
-        'material_ior': 1.8,
-        'material_roughness': 0.01
+        'material_ior': 1.2,
+        'material_roughness': 1.5#0.01
     },
     'alpha': {
         'lattice_unit_cell': [7.068, 10.277, 8.755],
@@ -48,10 +48,13 @@ TEST_CRYSTALS = {
                       0.7618, 0.6710, 0.8263, 0.6061, 1.0000, 0.9338, 0.7891, 0.9057],
         'point_group_symbol': '222',  # 222?
         'scale': 12,
-        'material_ior': 1.7,
-        'origin': [-2.2178, -0.9920, 5.7441],
+        'material_ior': 1.7,#1.7,
+        # 'origin': [-2.2178, -0.9920, 5.7441],
+        'origin': [0., 0., 0.],
         'rotation': [0., 0., -0.2],
+        # 'rotation': [0.0, np.pi, -0.2],
         # 'rotation': [0.6168,  0.3305, -0.4568],
+        # 'material_roughness': 0.01
     },
     'alpha3': {
         'lattice_unit_cell': [7.068, 10.277, 8.755],
@@ -217,15 +220,20 @@ def check_bounds():
 
 def match_to_scene():
     res = 400
-    crystal = Crystal(**TEST_CRYSTALS['alpha3'])
+    crystal = Crystal(**TEST_CRYSTALS['alpha2'])
+    crystal.scale.data= init_tensor(1.2, device=crystal.scale.device)
+    crystal.origin.data[:2] = torch.tensor([0, 0], device=crystal.origin.device)
     crystal.origin.data[2] -= crystal.vertices[:, 2].min()
-    crystal.build_mesh()
+    v, f = crystal.build_mesh()
     crystal.to(device)
+    # m = Trimesh(vertices=to_numpy(v), faces=to_numpy(f))
+    # m.show()
 
     # Create and render a scene
     scene = Scene(
         crystal=crystal,
         res=res,
+        spp=512,
 
         camera_distance=32.,
         focus_distance=30.,
@@ -234,8 +242,10 @@ def match_to_scene():
         aperture_radius=0.3,
 
         light_z_position=-5.1,
-        light_scale=5.,
-
+        # light_scale=5.,
+        light_scale=10000.,
+        light_radiance=.3,
+        integrator_max_depth=3,
         cell_z_positions=[-5, 0., 5., 10.],
         cell_surface_scale=3,
     )
@@ -256,17 +266,22 @@ def match_to_scene():
         external_ior=1.333,
         image_size=(res, res),
         zoom=zoom,
-        background_image=img,
-        camera_axis=[0, 0, -1]
+        transparent_background=True,
     )
     img_overlay = to_numpy(projector.image * 255).astype(np.uint8).squeeze().transpose(1, 2, 0)
+    img_overlay[:, :, 3] = (img_overlay[:, :, 3] * 0.5).astype(np.uint8)
     fig, ax = plt.subplots(figsize=(8, 8))
-    ax.imshow(img_overlay)
     ax.imshow(img)
-    uv_crystal = to_numpy(scene.get_crystal_image_coords())
-    ax.scatter(uv_crystal[:, 0], uv_crystal[:, 1], marker='x', c='r', s=50)
-    uv_pts2 = to_numpy(uv_pts2)
-    ax.scatter(uv_pts2[:, 0], uv_pts2[:, 1], marker='o', c='purple', s=100)
+    ax.imshow(img_overlay)
+    # uv_crystal = to_numpy(scene.get_crystal_image_coords())
+    # ax.scatter(uv_crystal[:, 0], uv_crystal[:, 1], marker='x', c='r', s=50)
+    # uv_pts2 = to_numpy(uv_pts2)
+    # ax.scatter(uv_pts2[:, 0], uv_pts2[:, 1], marker='o', c='purple', s=100)
+
+    # uv_vertices = to_numpy(projector.vertices_2d)
+    # ax.scatter(uv_vertices[:, 0], uv_vertices[:, 1], marker='o', c='g', s=70)
+
+
     fig.tight_layout()
     plt.show()
 
@@ -379,7 +394,7 @@ if __name__ == '__main__':
     # show_projected_image('alpha2')
     # show_projected_image('alpha3')
     # show_projected_image('alpha4')
-    #show_projected_image('alpha5')
+    # show_projected_image('alpha5')
     match_to_scene()
     # make_rotation_video()
     # make_ior_video()

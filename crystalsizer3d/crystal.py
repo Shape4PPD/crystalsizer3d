@@ -8,7 +8,7 @@ import torch
 from kornia.geometry import axis_angle_to_rotation_matrix, quaternion_to_rotation_matrix
 from kornia.utils import draw_convex_polygon
 from pymatgen.symmetry.groups import PointGroup
-from torch import nn
+from torch import Tensor, nn
 
 from crystalsizer3d import logger
 from crystalsizer3d.scene_components.textures import NoiseTexture
@@ -25,18 +25,23 @@ ROTATION_MODES = [
 
 
 class Crystal(nn.Module):
-    all_distances: torch.Tensor
-    N: torch.Tensor
-    vertices_og: torch.Tensor
-    vertices: torch.Tensor
-    faces: Dict[Tuple[int, int, int], torch.Tensor]
+    all_miller_indices: Tensor
+    all_distances: Tensor
+    symmetry_idx: Tensor
+    lattice_vectors_star: Tensor
+    N: Tensor
+    vertices_og: Tensor
+    vertices: Tensor
+    faces: Dict[Tuple[int, int, int], Tensor]
     areas: Dict[Tuple[int, int, int], float]
     missing_faces: List[Tuple[int, int, int]]
-    mesh_vertices: torch.Tensor
-    mesh_faces: torch.Tensor
-    bumpmap: torch.Tensor
+    mesh_vertices: Tensor
+    mesh_faces: Tensor
+    bumpmap: Tensor
     bumpmap_texture: NoiseTexture
-    uv_mask: torch.Tensor
+    uv_map: Tensor
+    uv_faces: Dict[int, Tensor]
+    uv_mask: Tensor
 
     def __init__(
             self,
@@ -56,11 +61,12 @@ class Crystal(nn.Module):
 
             use_bumpmap: bool = False,
             bumpmap_dim: int = 100,
-            bumpmap: Optional[torch.Tensor] = None,
+            bumpmap: Optional[Tensor] = None,
             bumpmap_texture: Optional[NoiseTexture] = None,
 
             merge_vertices: bool = False,
             dtype: torch.dtype = torch.float32,
+            do_init: bool = True
     ):
         """
         Set up the initial crystal and calculate the crystal habit.
@@ -163,8 +169,9 @@ class Crystal(nn.Module):
         self.register_buffer('uv_mask', torch.empty(0, dtype=torch.bool))
 
         # Initialise the crystal
-        with torch.no_grad():
-            self._init()
+        if do_init:
+            with torch.no_grad():
+                self._init()
 
     def clone(self) -> 'Crystal':
         """
@@ -196,8 +203,90 @@ class Crystal(nn.Module):
         crystal.to(self.origin.device)
         return crystal
 
+    def to_dict(self, include_buffers: bool = True) -> dict:
+        """
+        Convert the crystal to a dictionary.
+        """
+        data = {
+            'lattice_unit_cell': self.lattice_unit_cell,
+            'lattice_angles': self.lattice_angles,
+            'miller_indices': self.miller_indices,
+            'point_group_symbol': self.point_group_symbol,
+            'scale': self.scale.item(),
+            'distances': self.distances.tolist(),
+            'origin': self.origin.tolist(),
+            'rotation': self.rotation.tolist(),
+            'rotation_mode': self.rotation_mode,
+            'material_roughness': self.material_roughness.item(),
+            'material_ior': self.material_ior.item(),
+            'use_bumpmap': self.use_bumpmap,
+            'bumpmap_texture': self.bumpmap_texture.to_dict() if self.bumpmap_texture is not None else None,
+        }
+
+        if include_buffers:
+            data['buffers'] = {
+                'all_miller_indices': self.all_miller_indices.detach().cpu(),
+                'all_distances': self.all_distances.detach().cpu(),
+                'symmetry_idx': self.symmetry_idx.detach().cpu(),
+                'lattice_vectors_star': self.lattice_vectors_star.detach().cpu(),
+                'N': self.N.detach().cpu(),
+                'vertices_og': self.vertices_og.detach().cpu(),
+                'vertices': self.vertices.detach().cpu(),
+                'faces': {k: v.detach().cpu() for k, v in self.faces.items()},
+                'areas': self.areas,
+                'missing_faces': self.missing_faces,
+                'mesh_vertices': self.mesh_vertices.detach().cpu(),
+                'mesh_faces': self.mesh_faces.detach().cpu(),
+                'bumpmap': self.bumpmap.detach().cpu(),
+                'uv_map': self.uv_map.detach().cpu() if hasattr(self, 'uv_map') else None,
+                'uv_faces': ({k: v.detach().cpu() for k, v in self.uv_faces.items()}
+                             if hasattr(self, 'uv_faces') else None),
+                'uv_mask': self.uv_mask.detach().cpu() if hasattr(self, 'uv_mask') else None,
+            }
+
+        return data
+
     @classmethod
-    def from_json(cls, path: Path):
+    def from_dict(cls, data: dict) -> 'Crystal':
+        """
+        Instantiate a crystal from a dictionary.
+        """
+        req_fields = ['lattice_unit_cell', 'lattice_angles', 'miller_indices', 'point_group_symbol', 'distances']
+        for req_field in req_fields:
+            assert req_field in data, f'{req_field} not found in data.'
+        args = {k: data[k] for k in data if k != 'buffers'}
+
+        # Skip initialisation if buffers are available
+        if 'buffers' in data:
+            args['do_init'] = False
+
+        # Instantiate the crystal
+        crystal = cls(**args)
+
+        # Set the buffers
+        if 'buffers' in data:
+            for k, v in data['buffers'].items():
+                if hasattr(crystal, k) and isinstance(getattr(crystal, k), nn.Parameter):
+                    assert isinstance(v, Tensor), f'Buffer {k} must be a tensor'
+                    prop = getattr(crystal, k)
+                    prop.data = v
+                else:
+                    setattr(crystal, k, v)
+
+        return crystal
+
+    def to_json(self, path: Path, overwrite: bool = False):
+        """
+        Save the crystal to a JSON file.
+        """
+        if not overwrite:
+            assert not path.exists(), f'JSON file already exists at {path}'
+        data = self.to_dict(include_buffers=False)
+        with open(path, 'w') as f:
+            json.dump(data, f, indent=4)
+
+    @classmethod
+    def from_json(cls, path: Path) -> 'Crystal':
         """
         Instantiate a crystal from a JSON file.
         """
@@ -223,28 +312,6 @@ class Crystal(nn.Module):
                 json.dump(args, f, indent=4)
 
         return cls(**args)
-
-    def to_json(self, path: Path, overwrite: bool = False):
-        """
-        Save the crystal to a JSON file.
-        """
-        if not overwrite:
-            assert not path.exists(), f'JSON file already exists at {path}'
-        data = {
-            'lattice_unit_cell': self.lattice_unit_cell,
-            'lattice_angles': self.lattice_angles,
-            'miller_indices': self.miller_indices,
-            'point_group_symbol': self.point_group_symbol,
-            'scale': self.scale.item(),
-            'distances': self.distances.tolist(),
-            'origin': self.origin.tolist(),
-            'rotation': self.rotation.tolist(),
-            'rotation_mode': self.rotation_mode,
-            'material_roughness': self.material_roughness.item(),
-            'material_ior': self.material_ior.item(),
-        }
-        with open(path, 'w') as f:
-            json.dump(data, f, indent=4)
 
     def to(self, *args, **kwargs):
         """
@@ -354,13 +421,13 @@ class Crystal(nn.Module):
 
     def build_mesh(
             self,
-            scale: Optional[torch.Tensor] = None,
-            distances: Optional[torch.Tensor] = None,
-            origin: Optional[torch.Tensor] = None,
-            rotation: Optional[torch.Tensor] = None,
+            scale: Optional[Tensor] = None,
+            distances: Optional[Tensor] = None,
+            origin: Optional[Tensor] = None,
+            rotation: Optional[Tensor] = None,
             tol: float = 1e-3,
             update_uv_map: bool = True
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
+    ) -> Tuple[Tensor, Tensor]:
         """
         Take the face normals and distances and calculate where the vertices and edges lie.
         """
@@ -514,7 +581,7 @@ class Crystal(nn.Module):
 
         return self.mesh_vertices.clone(), self.mesh_faces.clone()
 
-    def _plane_intersection(self, n1: int, n2: int, n3: int) -> Optional[torch.Tensor]:
+    def _plane_intersection(self, n1: int, n2: int, n3: int) -> Optional[Tensor]:
         """
         Calculate the intersection point of three planes.
         """

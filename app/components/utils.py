@@ -3,10 +3,12 @@ import wx
 import wx.lib.newevent
 
 CrystalChangedEvent, EVT_CRYSTAL_CHANGED = wx.lib.newevent.NewEvent()
+CrystalMeshChangedEvent, EVT_CRYSTAL_MESH_CHANGED = wx.lib.newevent.NewEvent()
 ImagePathChangedEvent, EVT_IMAGE_PATH_CHANGED = wx.lib.newevent.NewEvent()
 RefinerChangedEvent, EVT_REFINER_CHANGED = wx.lib.newevent.NewEvent()
 DenoisedImageChangedEvent, EVT_DENOISED_IMAGE_CHANGED = wx.lib.newevent.NewEvent()
 SceneImageChangedEvent, EVT_SCENE_IMAGE_CHANGED = wx.lib.newevent.NewEvent()
+SceneChangedEvent, EVT_SCENE_CHANGED = wx.lib.newevent.NewEvent()
 
 
 def wx_image_to_numpy(image: wx.Image) -> np.ndarray:

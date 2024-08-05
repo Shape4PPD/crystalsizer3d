@@ -3,6 +3,7 @@ import hashlib
 import json
 import os
 import random
+import threading
 from argparse import Namespace
 from json import JSONEncoder
 from math import log2
@@ -193,3 +194,8 @@ def gumbel_sigmoid(logits: Tensor, temperature: float = 1.0) -> Tensor:
     gumbel_noise = -torch.log(-torch.log(torch.rand_like(logits)))
     y = logits + gumbel_noise
     return torch.sigmoid(y / temperature)
+
+
+def is_main_thread():
+    """Check if the current thread is the main thread."""
+    return threading.current_thread().name == 'MainThread'

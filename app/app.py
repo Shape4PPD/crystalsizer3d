@@ -1,7 +1,12 @@
+import atexit
+import signal
+import sys
+
 import wx
 
 from app import APP_DATA_PATH
 from app.components.app_frame import AppFrame
+from app.components.parallelism import close_parallel_processes
 
 
 class CrystalSizerApp(wx.App):
@@ -23,8 +28,22 @@ class CrystalSizerApp(wx.App):
 
     def OnExit(self):
         self.config.Flush()  # Ensure settings are saved before exiting
+        close_parallel_processes()
         return 0
 
+
+def signal_handler(sig, frame):
+    """Handle termination signals."""
+    close_parallel_processes()
+    sys.exit(0)
+
+
+# Register cleanup function to be called on exit
+atexit.register(close_parallel_processes)
+
+# Register signal handlers
+signal.signal(signal.SIGINT, signal_handler)
+signal.signal(signal.SIGTERM, signal_handler)
 
 if __name__ == '__main__':
     app = CrystalSizerApp()  # False)

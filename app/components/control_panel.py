@@ -160,27 +160,27 @@ class ControlPanel(AppPanel):
         dialog.Destroy()
         self._log(f'Loading crystal data from {filepath}.')
         self.app_frame.crystal = Crystal.from_json(filepath)
-        wx.PostEvent(self.app_frame, CrystalChangedEvent())
+        wx.PostEvent(self.app_frame, CrystalChangedEvent(build_mesh=False))
         self._log('Crystal loaded.')
 
     def update_face_list(self, event):
         """
         Update the list of faces.
         """
+        event.Skip()
         self.face_list.DeleteAllItems()
         for i, (hkl, d) in enumerate(zip(self.crystal.miller_indices, self.crystal.distances)):
             self.face_list.InsertItem(i, f'[{hkl[0]}, {hkl[1]}, {hkl[2]}]')
-            self.face_list.SetItem(i, 1, f'{d:.2f}')
-        event.Skip()
+            self.face_list.SetItem(i, 1, f'{d:.4f}')
 
     def update_control_labels(self, event):
         """
         Update the text labels for rotation, origin position and refractive index.
         """
-        self.lbl_rotation.SetLabel(label=f'Rotation: {np.rad2deg(to_numpy(self.crystal.rotation[2])):.1f}°')
-        self.lbl_position.SetLabel(label=f'Origin: ({self.crystal.origin[0]:.1f}, {self.crystal.origin[1]:.1f})')
-        self.lbl_ior.SetLabel(label=f'IOR: {self.crystal.material_ior.item():.1f}')
         event.Skip()
+        self.lbl_rotation.SetLabel(label=f'Rotation: {np.rad2deg(to_numpy(self.crystal.rotation[2])):.1f}°')
+        self.lbl_position.SetLabel(label=f'Origin: ({self.crystal.origin[0]:.2f}, {self.crystal.origin[1]:.2f})')
+        self.lbl_ior.SetLabel(label=f'IOR: {self.crystal.material_ior.item():.2f}')
 
     def on_save_crystal(self, event):
         """
