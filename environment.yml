@@ -37,4 +37,5 @@ dependencies:
     - pymatgen >= 2024.8, < 2024.9
     - python-fcl >= 0.7, < 0.8
     - pytorch-minimize >= 0.0.2, < 0.1
+    - transformers >= 4.37, < 4.38
     - wxpython >= 4.2, < 4.3
