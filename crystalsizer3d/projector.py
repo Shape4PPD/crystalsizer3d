@@ -251,62 +251,55 @@ class Projector:
         eta = self.external_ior / self.crystal.material_ior
 
         # The incident vector is pointing towards the camera
-        incident = -self.view_axis / self.view_axis.norm()
+        incident = -self.view_axis / self.view_axis.norm()  # this has mag of 1
 
         # Normalise the normal vector
         n_norm = normal.norm()
         normal = normal / normal.norm()
 
-        # Calculate cosines and sines for the incident and transmitted angles
+        # Calculate cosines and sine^2 for the incident and transmitted angles
         cos_theta_inc = incident @ normal
-        print(f"normal {normal}")
-        print(f"angle_inc {torch.rad2deg(torch.arccos(cos_theta_inc))}")
-        print(f"cos theta inc {cos_theta_inc}")
-        
-        print("---")
         sin2_theta_t = eta**2 * (1 - cos_theta_inc ** 2)
-        print(f"angle_t {torch.rad2deg(torch.arcsin(torch.sqrt(sin2_theta_t)))}")
-        print(f"sin2_theta_t {sin2_theta_t}")
 
         # Calculate the distance from each point to the plane
         dot_product = points @ normal
-        offset_distance = self.crystal.origin @ normal
+        offset_distance = self.crystal.origin @ normal # offset from origin due to normal vectors being based off 0,0,0
         d = torch.abs(dot_product - distance * self.crystal.scale - offset_distance) / n_norm
 
         
-        # Check for total internal reflection
+        # Check for total internal reflection ###### not required, if true just don't return anything
         if sin2_theta_t > 1:
             R = incident - 2 * cos_theta_inc * normal
             points = points + d[:, None] * R / R.norm()
 
         # Calculate the refracted vertices
         else:
-            # once you've calculated the refraction angles, you need to work out where it refracts on the plane
+            # once you've calculated the refraction angles
+            # you need to work out where it refracts on the plane
             cos_theta_t = torch.sqrt(1 - sin2_theta_t)
             theta_t = torch.arccos(cos_theta_t)
             theta_inc = torch.arccos(cos_theta_inc)
+            
             # calculate magatude of translation in xy direction
-            s_xy = d[:,None] * torch.sin(theta_inc - theta_t) / torch.cos(theta_t)
-            # calculate unit vector translation in xy direction
+            # S is the right angle triangle between inc and T, S dot inc = 0
+            s_mag = d[:,None] * torch.sin(theta_inc - theta_t) / torch.cos(theta_t)
+            # calculate unit vector translation in direction perpendicular to inc
             T = (eta) * incident + ((eta) * cos_theta_inc - cos_theta_t) * normal
             T = T / T.norm()
-            # calculate vector from
-            S = -T/T[-1] + incident # assumes incident is 0,0,1 #figure this out
+            # find how far T travels in inc direction
+            T_in_inc = T * incident
+            S = -T/T_in_inc.norm() + incident
+
             if torch.is_nonzero(S.norm()):
                 S = S/ S.norm()
-                shift = s_xy*S
+                shift = s_mag*S
             else:
                 shift = 0
-            
-            
-            # cos_theta_t = torch.sqrt(1 - sin2_theta_t)
-            points = points + shift #(d[:, None] / cos_theta_inc) * T / T.norm()
-            print(f"d {torch.min(d)}")
-            # print(f"(d[:, None] / cos_theta_inc) * T / T.norm() {(d[:, None] / cos_theta_inc) * T / T.norm()}")
-            print("---")
-        # Add distance to plane
-        # points = points + (d[:, None] / cos_theta_inc) * T / T.norm()
 
+            points = points + shift
+            
+        # Add distance to plane
+        
         return points
 
     def _refract_points_old(self, normal: Tensor, distance: Tensor) -> Tensor:
