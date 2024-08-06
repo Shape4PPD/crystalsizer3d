@@ -6,6 +6,7 @@ import torch
 import trimesh.remesh
 from trimesh import Trimesh
 
+from crystalsizer3d import USE_CUDA
 from crystalsizer3d.crystal import Crystal
 from crystalsizer3d.util.utils import to_numpy
 
@@ -38,9 +39,13 @@ def build_crystal_mesh(
         vertices = torch.from_numpy(v2).to(torch.float32).to(vertices.device)
         faces = torch.from_numpy(f2).to(vertices.device)
 
+    # Ensure the vertices and faces are on the correct device and convert to Mitsuba tensors
     nv, nf = len(vertices), len(faces)
-    vertices = mi.TensorXf(vertices.cuda())
-    faces = mi.TensorXi64(faces.cuda())
+    if USE_CUDA:
+        vertices = vertices.cuda()
+        faces = faces.cuda()
+    vertices = mi.TensorXf(vertices)
+    faces = mi.TensorXi64(faces)
 
     # Set up the material properties
     if crystal.use_bumpmap:
@@ -116,8 +121,13 @@ def get_projection_components(mi_scene: mi.Scene) -> Tuple[torch.Tensor, int]:
         # Get the inverse camera world transform
         wti = sensor.world_transform().inverse()
 
+        # Get the projection matrix, CPU and CUDA implementations give transposed versions, so check and fix
+        M = torch.tensor((prj @ wti).matrix).squeeze()
+        if M[3, :2].sum() > 0:
+            M = M.T
+
         # Combine to get the final projection matrix
-        projection_components_cache[mi_scene.ptr] = (torch.tensor((prj @ wti).matrix)[0], film.crop_size())
+        projection_components_cache[mi_scene.ptr] = (M, film.crop_size())
 
     return projection_components_cache[mi_scene.ptr]
 

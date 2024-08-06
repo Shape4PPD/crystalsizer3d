@@ -6,15 +6,18 @@ import torch
 from kornia.utils import tensor_to_image
 from trimesh import Trimesh
 
-from crystalsizer3d import LOGS_PATH, START_TIMESTAMP, logger
+from crystalsizer3d import LOGS_PATH, START_TIMESTAMP, USE_CUDA, logger
 from crystalsizer3d.crystal import Crystal
 from crystalsizer3d.projector import Projector
 from crystalsizer3d.scene_components.scene import Scene
 from crystalsizer3d.scene_components.utils import project_to_image
 from crystalsizer3d.util.utils import init_tensor, to_numpy
 
-# device = torch.device('cpu')
-device = torch.device('cuda')
+
+if USE_CUDA:
+    device = torch.device('cuda')
+else:
+    device = torch.device('cpu')
 
 
 TEST_CRYSTALS = {
