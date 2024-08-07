@@ -20,7 +20,7 @@ dotenv.load_dotenv(ROOT_PATH / '.env')
 
 # Set script path
 cwd = Path.cwd()
-dir_name = os.path.dirname(sys.argv[0]).replace(str(cwd), '').lstrip('/')
+dir_name = os.path.dirname(sys.argv[0]).replace(str(cwd), '').lstrip('/\\')
 SCRIPT_PATH = (cwd / dir_name).resolve()
 if not SCRIPT_PATH.is_relative_to(ROOT_PATH):
     ROOT_PATH = SCRIPT_PATH
