@@ -7,14 +7,15 @@ import wx
 import yaml
 from ruamel.yaml import YAML
 
-from app import APP_ASSETS_PATH, APP_DATA_PATH, CRYSTAL_DATA_PATH, DENOISED_IMAGE_PATH, REFINER_ARGS_PATH, \
+from app import ANCHORS_PATH, APP_ASSETS_PATH, APP_DATA_PATH, CRYSTAL_DATA_PATH, DENOISED_IMAGE_PATH, REFINER_ARGS_PATH, \
     SCENE_IMAGE_PATH, SCENE_PATH
 from app.components.control_panel import ControlPanel
 from app.components.image_panel import ImagePanel
 from app.components.optimisation_panel import OptimisationPanel
 from app.components.refiner_proxy import RefinerProxy
-from app.components.utils import CrystalChangedEvent, CrystalMeshChangedEvent, EVT_CRYSTAL_CHANGED, EVT_REFINER_CHANGED, \
-    EVT_SCENE_CHANGED, ImagePathChangedEvent, RefinerChangedEvent, SceneChangedEvent
+from app.components.utils import AnchorsChangedEvent, CrystalChangedEvent, CrystalMeshChangedEvent, EVT_ANCHORS_CHANGED, \
+    EVT_CRYSTAL_CHANGED, EVT_REFINER_CHANGED, EVT_SCENE_CHANGED, ImagePathChangedEvent, RefinerChangedEvent, \
+    SceneChangedEvent
 from crystalsizer3d import DATA_PATH, ROOT_PATH, logger
 from crystalsizer3d.args.refiner_args import RefinerArgs
 from crystalsizer3d.crystal import Crystal
@@ -55,6 +56,7 @@ class AppFrame(wx.Frame):
         self.Bind(EVT_CRYSTAL_CHANGED, self.update_crystal)
         self.Bind(EVT_SCENE_CHANGED, self.update_scene)
         self.Bind(EVT_REFINER_CHANGED, self.update_refiner)
+        self.Bind(EVT_ANCHORS_CHANGED, self.update_anchors)
 
     def _log(self, message: str):
         """
@@ -77,26 +79,22 @@ class AppFrame(wx.Frame):
                 # Load the denoised image if it exists
                 if DENOISED_IMAGE_PATH.exists():
                     def load_denoised_image():
-                        if self.image_panel.image is None:
+                        if self.image_panel.images['image'] is None:
                             wx.CallLater(100, load_denoised_image)
                         else:
-                            self.image_panel.load_denoised_image()
+                            self.image_panel.load_denoised_image(update_images=False)
 
                     wx.CallAfter(load_denoised_image)
 
                 # Load the scene image if it exists
                 if SCENE_IMAGE_PATH.exists():
                     def load_scene_image():
-                        if self.image_panel.image is None:
+                        if self.image_panel.images['image'] is None:
                             wx.CallLater(100, load_scene_image)
                         else:
-                            self.image_panel.load_scene_image()
+                            self.image_panel.load_scene_image(update_images=False)
 
                     wx.CallAfter(load_scene_image)
-
-        if CRYSTAL_DATA_PATH.exists():
-            self.crystal = Crystal.from_json(CRYSTAL_DATA_PATH)
-            wx.CallAfter(lambda: wx.PostEvent(self, CrystalChangedEvent(build_mesh=False)))
 
         if SCENE_PATH.exists():
             with open(SCENE_PATH, 'r') as f:
@@ -105,6 +103,19 @@ class AppFrame(wx.Frame):
                 scene_args['crystal'] = self.crystal
             self.scene = Scene.from_dict(scene_args)
             wx.CallAfter(lambda: wx.PostEvent(self, SceneChangedEvent()))
+
+        if CRYSTAL_DATA_PATH.exists():
+            self.crystal = Crystal.from_json(CRYSTAL_DATA_PATH)
+
+            # Load any anchors first then update the crystal
+            if ANCHORS_PATH.exists():
+                with open(ANCHORS_PATH, 'r') as f:
+                    anchors = yaml.load(f, Loader=yaml.FullLoader)
+                for anchor in anchors:
+                    self.image_panel.anchor_manager.anchors[anchor['key']] = torch.tensor(anchor['value'])
+                wx.CallAfter(lambda: wx.PostEvent(self, AnchorsChangedEvent()))
+
+            wx.CallAfter(lambda: wx.PostEvent(self, CrystalChangedEvent(build_mesh=False)))
 
     def update_crystal(self, event: CrystalChangedEvent):
         """
@@ -155,6 +166,20 @@ class AppFrame(wx.Frame):
         Update the refiner.
         """
         pass
+
+    def update_anchors(self, event: wx.Event):
+        """
+        Update the anchors on file.
+        """
+        event.Skip()
+        data = []
+        for k, v in self.image_panel.anchor_manager.anchors.items():
+            data.append({
+                'key': k,
+                'value': v.tolist()
+            })
+        with open(ANCHORS_PATH, 'w') as f:
+            yaml.dump(data, f)
 
     def init_refiner(self):
         """

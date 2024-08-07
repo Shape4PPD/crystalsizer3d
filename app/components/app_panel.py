@@ -1,5 +1,6 @@
 from abc import ABCMeta, abstractmethod
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import wx
 
@@ -7,6 +8,9 @@ from app.components.refiner_proxy import RefinerProxy
 from crystalsizer3d.crystal import Crystal
 from crystalsizer3d.projector import Projector
 from crystalsizer3d.scene_components.scene import Scene
+
+if TYPE_CHECKING:
+    from app.components.app_frame import AppFrame
 
 
 class AppPanelMeta(ABCMeta, type(wx.Panel)):
@@ -19,7 +23,7 @@ class AppPanel(wx.Panel, metaclass=AppPanelMeta):
     """
 
     def __init__(self, app_frame: 'AppFrame' = None):
-        self.app_frame = app_frame
+        self.app_frame: AppFrame = app_frame
         super().__init__(parent=app_frame)
 
         # Initialise components

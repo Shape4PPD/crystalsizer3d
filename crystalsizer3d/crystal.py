@@ -32,6 +32,7 @@ class Crystal(nn.Module):
     N: Tensor
     vertices_og: Tensor
     vertices: Tensor
+    vertex_ids: Tensor
     faces: Dict[Tuple[int, int, int], Tensor]
     areas: Dict[Tuple[int, int, int], float]
     missing_faces: List[Tuple[int, int, int]]
@@ -448,17 +449,21 @@ class Crystal(nn.Module):
 
         # Step 1: Calculate all intersection points of all combinations of 3 planes
         all_combinations = list(combinations(range(len(self.N)), 3))
+        intersection_idxs = []
         intersection_points = []
-        for combo in all_combinations:
+        for i, combo in enumerate(all_combinations):
             point = self._plane_intersection(*combo)
             if point is not None:
+                intersection_idxs.append(i)
                 intersection_points.append(point)
+        intersection_idxs = torch.tensor(intersection_idxs, device=device)
         intersection_points = torch.stack(intersection_points)
 
         # Step 2: Only select points that are in the polyhedron
         T = intersection_points @ self.N.T
         R = torch.all(T <= self.all_distances + tol, dim=1)
         vertices = intersection_points[R]
+        vertex_ids = intersection_idxs[R]
 
         # Step 3: Take vertices, assign them to a face, and define faces
         R = self.N @ vertices.T
@@ -569,6 +574,7 @@ class Crystal(nn.Module):
         # Set properties to self
         self.vertices_og = vertices_og
         self.vertices = vertices
+        self.vertex_ids = vertex_ids
         self.faces = faces
         self.areas = areas
         self.missing_faces = [tuple(hkl) for hkl in self.all_miller_indices.tolist() if tuple(hkl) not in faces]
