@@ -44,7 +44,7 @@ class DatasetTrainingArgs(BaseArgs):
     ):
         if isinstance(dataset_path, str):
             dataset_path = Path(dataset_path)
-        assert dataset_path.exists(), f'Dataset path does not exist: {dataset_path}'
+        # assert dataset_path.exists(), f'Dataset path does not exist: {dataset_path}'
         self.dataset_path = dataset_path
         self.check_image_paths = check_image_paths
         self.train_test_split = train_test_split
