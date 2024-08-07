@@ -34,7 +34,6 @@ from crystalsizer3d.util.utils import equal_aspect_ratio, print_args, str2bool, 
 
 PARAM_MODES = ['spectral', 'latent', 'parameters']
 
-
 class RuntimeArgs(BaseArgs):
     def __init__(
             self,
