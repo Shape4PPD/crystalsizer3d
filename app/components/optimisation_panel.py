@@ -170,7 +170,7 @@ class OptimisationPanel(AppPanel):
             wx.MessageBox(message='You must load an image first.', caption='CrystalSizer3D',
                           style=wx.OK | wx.ICON_ERROR)
             return
-        self._log('Getting initial prediction...')
+        self._log('Generating initial prediction...')
         wx.PostEvent(self.app_frame, RefiningStartedEvent())
         try:
             self.refiner.make_initial_prediction()
@@ -193,34 +193,32 @@ class OptimisationPanel(AppPanel):
         Refine the prediction.
         """
         event.Skip()
+
+        # If the refiner is already training, send the stop signal
         if self.refiner.is_training():
             self.refiner.stop_training()
             self.btn_refine.SetLabel('Stopping...')
             return
-        wx.PostEvent(self.app_frame, RefiningStartedEvent())
-        self.btn_refine.SetLabel('Stop refining')
 
-        # If the refiner has no crystal, use the current crystal or make an initial prediction
-        if self.refiner.crystal is None:
-            if self.crystal is None:
-                self.make_initial_prediction(event)
-            else:
-                # self.refiner.set_initial_data(
-                #     crystal=self.crystal,
-                # )
-                # self.refiner.crystal = self.crystal
-                pass
+        # Check that there is a crystal to refine
+        if self.crystal is None:
+            wx.MessageBox(message='First generate an initial prediction or load a saved crystal from file.',
+                          caption='No crystal shape to refine.',
+                          style=wx.OK | wx.ICON_ERROR)
+            return
 
-        # Callback
         def after_refine_step(step: int):
-            if step % 5 != 0:
+            if step % refining_update_ui_every_n_steps != 0:
                 return
+            self.app_frame.crystal = self.refiner.crystal  # Update the crystal
+            wx.PostEvent(self.app_frame, SceneImageChangedEvent(update_images=False))
             wx.PostEvent(self.app_frame, CrystalChangedEvent(build_mesh=False))
-            wx.PostEvent(self.app_frame, SceneImageChangedEvent())
 
         # Refine the prediction
         def training_thread(stop_event: threading.Event):
             self._log('Refining prediction...')
+            self.refiner.set_anchors(self.anchors)
+            self.refiner.set_initial_scene(self.scene)
             self.refiner.train(after_refine_step)
             while self.refiner.is_training() and not stop_event.is_set():
                 time.sleep(1)
@@ -231,5 +229,9 @@ class OptimisationPanel(AppPanel):
             self.btn_refine.SetLabel('Refine')
             self._log('Prediction refined.')
 
+        # Start refining - run in a separate thread to keep the UI responsive
+        refining_update_ui_every_n_steps = int(self.config.Read('refining_update_ui_every_n_steps', '5'))
+        wx.PostEvent(self.app_frame, RefiningStartedEvent())
+        self.btn_refine.SetLabel('Stop refining')
         thread = threading.Thread(target=training_thread, args=(stop_event,))
         start_thread(thread)

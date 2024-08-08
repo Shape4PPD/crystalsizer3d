@@ -39,6 +39,8 @@ class ImagePanel(AppPanel):
         'wireframe': None,
         'anchors': None
     }
+    active_window: str = 'image'
+    scene_image_needs_loading: bool = False
     is_zooming: bool = False
     STEP_ZOOM = 0.1
 
@@ -139,10 +141,18 @@ class ImagePanel(AppPanel):
         """
         Initialise the event listeners.
         """
+        self.Bind(wx.EVT_NOTEBOOK_PAGE_CHANGED, self.on_image_tab_changed)
         self.app_frame.Bind(EVT_IMAGE_PATH_CHANGED, self.load_image)
         self.app_frame.Bind(EVT_DENOISED_IMAGE_CHANGED, self.load_denoised_image)
         self.app_frame.Bind(EVT_SCENE_IMAGE_CHANGED, self.load_scene_image)
         self.app_frame.Bind(EVT_CRYSTAL_MESH_CHANGED, self.update_wireframe)
+
+    def on_image_tab_changed(self, event: wx.Event):
+        """
+        Handle image tab change events.
+        """
+        self.active_window = ['image', 'denoised', 'scene'][event.GetSelection()]
+        self.update_images(quiet=True)
 
     def load_image(self, event: ImagePathChangedEvent):
         """
@@ -216,8 +226,13 @@ class ImagePanel(AppPanel):
                 self.bitmaps['anchors'] = wx.Bitmap(scaled_anchors)
 
         for i, k in enumerate(['image', 'denoised', 'scene']):
+            if k != self.active_window:
+                continue
+            if k == 'scene' and self.scene_image_needs_loading:
+                self.load_scene_image(update_images=False)
+                self.scene_image_needs_loading = False
             image, container, window = self.images[k], self.image_containers[k], self.image_windows[k]
-            if image is None:
+            if image is None or not image.IsOk():
                 container.SetBitmap(wx.NullBitmap)
                 continue
 
@@ -259,7 +274,8 @@ class ImagePanel(AppPanel):
             return
         if event is not None:
             event.Skip()
-        assert id(self.crystal) == id(self.projector.crystal)
+        if id(self.projector.crystal) != id(self.crystal):
+            self.projector.crystal = self.crystal
         self._log('Updating wireframe...')
 
         # Project and convert to a wx.Image
@@ -307,6 +323,9 @@ class ImagePanel(AppPanel):
         """
         if event is not None:
             event.Skip()
+        self.scene_image_needs_loading = True
+        if self.active_window != 'scene':
+            return
         if self.app_frame.refiner is None:
             if SCENE_IMAGE_PATH.exists():
                 image = wx.Image(str(SCENE_IMAGE_PATH), wx.BITMAP_TYPE_ANY)
@@ -324,6 +343,9 @@ class ImagePanel(AppPanel):
             return
         self._log('Loading scene image...')
         self.images['scene'] = image
+        self.scene_image_needs_loading = False
+        if event is not None and hasattr(event, 'update_images'):
+            update_images = event.update_images
         if update_images:
             self.update_images()
         image.SaveFile(str(SCENE_IMAGE_PATH), wx.BITMAP_TYPE_PNG)

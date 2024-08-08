@@ -86,8 +86,10 @@ class Crystal(nn.Module):
 
         # The angles alpha, beta, gamma within the unit cell
         assert len(lattice_angles) == 3, 'Lattice angles must be a list of 3 floats'
+        if isinstance(lattice_angles, np.ndarray):
+            lattice_angles = lattice_angles.tolist()
         if not all(0 < a < np.pi for a in lattice_angles):
-            lattice_angles = [np.deg2rad(a) for a in lattice_angles]
+            lattice_angles = [float(np.deg2rad(a)) for a in lattice_angles]
         self.lattice_angles = lattice_angles
 
         # Miller indices should be a list of tuples
@@ -233,6 +235,7 @@ class Crystal(nn.Module):
                 'N': self.N.detach().cpu(),
                 'vertices_og': self.vertices_og.detach().cpu(),
                 'vertices': self.vertices.detach().cpu(),
+                'vertex_ids': self.vertex_ids.detach().cpu(),
                 'faces': {k: v.detach().cpu() for k, v in self.faces.items()},
                 'areas': self.areas,
                 'missing_faces': self.missing_faces,

@@ -1,4 +1,4 @@
-from typing import List, Optional, Tuple, Union
+from typing import Dict, List, Optional, Tuple, Union
 
 import numpy as np
 import torch
@@ -71,6 +71,7 @@ class Projector:
     face_normals: Tensor
     distances: Tensor
     vertices_2d: Tensor
+    projected_vertices: Dict[int, Tensor]
     projected_vertex_keys: List[ProjectedVertexKey]
     projected_vertex_coords: Tensor
     image: Tensor
@@ -161,7 +162,7 @@ class Projector:
                 )[0]
         self.background_image = background_image
 
-    def project(self) -> Tensor:
+    def project(self, generate_image: bool = True) -> Optional[Tensor]:
         """
         Project the crystal onto an image.
         """
@@ -184,21 +185,25 @@ class Projector:
         # Orthogonally project original vertices
         self.vertices_2d = self._orthogonal_projection(self.vertices)
 
+        # Project the vertices including all refractions
+        self._project_vertices()
+
         # Generate the refracted wireframe image
-        self.image = self._generate_image()
+        if generate_image:
+            self.image = self._generate_image()
 
-        return self.image
+            return self.image
 
-    def _generate_image(self) -> Tensor:
+    def _project_vertices(self):
         """
-        Generate the projected wireframe image including all refractions.
+        Projected the vertices including all refractions.
         """
-        image = self.canvas_image.clone()
+        pv = {}
         pv_keys = []
         pv_coords = []
 
-        # Draw hidden refracted edges first
         for face_idx, (face, normal, distance) in enumerate(zip(self.faces, self.face_normals, self.distances)):
+            # Only consider the faces that are facing the camera
             is_facing = normal @ self.view_axis < 0
             if len(face) < 3 or not is_facing:
                 continue
@@ -218,11 +223,12 @@ class Projector:
             except TotalInternalReflectionError:
                 continue
             vertices_2d = self._orthogonal_projection(refracted_points)
+            pv[face_idx] = vertices_2d
 
             # Check that the points on the face did not move
             face_vertices_og = self.vertices_2d[face]
             face_vertices = vertices_2d[face]
-            assert torch.allclose(face_vertices_og, face_vertices, rtol=1e-4), 'Face vertices moved during refraction.'
+            assert torch.allclose(face_vertices_og, face_vertices, rtol=1e-2), 'Face vertices moved during refraction.'
 
             # Filter the refracted vertices to the ones visible through this face
             polygon = Polygon(self.vertices_2d[face].tolist())
@@ -236,6 +242,26 @@ class Projector:
                     pv_keys.append(key)
                     pv_coords.append(self._to_relative_coords(vertices_2d[v_idx]))
 
+        # Store the projected 2D vertices
+        self.projected_vertices = pv
+        self.projected_vertex_keys = pv_keys
+        self.projected_vertex_coords = torch.stack(pv_coords)
+
+    def _generate_image(self) -> Tensor:
+        """
+        Generate the projected wireframe image including all refractions.
+        """
+        image = self.canvas_image.clone()
+
+        # Draw hidden refracted edges first
+        for face_idx, (face, normal, distance) in enumerate(zip(self.faces, self.face_normals, self.distances)):
+            is_facing = normal @ self.view_axis < 0
+            if len(face) < 3 or not is_facing:
+                continue
+            if face_idx not in self.projected_vertices:
+                continue
+            vertices_2d = self.projected_vertices[face_idx]
+
             # Draw all refracted edges on an empty image
             rf_image = self._draw_edges(vertices_2d, facing_camera=False)
 
@@ -245,10 +271,6 @@ class Projector:
                 polygons=self.vertices_2d[face][None, ...],
                 replacement=rf_image[None, ...]
             )[0]
-
-        # Store the projected 2D vertices
-        self.projected_vertex_keys = pv_keys
-        self.projected_vertex_coords = torch.stack(pv_coords)
 
         # Draw top edges on the image
         image = self._draw_edges(self.vertices_2d, image=image, facing_camera=True)

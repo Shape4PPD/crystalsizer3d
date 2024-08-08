@@ -96,6 +96,7 @@ class RefinerArgs(BaseArgs):
             w_patches: float = 1.0,
             w_fullsize: float = 1.0,
             w_switch_probs: float = 1.0,
+            w_anchors: float = 1.0,
 
             # Loss decay factors
             l_decay_l1: float = 1.0,
@@ -248,6 +249,7 @@ class RefinerArgs(BaseArgs):
         self.w_patches = w_patches
         self.w_fullsize = w_fullsize
         self.w_switch_probs = w_switch_probs
+        self.w_anchors = w_anchors
 
         # Loss decay factors
         self.l_decay_l1 = l_decay_l1
@@ -450,6 +452,8 @@ class RefinerArgs(BaseArgs):
                            help='Weight of the combined losses on the full sized image. Only needed when using patches.')
         group.add_argument('--w-switch-probs', type=float, default=0.1,
                             help='Weight of the conjugate face switching probabilities loss regulariser term.')
+        group.add_argument('--w-anchors', type=float, default=1.,
+                            help='Weight of the anchors loss.')
 
         # Loss decay factors
         group.add_argument('--l-decay-l1', type=float, default=0.5,

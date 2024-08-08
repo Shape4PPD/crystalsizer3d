@@ -7,6 +7,7 @@ from datetime import timedelta
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple, Union
 
+import cv2
 import drjit as dr
 import mitsuba as mi
 import numpy as np
@@ -31,19 +32,20 @@ from torch.optim import Optimizer
 from torch.utils.data import default_collate
 from torch.utils.tensorboard import SummaryWriter
 from torchvision.transforms import Compose, GaussianBlur
-from torchvision.transforms.functional import center_crop, crop, to_tensor
+from torchvision.transforms.functional import center_crop, to_tensor
 
 from crystalsizer3d import DATA_PATH, LOGS_PATH, START_TIMESTAMP, USE_CUDA, logger
 from crystalsizer3d.args.refiner_args import RefinerArgs
 from crystalsizer3d.crystal import Crystal
 from crystalsizer3d.nn.manager import Manager
 from crystalsizer3d.nn.models.rcf import RCF
-from crystalsizer3d.projector import Projector
+from crystalsizer3d.projector import ProjectedVertexKey, Projector
 from crystalsizer3d.refiner.denoising import denoise_image
 from crystalsizer3d.scene_components.scene import Scene
 from crystalsizer3d.scene_components.utils import orthographic_scale_factor
 from crystalsizer3d.util.plots import _add_bars, plot_material, plot_transformation
-from crystalsizer3d.util.utils import gumbel_sigmoid, hash_data, init_tensor, is_bad, set_seed, to_multiscale, to_numpy
+from crystalsizer3d.util.utils import get_seed, gumbel_sigmoid, hash_data, init_tensor, is_bad, set_seed, to_multiscale, \
+    to_numpy
 
 
 # torch.autograd.set_detect_anomaly(True)
@@ -65,15 +67,19 @@ class Refiner:
     X_pred: Tensor = None
     X_pred_patches: Optional[Tensor] = None
     patch_centres: Optional[List[Tuple[int, int]]] = None
+
     scene: Scene = None
     scene_params: mi.SceneParameters = None
-    crystal: Crystal = None
-    symmetry_idx: Tensor = None
-    conj_pairs: List[Tuple[int, int]] = None
-    conj_switch_probs: Tensor = None
 
-    rcf_feats_og: Optional[List[Tensor]] = None
-    rcf_feats: Optional[List[Tensor]] = None
+    crystal: Crystal = None
+    symmetry_idx: Tensor
+    conj_pairs: List[Tuple[int, int]]
+    conj_switch_probs: Tensor
+
+    anchors: Dict[ProjectedVertexKey, Tensor] = {}
+
+    rcf_feats_og: Optional[List[Tensor]]
+    rcf_feats: Optional[List[Tensor]]
 
     def __init__(
             self,
@@ -89,8 +95,10 @@ class Refiner:
         # Set up the log directory
         self._init_save_dir(output_dir)
 
-        # Load the optimisation target
-        self._init_targets()
+        # Load the optimisation targets
+        self._init_X_target()
+        self._init_X_target_denoised()
+        self._init_Y_target()
 
     def __getattr__(self, name: str):
         """
@@ -111,6 +119,9 @@ class Refiner:
         elif name == 'rcf':
             self._init_rcf()
             return self.rcf
+        elif name == 'rcf_feats_og':
+            self._calculate_rcf_feats_og()
+            return self.rcf_feats_og
         elif name == 'perceptual_model':
             self._init_perceptual_model()
             return self.perceptual_model
@@ -126,6 +137,12 @@ class Refiner:
         elif name == 'device':
             self.device = self.manager.device
             return self.device
+        elif name == 'symmetry_idx':
+            self._init_symmetry_idx()
+            return self.symmetry_idx
+        elif name == 'conj_pairs' or name == 'conj_switch_probs':
+            self._init_conj_switch_probs()
+            return getattr(self, name)
         raise AttributeError(f"'{self.__class__.__name__}' object has no attribute '{name}'")
 
     def _init_save_dir(self, output_dir: Optional[Path] = None):
@@ -158,11 +175,18 @@ class Refiner:
             existing_dirs = [d for d in base_dir.iterdir() if pattern.match(d.name)]
             if len(existing_dirs) > 0:
                 logger.warning(f'Found existing directory: {existing_dirs[0]}. Overwriting.')
+                cache_dir = existing_dirs[0] / 'cache'
+                if cache_dir.exists():
+                    shutil.move(cache_dir, base_dir / 'cache_tmp')
                 shutil.rmtree(existing_dirs[0])
 
         # Make the new save directory
         self.save_dir = base_dir / (dir_name + f'_{START_TIMESTAMP}')
         self.save_dir.mkdir(parents=True, exist_ok=True)
+        if (base_dir / 'cache_tmp').exists():
+            shutil.move(base_dir / 'cache_tmp', self.save_dir / 'cache')
+        else:
+            (self.save_dir / 'cache').mkdir()
 
         # Save arguments to yml file
         with open(self.save_dir / 'args.yml', 'w') as f:
@@ -240,8 +264,8 @@ class Refiner:
         percept.eval()
 
         n_params = sum([p.data.nelement() for p in percept.parameters()])
-        logger.info(
-            f'Instantiated perception network with {n_params / 1e6:.4f}M parameters from {self.args.perceptual_model}.')
+        logger.info(f'Instantiated perception network with {n_params / 1e6:.4f}M parameters '
+                    f'from {self.args.perceptual_model}.')
         percept.to(self.device)
 
         data_config = timm.data.resolve_model_data_config(percept)
@@ -260,7 +284,7 @@ class Refiner:
 
         self.perceptual_model = model
 
-    def _init_latents_model(self) -> Optional[VQModel]:
+    def _init_latents_model(self):
         """
         Initialise the latent encoder network.
         """
@@ -269,7 +293,7 @@ class Refiner:
             return
         assert self.args.latents_model == 'MAGVIT2', 'Only MAGVIT2 encoder is supported.'
 
-        # Monkey-patch the LPIPS class so it loads from a sensible place
+        # Monkey-patch the LPIPS class so that it loads from a sensible place
         from taming.modules.losses.lpips import LPIPS
 
         def load_pips(self, name='vgg_lpips'):
@@ -294,7 +318,7 @@ class Refiner:
 
         self.latents_model = model
 
-    def _init_rcf(self) -> Optional[RCF]:
+    def _init_rcf(self):
         """
         Initialise the Richer Convolutional Features model for edge detection.
         """
@@ -314,31 +338,40 @@ class Refiner:
 
         self.rcf = rcf
 
-    def _init_targets(self):
+    def _calculate_rcf_feats_og(self):
         """
-        Load the input image (and parameters if loading from the dataset).
+        Calculate the RCF features on the original target image.
         """
+        model_input = self.X_target[None, ...].permute(0, 3, 1, 2)
+        self.rcf_feats_og = self.rcf(model_input, apply_sigmoid=False)
+
+    def _init_X_target(self):
+        """
+        Load the input image.
+        """
+        cache_path = self.save_dir / 'cache' / 'X_target.pt'
+        if cache_path.exists():
+            try:
+                X_target = torch.load(cache_path)
+                self.X_target = X_target.to(self.device)
+                logger.info('Loaded target image.')
+                return
+            except Exception as e:
+                logger.warning(f'Failed to load cached target image: {e}')
+                cache_path.unlink()
+
         if self.args.image_path is None:
             metas, X_target, Y_target = self.manager.ds.load_item(self.args.ds_idx)
             X_target = to_tensor(X_target)
-            Y_target = {
-                k: torch.from_numpy(v).to(torch.float32).to(self.device)
-                for k, v in Y_target.items()
-            }
-            r_params_target = metas['rendering_parameters']
 
         else:
             X_target = to_tensor(Image.open(self.args.image_path))
             if X_target.shape[0] == 4:
                 assert torch.allclose(X_target[3], torch.ones_like(X_target[3])), 'Transparent images not supported.'
                 X_target = X_target[:3]
-            Y_target = None
-            r_params_target = None
 
             # Crop and resize the image to the working image size
             X_target = center_crop(X_target, min(X_target.shape[-2:]))
-            # d = min(X_target.shape[-2:])
-            # X_target = crop(X_target, top=0, left=X_target.shape[-1] - d, height=d, width=d)
             X_target = F.interpolate(
                 X_target[None, ...],
                 size=self.manager.image_shape[-1],
@@ -348,13 +381,44 @@ class Refiner:
         X_target = default_collate([X_target, ])
         X_target = X_target.to(self.device)
 
+        # Resize target image to the working image size for inverse rendering
+        wis = (self.args.working_image_size, self.args.working_image_size)
+        X_target = F.interpolate(X_target, size=wis, mode='bilinear', align_corners=False)[0]
+        X_target = X_target.permute(1, 2, 0)  # HWC
+
+        # Multiscale
+        if self.args.multiscale:
+            X_target = to_multiscale(X_target, self.blur)
+            resolution_pyramid = [t.shape[0] for t in X_target[::-1]]
+            logger.info(f'Resolution pyramid has {len(X_target)} levels: '
+                        f'{", ".join([str(res) for res in resolution_pyramid])}')
+
+        # Save the target image
+        torch.save(X_target, cache_path)
+        self.X_target = X_target
+
+    def _init_X_target_denoised(self):
+        """
+        Generate or load the denoised target.
+        """
+        cache_path = self.save_dir / 'cache' / 'X_target_denoised.pt'
+        if cache_path.exists():
+            try:
+                X_target_denoised = torch.load(cache_path)
+                self.X_target_denoised = X_target_denoised.to(self.device)
+                logger.info('Loaded denoised target image.')
+                return
+            except Exception as e:
+                logger.warning(f'Failed to load cached denoised target image: {e}')
+                cache_path.unlink()
+
         # Denoise the input image if a denoiser is available
         if self.manager.denoiser is not None:
             logger.info('Denoising input image.')
             with torch.no_grad():
                 X_denoised = denoise_image(
                     manager=self.manager,
-                    X=X_target[0],
+                    X=self.X_target.permute(2, 0, 1),
                     n_tiles=self.args.denoiser_n_tiles,
                     overlap=self.args.denoiser_tile_overlap,
                     batch_size=self.args.denoiser_batch_size
@@ -368,34 +432,68 @@ class Refiner:
             gc.collect()
         else:
             assert self.args.initial_pred_from != 'denoised', 'No denoiser set, so can\'t predict using a denoised image'
-            X_denoised = None
+            return None
 
         # Resize target image to the working image size for inverse rendering
         wis = (self.args.working_image_size, self.args.working_image_size)
-        X_target = F.interpolate(X_target, size=wis, mode='bilinear', align_corners=False)[0]
-        X_target = X_target.permute(1, 2, 0)  # HWC
-        if X_denoised is not None:
-            X_denoised = F.interpolate(X_denoised, size=wis, mode='bilinear', align_corners=False)[0]
-            X_denoised = X_denoised.permute(1, 2, 0)
-
-        # Calculate the rcf features on the target image for comparison
-        if self.rcf is not None:
-            model_input = X_target[None, ...].permute(0, 3, 1, 2)
-            self.rcf_feats_og = self.rcf(model_input, apply_sigmoid=False)
+        X_denoised = F.interpolate(X_denoised, size=wis, mode='bilinear', align_corners=False)[0]
+        X_denoised = X_denoised.permute(1, 2, 0)
 
         # Multiscale
         if self.args.multiscale:
-            X_target = to_multiscale(X_target, self.blur)
-            if X_denoised is not None:
-                X_denoised = to_multiscale(X_denoised, self.blur)
-            resolution_pyramid = [t.shape[0] for t in X_target[::-1]]
-            logger.info(f'Resolution pyramid has {len(X_target)} levels: '
-                        f'{", ".join([str(res) for res in resolution_pyramid])}')
+            X_denoised = to_multiscale(X_denoised, self.blur)
 
-        self.X_target = X_target
+        # Save the denoised target
+        torch.save(X_denoised, cache_path)
         self.X_target_denoised = X_denoised
+
+    def _init_Y_target(self):
+        """
+        Load the parameters if loading from the dataset.
+        """
+        if self.args.image_path is None:
+            metas, X_target, Y_target = self.manager.ds.load_item(self.args.ds_idx)
+            Y_target = {
+                k: torch.from_numpy(v).to(torch.float32).to(self.device)
+                for k, v in Y_target.items()
+            }
+            r_params_target = metas['rendering_parameters']
+
+        else:
+            Y_target = None
+            r_params_target = None
+
         self.Y_target = Y_target
         self.r_params_target = r_params_target
+
+    def _init_symmetry_idx(self):
+        """
+        Load the symmetry index from the manager's crystal.
+        """
+        sym_crystal = Crystal(
+            lattice_unit_cell=self.crystal.lattice_unit_cell,
+            lattice_angles=self.crystal.lattice_angles,
+            miller_indices=self.manager.ds.dataset_args.miller_indices,
+            point_group_symbol=self.crystal.point_group_symbol,
+        )
+        self.symmetry_idx = sym_crystal.symmetry_idx
+
+    def _init_conj_switch_probs(self):
+        """
+        Initialise the conjugate switching probabilities.
+        """
+        miller_idxs = self.crystal.all_miller_indices
+        pairs = []
+        for i, mi1 in enumerate(miller_idxs):
+            for j, mi2 in enumerate(miller_idxs):
+                if i >= j or mi1[-1] == 0 or mi2[-1] == 0 or torch.any(mi1[:2] != mi2[:2]):
+                    continue
+                pairs.append((i, j))
+        self.conj_pairs = pairs
+        self.conj_switch_probs = nn.Parameter(
+            self.args.conj_switch_prob_init * torch.ones(len(pairs)),
+            requires_grad=True
+        )
 
     def _init_optimiser(self):
         """
@@ -463,7 +561,7 @@ class Refiner:
             'losses/perceptual',
             'losses/latent',
             'losses/rcf',
-            'losses/overshoot',
+            'losses/anchors',
         ]
         return metric_keys
 
@@ -471,16 +569,64 @@ class Refiner:
         """Initialise the tensorboard writer."""
         self.tb_logger = SummaryWriter(self.save_dir, flush_secs=5)
 
+    def set_anchors(self, anchors: Dict[ProjectedVertexKey, Tensor]):
+        """
+        Set the manually-defined anchor points.
+        """
+        self.anchors = anchors
+
+    def set_initial_scene(self, scene: Scene):
+        """
+        Set the initial scene data directly.
+        """
+        logger.info('Setting initial scene parameters.')
+        self.scene = scene
+        self.scene.crystal.to('cpu')
+        self.scene_params = mi.traverse(self.scene.mi_scene)
+        self.crystal = self.scene.crystal
+        self._init_optimiser()  # Reinitialise the optimiser to include the new parameters
+
+        # Render the scene to get the initial X_pred
+        X_pred = scene.render(seed=get_seed())
+        X_pred = cv2.cvtColor(X_pred, cv2.COLOR_RGB2BGR)  # todo: do we need this?
+        X_pred = X_pred.astype(np.float32) / 255.
+        X_pred = torch.from_numpy(X_pred).permute(2, 0, 1).to(self.device)
+        X_pred = F.interpolate(
+            X_pred[None, ...],
+            size=self.args.working_image_size,
+            mode='bilinear',
+            align_corners=False
+        )[0].permute(1, 2, 0)
+        if self.args.multiscale:
+            X_pred = to_multiscale(X_pred, self.blur)
+        self.X_pred = X_pred
+
     @torch.no_grad()
     def make_initial_prediction(self):
         """
         Make initial prediction
         """
-        logger.info('Predicting parameters.')
         save_dir = self.save_dir / 'initial_prediction'
         save_dir.mkdir(parents=True, exist_ok=True)
+        cache_dir = self.save_dir / 'cache'
+        scene_path = cache_dir / 'scene.yml'
+        X_pred_path = cache_dir / 'X_pred.pt'
+        if scene_path.exists():
+            try:
+                self.X_pred = torch.load(X_pred_path)
+                self.scene = Scene.from_yml(scene_path)
+                self.scene.crystal.to('cpu')
+                self.scene_params = mi.traverse(self.scene.mi_scene)
+                self.crystal = self.scene.crystal
+                logger.info('Loaded initial prediction from cache.')
+                return
+            except Exception as e:
+                logger.warning(f'Failed to load cached initial prediction: {e}')
+                scene_path.unlink()
+                X_pred_path.unlink()
 
         # Use either the original or denoised image as input
+        logger.info('Predicting parameters.')
         if self.args.initial_pred_from == 'original':
             X_target = self.X_target
         elif self.args.initial_pred_from == 'denoised':
@@ -578,28 +724,9 @@ class Refiner:
         # Move the crystal on to the CPU - faster mesh building
         scene.crystal.to('cpu')
 
-        # Load the symmetry index from the manager's crystal
-        sym_crystal = Crystal(
-            lattice_unit_cell=scene.crystal.lattice_unit_cell,
-            lattice_angles=scene.crystal.lattice_angles,
-            miller_indices=self.manager.ds.dataset_args.miller_indices,
-            point_group_symbol=scene.crystal.point_group_symbol,
-        )
-        self.symmetry_idx = sym_crystal.symmetry_idx
-
-        # Initialise the conjugate switching probabilities
-        miller_idxs = scene.crystal.all_miller_indices
-        pairs = []
-        for i, mi1 in enumerate(miller_idxs):
-            for j, mi2 in enumerate(miller_idxs):
-                if i >= j or mi1[-1] == 0 or mi2[-1] == 0 or torch.any(mi1[:2] != mi2[:2]):
-                    continue
-                pairs.append((i, j))
-        self.conj_pairs = pairs
-        self.conj_switch_probs = nn.Parameter(
-            self.args.conj_switch_prob_init * torch.ones(len(pairs)),
-            requires_grad=True
-        )
+        # Save variables
+        scene.to_yml(scene_path)
+        torch.save(X_pred, X_pred_path)
 
         # Set variables
         self.X_pred = X_pred
@@ -612,7 +739,7 @@ class Refiner:
         Train the parameters for a number of steps.
         """
         self._init_tb_logger()
-        if self.X_pred is None:
+        if self.scene is None:
             self.make_initial_prediction()
 
         logger.info(f'Training for {self.args.max_steps} steps.')
@@ -836,6 +963,7 @@ class Refiner:
         if not is_patch:
             patch_loss, patch_stats = self._patches_loss()
         switch_loss, switch_stats = self._switch_loss()
+        anchors_loss, anchors_stats = self._anchors_loss()
 
         # Combine losses
         loss = l1_loss * self.args.w_img_l1 \
@@ -847,7 +975,8 @@ class Refiner:
                + symmetry_loss * self.args.w_symmetry \
                + z_pos_loss * self.args.w_z_pos \
                + rxy_loss * self.args.w_rotation_xy \
-               + switch_loss * self.args.w_switch_probs
+               + switch_loss * self.args.w_switch_probs \
+               + anchors_loss * self.args.w_anchors
 
         if not is_patch:
             loss = loss * self.args.w_fullsize + patch_loss * self.args.w_patches
@@ -856,7 +985,7 @@ class Refiner:
         stats = {
             'losses/total': loss.item(),
             **l1_stats, **l2_stats, **percept_stats, **latent_stats, **rcf_stats, **overshoot_stats, **symmetry_stats,
-            **z_pos_stats, **rxy_stats, **switch_stats
+            **z_pos_stats, **rxy_stats, **switch_stats, **anchors_stats
         }
         if not is_patch:
             stats.update(patch_stats)
@@ -1188,6 +1317,43 @@ class Refiner:
             (1 - self.conj_switch_probs)**2
         ).mean()
         stats['losses/switch'] = loss.item()
+
+        return loss, stats
+
+    def _anchors_loss(self):
+        """
+        Calculate the loss for manual constraints.
+        """
+        loss = torch.tensor(0., device=self.device)
+        stats = {}
+        if len(self.anchors) == 0:
+            return loss, stats
+
+        # Project the vertices
+        self.projector.project(generate_image=False)
+
+        # Calculate the loss for each anchor
+        losses = []
+        for vertex_key, anchor_coords in self.anchors.items():
+            # Vertex is visible, so calculate the distance between the vertex and the target anchor location
+            if vertex_key in self.projector.projected_vertex_keys:
+                idx = self.projector.projected_vertex_keys.index(vertex_key)
+                v_coords = self.projector.projected_vertex_coords[idx]
+                l = (v_coords - anchor_coords).norm()
+                losses.append(l)
+
+            # Vertex is not visible, so set the distance to 0
+            else:
+                l = torch.tensor(0., device=self.device)
+
+            # Log the loss per-anchor
+            v_id, face_idx = vertex_key
+            stats[f'anchors/{v_id}_{face_idx}'] = l.item()
+
+        # Take the mean of the visible anchors
+        if len(losses) > 0:
+            loss = torch.stack(losses).mean()
+        stats[f'losses/anchors'] = loss.item()
 
         return loss, stats
 

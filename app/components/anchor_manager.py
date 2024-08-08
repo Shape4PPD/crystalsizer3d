@@ -288,6 +288,7 @@ class AnchorManager:
             return
         self.mode = ANCHOR_MODE_HIGHLIGHT
         self.anchors[self.selected_vertex] = pos
+        self.anchor_visibility[self.selected_vertex] = True
         self.anchor_point = None
         self.selected_vertex = None
         self.selected_anchor = None
@@ -312,6 +313,7 @@ class AnchorManager:
         """
         key = list(self.anchors)[idx]
         del self.anchors[key]
+        del self.anchor_visibility[key]
         self._reset_to_highlight_mode()
         self.update_overlay()
         wx.PostEvent(self.app_frame, AnchorsChangedEvent())
@@ -321,6 +323,7 @@ class AnchorManager:
         Remove all anchors.
         """
         self.anchors.clear()
+        self.anchor_visibility.clear()
         self._reset_to_highlight_mode()
         self.update_overlay()
         wx.PostEvent(self.app_frame, AnchorsChangedEvent())

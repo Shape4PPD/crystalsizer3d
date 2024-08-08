@@ -83,6 +83,7 @@ w_rotation_xy: 1.0
 w_patches: 0.0
 w_fullsize: 1.0
 w_switch_probs: 1.0e-01
+w_anchors: 1.0
 
 # Loss decay factors
 l_decay_l1: 0.5
