@@ -20,9 +20,9 @@ spp: 32
 integrator_max_depth: 16
 integrator_rr_depth: 4
 
-# Superresolution settings
-superres_n_patches: 0
-superres_patch_size: 40
+# Patch settings
+n_patches: 0
+patch_size: 40
 
 # Optimisation settings
 seed: null

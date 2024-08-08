@@ -16,7 +16,6 @@ import torch
 import torch.nn.functional as F
 import yaml
 from PIL import Image
-from diffusers import LDMSuperResolutionPipeline
 from matplotlib import pyplot as plt
 from matplotlib.axes import Axes
 from matplotlib.figure import Figure
@@ -235,17 +234,6 @@ class Refiner:
         blur = torch.jit.script(blur)
         blur.to(self.device)
         self.blur = blur
-
-    def _init_superres_model(self):
-        """
-        Initialise the super-resolution model.
-        """
-        if self.args.superres_n_patches <= 0:
-            self.superres_model = None
-            return
-        model = LDMSuperResolutionPipeline.from_pretrained(self.args.superres_model)
-        model = model.to(self.device)
-        self.superres_model = model
 
     def _init_perceptual_model(self):
         """
@@ -1224,10 +1212,10 @@ class Refiner:
         """
         loss = torch.tensor(0., device=self.device)
         stats = {}
-        if self.args.superres_n_patches is None or self.args.superres_n_patches <= 0:
+        if self.args.n_patches is None or self.args.n_patches <= 0:
             return loss, stats
 
-        ps = self.args.superres_patch_size
+        ps = self.args.patch_size
         ps2 = ps // 2
         wis = self.args.working_image_size
 
@@ -1247,7 +1235,7 @@ class Refiner:
         patch_centres = []
         X_pred_patches = []
         X_target_patches = []
-        for i in range(self.args.superres_n_patches):
+        for i in range(self.args.n_patches):
             with torch.no_grad():
                 # Calculate the sum of errors for each possible patch position
                 l1_patch_sums = F.conv2d(l1[None, ...], torch.ones(1, 1, ps, ps).to(self.device), padding=ps2)[0]
@@ -1281,8 +1269,8 @@ class Refiner:
         upscaled_patches = F.interpolate(patches, size=wis, mode='bilinear', align_corners=False)
 
         # Calculate losses for each pair of patches
-        self.X_pred = upscaled_patches[:self.args.superres_n_patches].permute(0, 2, 3, 1)
-        self.X_target_aug = upscaled_patches[self.args.superres_n_patches:].permute(0, 2, 3, 1)
+        self.X_pred = upscaled_patches[:self.args.n_patches].permute(0, 2, 3, 1)
+        self.X_target_aug = upscaled_patches[self.args.n_patches:].permute(0, 2, 3, 1)
         patch_loss, patch_stats = self._calculate_losses(is_patch=True)
         patch_stats = {f'patches/{k.replace("losses/", "")}/{i}': v for k, v in patch_stats.items() if 'losses/' in k}
         stats.update(patch_stats)
@@ -1415,7 +1403,7 @@ class Refiner:
 
             # Show the patches
             if i == 2 and self.patch_centres is not None:
-                ps = self.args.superres_patch_size
+                ps = self.args.patch_size
                 ax.scatter(*np.array(self.patch_centres).T, c='r', s=25, marker='x')
                 for x, y in self.patch_centres:
                     ax.scatter(x, y, c='r', s=25, marker='x')
@@ -1516,13 +1504,13 @@ class Refiner:
         X_target = np.clip(to_numpy(X_target), 0, 1)
         X_pred = self.X_pred if isinstance(self.X_pred, Tensor) else self.X_pred[0]
         X_pred = np.clip(to_numpy(X_pred), 0, 1)
-        ps = self.args.superres_patch_size
+        ps = self.args.patch_size
 
         n_cols = 4
-        if self.args.superres_n_patches > 0 and self.args.plot_n_patches == -1:
-            n_rows = self.args.superres_n_patches
+        if self.args.n_patches > 0 and self.args.plot_n_patches == -1:
+            n_rows = self.args.n_patches
         else:
-            n_rows = min(self.args.superres_n_patches, self.args.plot_n_patches)
+            n_rows = min(self.args.n_patches, self.args.plot_n_patches)
 
         fig, axes = plt.subplots(n_rows, n_cols, figsize=(n_cols * 2.3, n_rows * 2.4), squeeze=False)
         for i in range(n_rows):

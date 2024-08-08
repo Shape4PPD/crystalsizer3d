@@ -32,10 +32,9 @@ class RefinerArgs(BaseArgs):
             integrator_max_depth: int = 16,
             integrator_rr_depth: int = 5,
 
-            # Superresolution settings
-            superres_model: str = 'CompVis/ldm-super-resolution-4x-openimages',
-            superres_n_patches: int = 0,
-            superres_patch_size: int = 64,
+            # Patches settings
+            n_patches: int = 0,
+            patch_size: int = 64,
 
             # Optimisation settings
             seed: Optional[int] = None,
@@ -181,10 +180,9 @@ class RefinerArgs(BaseArgs):
         self.integrator_max_depth = integrator_max_depth
         self.integrator_rr_depth = integrator_rr_depth
 
-        # Superresolution settings
-        self.superres_model = superres_model
-        self.superres_n_patches = superres_n_patches
-        self.superres_patch_size = superres_patch_size
+        # Patches settings
+        self.n_patches = n_patches
+        self.patch_size = patch_size
 
         # Optimisation settings
         self.seed = seed
@@ -337,13 +335,11 @@ class RefinerArgs(BaseArgs):
         group.add_argument('--integrator-rr-depth', type=int, default=4,
                            help='Russian roulette depth.')
 
-        # Superresolution settings
-        group.add_argument('--superres-model', type=str, default='CompVis/ldm-super-resolution-4x-openimages',
-                           help='Superresolution model to use.')
-        group.add_argument('--superres-n-patches', type=int, default=0,
-                           help='Number of patches to use for superresolution.')
-        group.add_argument('--superres-patch-size', type=int, default=40,
-                           help='Size of the patches to use for superresolution.')
+        # Patch settings
+        group.add_argument('--n-patches', type=int, default=0,
+                           help='Number of zooming-in patches to use.')
+        group.add_argument('--patch-size', type=int, default=40,
+                           help='Size of the patches to use for zooming-in.')
 
         # Optimisation settings
         group.add_argument('--seed', type=int,
