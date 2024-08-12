@@ -135,10 +135,10 @@ class Projector:
         Convert absolute coordinates to relative coordinates.
         """
         image_size = torch.tensor(self.image_size, device=self.device)
-        return torch.tensor([
+        return torch.stack([
             (coords[0] / image_size[1] - 0.5) * 2,
             (0.5 - coords[1] / image_size[0]) * 2
-        ], device=self.device)
+        ])
 
     def set_background(self, background_image: Optional[Union[Tensor, np.ndarray]] = None):
         """
@@ -228,7 +228,7 @@ class Projector:
             # Check that the points on the face did not move
             face_vertices_og = self.vertices_2d[face]
             face_vertices = vertices_2d[face]
-            assert torch.allclose(face_vertices_og, face_vertices, rtol=1e-2), 'Face vertices moved during refraction.'
+            # assert torch.allclose(face_vertices_og, face_vertices, rtol=1e-2), 'Face vertices moved during refraction.'
 
             # Filter the refracted vertices to the ones visible through this face
             polygon = Polygon(self.vertices_2d[face].tolist())

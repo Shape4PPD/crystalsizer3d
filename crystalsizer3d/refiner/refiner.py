@@ -133,6 +133,9 @@ class Refiner:
         elif name == 'metric_keys':
             self.metric_keys = self._init_metrics()
             return self.metric_keys
+        elif name == 'tb_logger':
+            self._init_tb_logger()
+            return self.tb_logger
         elif name == 'device':
             self.device = self.manager.device
             return self.device
@@ -195,7 +198,7 @@ class Refiner:
 
     def _init_manager(self):
         """
-        Initialise the predictor and denoiser networks.
+        Initialise the manager used for making initial predictions and denoising the input images.
         """
         manager = Manager.load(
             model_path=self.args.predictor_model_path,
@@ -207,13 +210,6 @@ class Refiner:
             },
             save_dir=self.save_dir
         )
-        manager.enable_eval()  # Should be on as default, but set it just in case
-
-        # Load the denoiser model if set
-        if self.args.denoiser_model_path is not None:
-            assert self.args.denoiser_model_path.exists(), f'Denoiser model path does not exist: {self.args.denoiser_model_path}.'
-            manager.load_network(self.args.denoiser_model_path, 'denoiser')
-
         self.manager = manager
 
     def _init_projector(self):
@@ -239,7 +235,9 @@ class Refiner:
         """
         Initialise the perceptual loss network.
         """
-        if self.args.perceptual_model is None:
+        if self.args.use_perceptual_model:
+            assert self.args.perceptual_model is not None, 'Perceptual model not set.'
+        else:
             self.perceptual_model = None
             return
 
@@ -276,10 +274,11 @@ class Refiner:
         """
         Initialise the latent encoder network.
         """
-        if self.args.latents_model is None:
+        if self.args.use_latents_model:
+            assert self.args.latents_model == 'MAGVIT2', 'Only MAGVIT2 encoder is supported.'
+        else:
             self.latents_model = None
             return
-        assert self.args.latents_model == 'MAGVIT2', 'Only MAGVIT2 encoder is supported.'
 
         # Monkey-patch the LPIPS class so that it loads from a sensible place
         from taming.modules.losses.lpips import LPIPS
@@ -310,10 +309,13 @@ class Refiner:
         """
         Initialise the Richer Convolutional Features model for edge detection.
         """
-        if self.args.rcf_model_path is None:
-            self.rcf = None
-            return None
         rcf_path = self.args.rcf_model_path
+        if self.args.use_rcf_model:
+            assert rcf_path.exists(), 'RCF model path does not exist!'
+        else:
+            self.rcf = None
+            return
+
         rcf = RCF()
         checkpoint = torch.load(rcf_path)
         rcf.load_state_dict(checkpoint, strict=False)
@@ -399,6 +401,11 @@ class Refiner:
             except Exception as e:
                 logger.warning(f'Failed to load cached denoised target image: {e}')
                 cache_path.unlink()
+
+        # Load the denoiser model if set
+        if self.args.denoiser_model_path is not None:
+            assert self.args.denoiser_model_path.exists(), f'Denoiser model path does not exist: {self.args.denoiser_model_path}.'
+            self.manager.load_network(self.args.denoiser_model_path, 'denoiser')
 
         # Denoise the input image if a denoiser is available
         if self.manager.denoiser is not None:
@@ -563,31 +570,42 @@ class Refiner:
         """
         self.anchors = anchors
 
+    @torch.no_grad()
     def set_initial_scene(self, scene: Scene):
         """
         Set the initial scene data directly.
         """
         logger.info('Setting initial scene parameters.')
-        self.scene = scene
-        self.scene.crystal.to('cpu')
-        self.scene_params = mi.traverse(self.scene.mi_scene)
-        self.crystal = self.scene.crystal
-        self._init_optimiser()  # Reinitialise the optimiser to include the new parameters
 
-        # Render the scene to get the initial X_pred
-        X_pred = scene.render(seed=get_seed())
-        X_pred = cv2.cvtColor(X_pred, cv2.COLOR_RGB2BGR)  # todo: do we need this?
-        X_pred = X_pred.astype(np.float32) / 255.
-        X_pred = torch.from_numpy(X_pred).permute(2, 0, 1).to(self.device)
-        X_pred = F.interpolate(
-            X_pred[None, ...],
-            size=self.args.working_image_size,
-            mode='bilinear',
-            align_corners=False
-        )[0].permute(1, 2, 0)
-        if self.args.multiscale:
-            X_pred = to_multiscale(X_pred, self.blur)
-        self.X_pred = X_pred
+        with torch.no_grad():
+            if self.crystal is None:
+                self.crystal = scene.crystal
+            else:
+                self.crystal.copy_parameters_from(scene.crystal)
+                scene.crystal = self.crystal
+            self.crystal.to('cpu')
+            scene.light_radiance = nn.Parameter(init_tensor(scene.light_radiance, device=self.device), requires_grad=True)
+            scene.build_mi_scene()
+            self.scene = scene
+            self.scene_params = mi.traverse(scene.mi_scene)
+
+            # Render the scene to get the initial X_pred
+            X_pred = scene.render(seed=get_seed())
+            X_pred = cv2.cvtColor(X_pred, cv2.COLOR_RGB2BGR)
+            X_pred = X_pred.astype(np.float32) / 255.
+            X_pred = torch.from_numpy(X_pred).permute(2, 0, 1).to(self.device)
+            X_pred = F.interpolate(
+                X_pred[None, ...],
+                size=self.args.working_image_size,
+                mode='bilinear',
+                align_corners=False
+            )[0].permute(1, 2, 0)
+            if self.args.multiscale:
+                X_pred = to_multiscale(X_pred, self.blur)
+            self.X_pred = X_pred
+
+        # Reinitialise the optimiser to include the new parameters
+        self._init_optimiser()
 
     @torch.no_grad()
     def make_initial_prediction(self):
@@ -726,19 +744,19 @@ class Refiner:
         """
         Train the parameters for a number of steps.
         """
-        self._init_tb_logger()
         if self.scene is None:
             self.make_initial_prediction()
-
-        logger.info(f'Training for {self.args.max_steps} steps.')
-        logger.info(f'Logs path: {self.save_dir}.')
         n_steps = self.args.max_steps
+        start_step = self.step
+        end_step = start_step + n_steps
+        logger.info(f'Training for {n_steps} steps. Starting at step {start_step}.')
+        logger.info(f'Logs path: {self.save_dir}.')
         log_freq = self.args.log_every_n_steps
         running_loss = 0.
         running_metrics = {k: 0. for k in self.metric_keys}
         running_tps = 0
 
-        for step in range(n_steps):
+        for step in range(start_step, end_step):
             start_time = time.time()
             self.step = step
             loss, stats = self._train_step()
@@ -895,10 +913,13 @@ class Refiner:
         radiance = radiance.to(device).clone()
 
         # Render new image
-        X_pred = self._render_image(v, f, eta, roughness, radiance, seed=self.step)
-        X_pred = torch.clip(X_pred, 0, 1)
-        if self.args.multiscale:
-            X_pred = to_multiscale(X_pred, self.blur)
+        if self.args.use_inverse_rendering:
+            X_pred = self._render_image(v, f, eta, roughness, radiance, seed=self.step)
+            X_pred = torch.clip(X_pred, 0, 1)
+            if self.args.multiscale:
+                X_pred = to_multiscale(X_pred, self.blur)
+        else:
+            X_pred = torch.zeros_like(self.X_target)
         self.X_pred = X_pred
 
         # Use denoised target if available
@@ -937,10 +958,14 @@ class Refiner:
         """
         Calculate losses.
         """
-        l1_loss, l1_stats = self._img_loss(X_target=self.X_target_aug, X_pred=self.X_pred, loss_type='l1',
-                                           decay_factor=self.args.l_decay_l1)
-        l2_loss, l2_stats = self._img_loss(X_target=self.X_target_aug, X_pred=self.X_pred, loss_type='l2',
-                                           decay_factor=self.args.l_decay_l2)
+        if self.args.use_inverse_rendering:
+            l1_loss, l1_stats = self._img_loss(X_target=self.X_target_aug, X_pred=self.X_pred, loss_type='l1',
+                                               decay_factor=self.args.l_decay_l1)
+            l2_loss, l2_stats = self._img_loss(X_target=self.X_target_aug, X_pred=self.X_pred, loss_type='l2',
+                                               decay_factor=self.args.l_decay_l2)
+        else:
+            l1_loss, l1_stats = torch.tensor(0.), {}
+            l2_loss, l2_stats = torch.tensor(0.), {}
         percept_loss, percept_stats = self._perceptual_loss()
         latent_loss, latent_stats = self._latents_loss()
         rcf_loss, rcf_stats = self._rcf_loss(is_patch=is_patch)
@@ -1042,7 +1067,7 @@ class Refiner:
         """
         loss = torch.tensor(0., device=self.device)
         stats = {}
-        if self.perceptual_model is None:
+        if not self.args.use_perceptual_model or self.perceptual_model is None:
             return loss, stats
 
         # If multiscale, just use the first (largest) image
@@ -1078,7 +1103,7 @@ class Refiner:
         """
         loss = torch.tensor(0., device=self.device)
         stats = {}
-        if self.latents_model is None:
+        if not self.args.use_latents_model or self.latents_model is None:
             return loss, stats
 
         # If multiscale, just use the first (largest) image
@@ -1125,7 +1150,7 @@ class Refiner:
         """
         loss = torch.tensor(0., device=self.device)
         stats = {}
-        if self.rcf is None:
+        if not self.args.use_rcf_model or self.rcf is not None:
             return loss, stats
 
         # If multiscale, just use the first (largest) image

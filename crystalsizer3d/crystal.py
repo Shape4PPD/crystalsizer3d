@@ -206,6 +206,21 @@ class Crystal(nn.Module):
         crystal.to(self.origin.device)
         return crystal
 
+    def copy_parameters_from(self, crystal: 'Crystal'):
+        """
+        Copy the parameters from another crystal.
+        """
+        with torch.no_grad():
+            self.scale.data = crystal.scale.data
+            self.distances.data = crystal.distances.data
+            self.origin.data = crystal.origin.data
+            self.rotation.data = crystal.rotation.data
+            self.material_roughness.data = crystal.material_roughness.data
+            self.material_ior.data = crystal.material_ior.data
+            self.bumpmap.data = crystal.bumpmap.data
+            self.bumpmap_texture = crystal.bumpmap_texture
+            self.use_bumpmap = crystal.use_bumpmap
+
     def to_dict(self, include_buffers: bool = True) -> dict:
         """
         Convert the crystal to a dictionary.

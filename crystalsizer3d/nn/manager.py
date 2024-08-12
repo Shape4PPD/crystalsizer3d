@@ -157,19 +157,19 @@ class Manager:
             self.crystal_renderer = self._init_crystal_renderer()
             return self.crystal_renderer
         elif name == 'predictor':
-            self.predictor = self._init_predictor()
+            self._init_predictor()
             return self.predictor
         elif name == 'generator':
-            self.generator = self._init_generator()
+            self._init_generator()
             return self.generator
         elif name == 'denoiser':
-            self.denoiser = self._init_denoiser()
+            self._init_denoiser()
             return self.denoiser
         elif name == 'discriminator':
-            self.discriminator = self._init_discriminator()
+            self._init_discriminator()
             return self.discriminator
         elif name == 'transcoder':
-            self.transcoder = self._init_transcoder()
+            self._init_transcoder()
             return self.transcoder
         elif name == 'rcf':
             self.rcf = self._init_rcf()
@@ -179,11 +179,17 @@ class Manager:
                       'optimiser_d', 'lr_scheduler_d',
                       'optimiser_dn', 'lr_scheduler_dn',
                       'optimiser_t', 'lr_scheduler_t']:
-            (self.optimiser_p, self.lr_scheduler_p,
-             self.optimiser_g, self.lr_scheduler_g,
-             self.optimiser_d, self.lr_scheduler_d,
-             self.optimiser_dn, self.lr_scheduler_dn,
-             self.optimiser_t, self.lr_scheduler_t) = self._init_optimisers()
+            options = {
+                'p': 'predictor',
+                'g': 'generator',
+                'd': 'discriminator',
+                'dn': 'denoiser',
+                't': 'transcoder'
+            }
+            key = name.split('_')[-1]
+            optimiser, lr_scheduler = self._init_optimiser(options[key])
+            setattr(self, f'optimiser_{key}', optimiser)
+            setattr(self, f'lr_scheduler_{key}', lr_scheduler)
             return getattr(self, name)
         elif name == 'metric_keys':
             self.metric_keys = self._init_metrics()
@@ -249,7 +255,6 @@ class Manager:
         """
         Load a network from another checkpoint.
         """
-        logger.info(f'Loading {network_name} network parameters from {model_path}.')
         with open(model_path, 'r') as f:
             data = json.load(f)
 
@@ -274,7 +279,6 @@ class Manager:
 
         # Load the network and optimiser parameter states
         state_path = checkpoint.get_state_path()
-        logger.info(f'Loading network parameters from {state_path}.')
         state = torch.load(state_path, map_location=self.device)
 
         # Load predictor network parameters and optimiser state
@@ -282,12 +286,13 @@ class Manager:
             self.denoiser_args = checkpoint.denoiser_args
             if self.denoiser is None:
                 self.dataset_args.train_denoiser = True
-                self.denoiser = self._init_denoiser()
+                self._init_denoiser(load_from_checkpoint=False)
+            logger.info(f'Loading denoiser network parameters from {state_path}.')
             self.denoiser.load_state_dict(self._fix_state(state['net_dn_state_dict']), strict=False)
             if self.optimiser_dn is None:
-                _, _, _, _, _, _, self.optimiser_dn, self.lr_scheduler_dn, _, _ = self._init_optimisers()
+                self._init_optimiser('denoiser')
+            if self.optimiser_dn is not None:
                 self.optimiser_dn.load_state_dict(state['optimiser_dn_state_dict'])
-
         else:
             raise ValueError(f'Unsupported network: {network_name}')
 
@@ -339,12 +344,13 @@ class Manager:
 
         return loaders['train'], loaders['test']
 
-    def _init_predictor(self) -> Optional[BaseNet]:
+    def _init_predictor(self):
         """
         Build the predictor network using the given parameters.
         """
         if not self.dataset_args.train_predictor:
-            return None
+            self.predictor = None
+            return
 
         net_args = self.net_args
         output_shape = self.parameters_shape if not self.transcoder_args.use_transcoder \
@@ -426,30 +432,34 @@ class Manager:
             logger.debug(f'----------- Predictor Network --------------\n\n{predictor}\n\n')
         if self.device.type == 'cuda' and torch.cuda.device_count() > 1:
             predictor = nn.DataParallel(predictor)
-        predictor.to(self.device)
+        self.predictor = predictor.to(self.device)
 
-        # Load the network parameters - useful when predictor was destroyed to clear memory
-        if hasattr(self, 'checkpoint'):
+        # Load the network parameters
+        loaded = False
+        if self.runtime_args.resume and len(self.checkpoint.snapshots) > 0:
             state_path = self.checkpoint.get_state_path()
-            logger.info(f'Loading network parameters from {state_path}.')
             state = torch.load(state_path, map_location=self.device)
-            if self.net_args.base_net in ['vitnet', 'timm'] and self.optimiser_args.freeze_pretrained:
-                predictor.classifier.load_state_dict(self._fix_state(state['net_p_state_dict']), strict=False)
-            else:
-                predictor.load_state_dict(self._fix_state(state['net_p_state_dict']), strict=False)
-            self.optimiser_p.load_state_dict(state['optimiser_p_state_dict'])
+            if 'net_p_state_dict' in state:
+                logger.info(f'Loading predictor network parameters from {state_path}.')
+                if self.net_args.base_net in ['vitnet', 'timm'] and self.optimiser_args.freeze_pretrained:
+                    self.predictor.classifier.load_state_dict(self._fix_state(state['net_p_state_dict']), strict=False)
+                else:
+                    self.predictor.load_state_dict(self._fix_state(state['net_p_state_dict']), strict=False)
+                self.optimiser_p.load_state_dict(state['optimiser_p_state_dict'])
+                loaded = True
+        if not loaded and self.runtime_args.resume_only:
+            raise ValueError('Predictor network parameters not found in the checkpoint.')
 
         # Instantiate an exponential moving average tracker for the predictor loss
         self.p_loss_ema = EMA()
 
-        return predictor
-
-    def _init_generator(self) -> Optional[GeneratorNet]:
+    def _init_generator(self):
         """
         Initialise the generator network.
         """
         if not self.dataset_args.train_generator and not self.dataset_args.train_combined:
-            return None
+            self.generator = None
+            return
 
         if hasattr(self.predictor, 'img_mean'):
             img_mean = self.predictor.img_mean.mean().item()
@@ -511,7 +521,21 @@ class Manager:
             logger.debug(f'----------- Generator Network --------------\n\n{generator}\n\n')
         if self.device.type == 'cuda' and torch.cuda.device_count() > 1:
             generator = nn.DataParallel(generator)
-        generator.to(self.device)
+        self.generator = generator.to(self.device)
+
+        # Load the network parameters
+        loaded = False
+        if self.runtime_args.resume and len(self.checkpoint.snapshots) > 0:
+            state_path = self.checkpoint.get_state_path()
+            state = torch.load(state_path, map_location=self.device)
+            if 'net_g_state_dict' in state:
+                logger.info(f'Loading generator network parameters from {state_path}.')
+                self.generator.load_state_dict(self._fix_state(state['net_g_state_dict']), strict=False)
+                if not self.dataset_args.train_combined:
+                    self.optimiser_g.load_state_dict(state['optimiser_g_state_dict'])
+                loaded = True
+        if not loaded and self.runtime_args.resume_only:
+            raise ValueError('Generator network parameters not found in the checkpoint.')
 
         # Instantiate an exponential moving average tracker for the generator loss
         self.g_loss_ema = EMA()
@@ -519,14 +543,13 @@ class Manager:
         # Instantiate the RCF model here too
         self.rcf = self._init_rcf()
 
-        return generator
-
-    def _init_discriminator(self) -> Optional[Discriminator]:
+    def _init_discriminator(self):
         """
         Initialise the discriminator network.
         """
         if not self.dataset_args.train_generator or not self.generator_args.use_discriminator:
-            return None
+            self.discriminator = None
+            return
 
         discriminator = Discriminator(
             input_shape=self.image_shape,
@@ -543,19 +566,31 @@ class Manager:
             logger.debug(f'----------- Discriminator Network --------------\n\n{discriminator}\n\n')
         if self.device.type == 'cuda' and torch.cuda.device_count() > 1:
             discriminator = nn.DataParallel(discriminator)
-        discriminator.to(self.device)
+        self.discriminator = discriminator.to(self.device)
+
+        # Load the network parameters
+        loaded = False
+        if self.runtime_args.resume and len(self.checkpoint.snapshots) > 0:
+            state_path = self.checkpoint.get_state_path()
+            state = torch.load(state_path, map_location=self.device)
+            if 'net_d_state_dict' in state:
+                logger.info(f'Loading discriminator network parameters from {state_path}.')
+                self.discriminator.load_state_dict(self._fix_state(state['net_d_state_dict']), strict=False)
+                self.optimiser_d.load_state_dict(state['optimiser_d_state_dict'])
+                loaded = True
+        if not loaded and self.runtime_args.resume_only:
+            raise ValueError('Discriminator network parameters not found in the checkpoint.')
 
         # Instantiate an exponential moving average tracker for the discriminator loss
         self.d_loss_ema = EMA()
 
-        return discriminator
-
-    def _init_denoiser(self) -> Optional[VQModel]:
+    def _init_denoiser(self, load_from_checkpoint: bool = True):
         """
         Initialise the denoiser network.
         """
         if not self.dataset_args.train_denoiser:
-            return None
+            self.denoiser = None
+            return
         assert self.denoiser_args.dn_model_name == 'MAGVIT2', 'Only MAGVIT2 denoiser is supported.'
 
         # Monkey-patch the LPIPS class so it loads from a sensible place
@@ -583,16 +618,29 @@ class Manager:
             logger.debug(f'----------- Denoiser Network --------------\n\n{denoiser}\n\n')
         if self.device.type == 'cuda' and torch.cuda.device_count() > 1:
             denoiser = nn.DataParallel(denoiser)
-        denoiser.to(self.device)
+        self.denoiser = denoiser.to(self.device)
 
-        return denoiser
+        # Load the network parameters
+        if load_from_checkpoint:
+            loaded = False
+            if self.runtime_args.resume and len(self.checkpoint.snapshots) > 0:
+                state_path = self.checkpoint.get_state_path()
+                state = torch.load(state_path, map_location=self.device)
+                if 'net_dn_state_dict' in state:
+                    logger.info(f'Loading denoiser network parameters from {state_path}.')
+                    self.denoiser.load_state_dict(self._fix_state(state['net_dn_state_dict']), strict=False)
+                    self.optimiser_dn.load_state_dict(state['optimiser_dn_state_dict'])
+                    loaded = True
+            if not loaded and self.runtime_args.resume_only:
+                raise ValueError('Denoiser network parameters not found in the checkpoint.')
 
-    def _init_transcoder(self) -> Optional[Transcoder]:
+    def _init_transcoder(self):
         """
         Initialise the transcoder network.
         """
         if not self.transcoder_args.use_transcoder:
-            return None
+            self.transcoder = None
+            return
 
         shared_args = dict(
             latent_size=self.transcoder_args.tc_latent_size,
@@ -633,13 +681,24 @@ class Manager:
             logger.debug(f'----------- Transcoder Network --------------\n\n{transcoder}\n\n')
         if self.device.type == 'cuda' and torch.cuda.device_count() > 1:
             transcoder = nn.DataParallel(transcoder)
-        transcoder.to(self.device)
+        self.transcoder = transcoder.to(self.device)
+
+        # Load the network parameters
+        loaded = False
+        if self.runtime_args.resume and len(self.checkpoint.snapshots) > 0:
+            state_path = self.checkpoint.get_state_path()
+            state = torch.load(state_path, map_location=self.device)
+            if 'net_t_state_dict' in state:
+                logger.info(f'Loading transcoder network parameters from {state_path}.')
+                self.transcoder.load_state_dict(self._fix_state(state['net_t_state_dict']), strict=False)
+                self.optimiser_t.load_state_dict(state['optimiser_t_state_dict'])
+                loaded = True
+        if not loaded and self.runtime_args.resume_only:
+            raise ValueError('Transcoder network parameters not found in the checkpoint.')
 
         # Instantiate exponential moving average trackers for the reconstruction and regularisation losses
         self.tc_rec_loss_ema = EMA()
         self.tc_kl_loss_ema = EMA()
-
-        return transcoder
 
     def _init_rcf(self) -> Optional[RCF]:
         """
@@ -666,19 +725,16 @@ class Manager:
 
         return rcf
 
-    def _init_optimisers(self) -> Tuple[
-        Optimizer, Scheduler,
-        Optional[Optimizer], Optional[Scheduler],
-        Optional[Optimizer], Optional[Scheduler],
-        Optional[Optimizer], Optional[Scheduler],
-        Optional[Optimizer], Optional[Scheduler]
-    ]:
+    def _init_optimiser(self, which: str) -> Tuple[Optional[Optimizer], Optional[Scheduler]]:
         """
-        Set up the optimisers and learning rate schedulers.
+        Set up an optimiser and learning rate scheduler.
         """
-        logger.info('Initialising optimisers.')
+        logger.info(f'Initialising optimiser and learning rate scheduler for {which}.')
         ra = self.runtime_args
         oa = self.optimiser_args
+        optimiser = None
+        lr_scheduler = None
+        n_epochs = None
 
         shared_opt_args = dict(
             opt=oa.algorithm,
@@ -696,7 +752,6 @@ class Manager:
             n_epochs_adj = math.ceil(ra.n_epochs * (ra.n_epochs - oa.lr_cooldown_epochs) / n_epochs_with_cycles)
         else:
             n_epochs_adj = ra.n_epochs
-        n_epochs_p = n_epochs_g = n_epochs_d = n_epochs_dn = n_epochs_t = 0
 
         shared_lrs_args = dict(
             sched=oa.lr_scheduler,
@@ -715,95 +770,57 @@ class Manager:
             k_decay=oa.lr_k_decay
         )
 
-        # Create the optimiser and scheduler for the predictor network
-        if self.dataset_args.train_predictor:
+        # Predictor network
+        if which == 'predictor' and self.dataset_args.train_predictor:
             # For the pretrained models, separate the feature extractor from the classifier
             if self.net_args.base_net in ['vitnet', 'timm']:
-                params_p = [
-                    {'params': self.predictor.classifier.parameters(), 'lr': oa.lr_init},
-                ]
+                params = [{'params': self.predictor.classifier.parameters(), 'lr': oa.lr_init}, ]
                 if not oa.freeze_pretrained:
-                    params_p.append(
-                        {'params': self.predictor.model.parameters(), 'lr': oa.lr_pretrained_init}
-                    )
+                    params.append({'params': self.predictor.model.parameters(), 'lr': oa.lr_pretrained_init})
             else:
-                params_p = [
-                    {'params': self.predictor.parameters(), 'lr': oa.lr_init},
-                ]
+                params = [{'params': self.predictor.parameters(), 'lr': oa.lr_init},]
             if self.transcoder_args.use_transcoder and self.transcoder_args.tc_trained_by in ['predictor', 'both']:
-                params_p.append(
-                    {'params': self.transcoder.parameters(), 'lr': oa.lr_init}
-                )
-
+                params.append({'params': self.transcoder.parameters(), 'lr': oa.lr_init})
             if self.dataset_args.train_combined:
-                params_p.append(
-                    {'params': self.generator.parameters(), 'lr': oa.lr_generator_init}
-                )
+                params.append({'params': self.generator.parameters(), 'lr': oa.lr_generator_init})
+            optimiser = create_optimizer_v2(model_or_params=params, **shared_opt_args)
+            lr_scheduler, n_epochs = create_scheduler_v2(optimizer=optimiser, **shared_lrs_args)
 
-            optimiser_p = create_optimizer_v2(model_or_params=params_p, **shared_opt_args)
-            lr_scheduler_p, n_epochs_p = create_scheduler_v2(optimizer=optimiser_p, **shared_lrs_args)
-        else:
-            optimiser_p = None
-            lr_scheduler_p = None
-
-        # Create a separate optimiser for the generator network
-        if self.dataset_args.train_generator and not self.dataset_args.train_combined:
-            params_g = [
-                {'params': self.generator.parameters(), 'lr': oa.lr_generator_init}
-            ]
+        # Generator network
+        elif which == 'generator' and self.dataset_args.train_generator and not self.dataset_args.train_combined:
+            params = [{'params': self.generator.parameters(), 'lr': oa.lr_generator_init}]
             if self.transcoder_args.use_transcoder and self.transcoder_args.tc_trained_by in ['generator', 'both']:
-                params_g.append(
-                    {'params': self.transcoder.parameters(), 'lr': oa.lr_generator_init}
-                )
-            optimiser_g = create_optimizer_v2(model_or_params=params_g, **shared_opt_args)
-            lr_scheduler_g, n_epochs_g = create_scheduler_v2(optimizer=optimiser_g, **shared_lrs_args)
-        else:
-            optimiser_g = None
-            lr_scheduler_g = None
+                params.append({'params': self.transcoder.parameters(), 'lr': oa.lr_generator_init})
+            optimiser = create_optimizer_v2(model_or_params=params, **shared_opt_args)
+            lr_scheduler, n_epochs = create_scheduler_v2(optimizer=optimiser, **shared_lrs_args)
 
-        # Create a separate optimiser for the discriminator network
-        if self.dataset_args.train_generator and self.generator_args.use_discriminator:
-            params_d = [
-                {'params': self.discriminator.parameters(), 'lr': oa.lr_discriminator_init}
-            ]
-            optimiser_d = create_optimizer_v2(model_or_params=params_d, **shared_opt_args)
-            lr_scheduler_d, n_epochs_d = create_scheduler_v2(optimizer=optimiser_d, **shared_lrs_args)
-        else:
-            optimiser_d = None
-            lr_scheduler_d = None
+        # Discriminator network
+        elif which == 'discriminator' and self.dataset_args.train_generator and self.generator_args.use_discriminator:
+            params = [{'params': self.discriminator.parameters(), 'lr': oa.lr_discriminator_init}]
+            optimiser = create_optimizer_v2(model_or_params=params, **shared_opt_args)
+            lr_scheduler, n_epochs = create_scheduler_v2(optimizer=optimiser, **shared_lrs_args)
 
-        # Create a separate optimiser for the denoiser network
-        if self.dataset_args.train_denoiser:
-            params_dn = [
+        # Denoiser network
+        elif which =='denoiser' and self.dataset_args.train_denoiser:
+            params = [
                 {'params': self.denoiser.encoder.parameters(), 'lr': oa.lr_denoiser_init},
                 {'params': self.denoiser.decoder.parameters(), 'lr': oa.lr_denoiser_init},
                 {'params': self.denoiser.quantize.parameters(), 'lr': oa.lr_denoiser_init},
             ]
-            optimiser_dn = create_optimizer_v2(model_or_params=params_dn, betas=(0.5, 0.9), **shared_opt_args)
-            lr_scheduler_dn, n_epochs_dn = create_scheduler_v2(optimizer=optimiser_dn, **shared_lrs_args)
-        else:
-            optimiser_dn = None
-            lr_scheduler_dn = None
+            optimiser = create_optimizer_v2(model_or_params=params, betas=(0.5, 0.9), **shared_opt_args)
+            lr_scheduler, n_epochs = create_scheduler_v2(optimizer=optimiser, **shared_lrs_args)
 
-        # Create a separate optimiser for the VAE transcoder network (if used)
-        if self.transcoder_args.use_transcoder and self.transcoder_args.tc_trained_by == 'self':
-            params_t = [
-                {'params': self.transcoder.parameters(), 'lr': oa.lr_transcoder_init}
-            ]
-            optimiser_t = create_optimizer_v2(model_or_params=params_t, **shared_opt_args)
-            lr_scheduler_t, n_epochs_t = create_scheduler_v2(optimizer=optimiser_t, **shared_lrs_args)
-        else:
-            optimiser_t = None
-            lr_scheduler_t = None
+        # Transcoder network
+        elif which =='transcoder' and self.transcoder_args.use_transcoder and self.transcoder_args.tc_trained_by == 'self':
+            params = [{'params': self.transcoder.parameters(), 'lr': oa.lr_transcoder_init}]
+            optimiser = create_optimizer_v2(model_or_params=params, **shared_opt_args)
+            lr_scheduler, n_epochs = create_scheduler_v2(optimizer=optimiser, **shared_lrs_args)
 
-        # Check that the total number of epochs is the same for all optimisers
-        n_epochs = np.array([n_epochs_p, n_epochs_g, n_epochs_d, n_epochs_dn, n_epochs_t])
-        if np.all(n_epochs == 0):
-            raise RuntimeError('No optimisers were created!')
-        assert np.allclose(n_epochs[n_epochs > 0] / ra.n_epochs, 1, atol=0.05)
+        # Check that the total number of epochs is as expected
+        if n_epochs is not None:
+            assert np.allclose(n_epochs / ra.n_epochs, 1, atol=0.05)
 
-        return optimiser_p, lr_scheduler_p, optimiser_g, lr_scheduler_g, optimiser_d, lr_scheduler_d, \
-            optimiser_dn, lr_scheduler_dn, optimiser_t, lr_scheduler_t
+        return optimiser, lr_scheduler
 
     def _init_metrics(self) -> List[str]:
         """
@@ -883,49 +900,9 @@ class Manager:
             runtime_args=self.runtime_args,
             save_dir=save_dir
         )
-
-        # Load the network and optimiser parameter states
-        if self.runtime_args.resume and len(checkpoint.snapshots) > 0:
-            state_path = checkpoint.get_state_path()
-            logger.info(f'Loading network parameters from {state_path}.')
-            state = torch.load(state_path, map_location=self.device)
-
-            # Load predictor network parameters and optimiser state
-            if self.dataset_args.train_predictor:
-                if self.net_args.base_net in ['vitnet', 'timm'] and self.optimiser_args.freeze_pretrained:
-                    # Load only the classifier parameters if the pretrained part is frozen
-                    self.predictor.classifier.load_state_dict(self._fix_state(state['net_p_state_dict']), strict=False)
-                else:
-                    self.predictor.load_state_dict(self._fix_state(state['net_p_state_dict']), strict=False)
-                self.optimiser_p.load_state_dict(state['optimiser_p_state_dict'])
-
-            # Load generator network parameters and optimiser state
-            if self.dataset_args.train_generator:
-                self.generator.load_state_dict(self._fix_state(state['net_g_state_dict']), strict=False)
-                if not self.dataset_args.train_combined:
-                    self.optimiser_g.load_state_dict(state['optimiser_g_state_dict'])
-
-            # Load discriminator network parameters and optimiser state
-            if self.dataset_args.train_generator and self.generator_args.use_discriminator:
-                self.discriminator.load_state_dict(self._fix_state(state['net_d_state_dict']), strict=False)
-                self.optimiser_d.load_state_dict(state['optimiser_d_state_dict'])
-
-            # Load denoiser network parameters and optimiser state
-            if self.dataset_args.train_denoiser:
-                self.denoiser.load_state_dict(self._fix_state(state['net_dn_state_dict']), strict=False)
-                self.optimiser_dn.load_state_dict(state['optimiser_dn_state_dict'])
-
-            # Load transcoder network parameters
-            if self.transcoder_args.use_transcoder:
-                self.transcoder.load_state_dict(self._fix_state(state['net_t_state_dict']), strict=False)
-                if self.optimiser_t is not None and 'optimiser_t_state_dict' in state:
-                    self.optimiser_t.load_state_dict(state['optimiser_t_state_dict'])
-
-            # Put all networks in evaluation mode
-            self.enable_eval()
-
-        elif self.runtime_args.resume_only:
-            raise RuntimeError('Could not resume!')
+        if self.runtime_args.resume and self.runtime_args.resume_only:
+            assert len(checkpoint.snapshots) > 0, 'No snapshots found in the checkpoint.'
+            assert checkpoint.get_state_path().exists(), 'No state file found in the checkpoint.'
 
         return checkpoint
 
@@ -982,16 +959,11 @@ class Manager:
         """
         Put the networks in evaluation mode.
         """
-        if self.dataset_args.train_predictor:
-            self.predictor.eval()
-        if self.generator is not None:
-            self.generator.eval()
-            if self.discriminator is not None:
-                self.discriminator.eval()
-        if self.denoiser is not None:
-            self.denoiser.eval()
-        if self.transcoder is not None:
-            self.transcoder.eval()
+        for net_name in ['predictor', 'generator', 'discriminator', 'denoiser', 'transcoder']:
+            if net_name in self.__dict__:
+                net = getattr(self, net_name)
+                if net is not None:
+                    net.eval()
 
     def enable_train(self):
         """
