@@ -23,6 +23,13 @@ class VertexNotFoundInImageError(Exception):
     pass
 
 
+def _in_bounds(pos: Tensor):
+    """
+    Check if the position is within the image bounds.
+    """
+    return (-1 <= pos[0] <= 1) and (-1 <= pos[1] <= 1)
+
+
 class AnchorManager:
     mode: str = ANCHOR_MODE_HIGHLIGHT
     highlighted_vertex: Optional[ProjectedVertexKey] = None
@@ -34,15 +41,15 @@ class AnchorManager:
 
     HIGHLIGHT_COLOUR_FACING = (255, 0, 0)
     HIGHLIGHT_COLOUR_BACK = (0, 0, 255)
-    HIGHLIGHT_OUTLINE_ALPHA = 150
-    HIGHLIGHT_FILL_ALPHA = 32
-    HIGHLIGHT_CIRCLE_RADIUS = 10
+    HIGHLIGHT_OUTLINE_ALPHA = 180
+    HIGHLIGHT_FILL_ALPHA = 50
+    HIGHLIGHT_CIRCLE_RADIUS = 12
 
     SELECTION_COLOUR_FACING = (255, 0, 0)
     SELECTION_COLOUR_BACK = (0, 0, 255)
     SELECTION_OUTLINE_ALPHA = 255
     SELECTION_FILL_ALPHA = 128
-    SELECTION_CIRCLE_RADIUS = 7
+    SELECTION_CIRCLE_RADIUS = 9
 
     ANCHOR_LINE_COLOUR = (0, 0, 0)
     ANCHOR_CROSS_COLOUR = (0, 0, 0)
@@ -50,12 +57,12 @@ class AnchorManager:
 
     ACTIVE_COLOUR_FACING = (180, 0, 0)
     ACTIVE_COLOUR_BACK = (0, 0, 180)
-    ACTIVE_OUTLINE_ALPHA = 150
-    ACTIVE_FILL_ALPHA = 16
-    ACTIVE_CIRCLE_RADIUS = 5
-    ACTIVE_LINE_COLOUR = (50, 50, 50)
-    ACTIVE_CROSS_COLOUR = (50, 50, 50)
-    ACTIVE_CROSS_SIZE = 5
+    ACTIVE_OUTLINE_ALPHA = 180
+    ACTIVE_FILL_ALPHA = 25
+    ACTIVE_CIRCLE_RADIUS = 7
+    ACTIVE_LINE_COLOUR = (40, 40, 40)
+    ACTIVE_CROSS_COLOUR = (40, 40, 40)
+    ACTIVE_CROSS_SIZE = 7
 
     def __init__(self, image_panel: 'ImagePanel'):
         self.image_panel = image_panel
@@ -78,19 +85,15 @@ class AnchorManager:
         self.app_frame.Bind(EVT_REFINING_STARTED, self.on_refining_started)
         self.app_frame.Bind(EVT_REFINING_ENDED, self.on_refining_ended)
 
-    def _get_relative_position(self, event: wx.MouseEvent) -> Tensor:
+    def _get_mouse_position(self) -> Tensor:
         """
         Get the relative position of the mouse within the image.
         """
-        x, y = event.GetPosition()
+        point = wx.GetMousePosition()
+        point -= self.image_containers['image'].GetScreenPosition()
+        x, y = point
 
-        # Adjust for scroll position
-        window = self.image_windows['image']
-        scroll_x, scroll_y = window.GetViewStart()
-        x += scroll_x * window.GetScrollPixelsPerUnit()[0]
-        y += scroll_y * window.GetScrollPixelsPerUnit()[1]
-
-        # Calculate the offsets if the image is centred
+        # Calculate the offsets between wireframe and container
         container_width, container_height = self.image_containers['image'].GetSize()
         img_width, img_height = self.bitmaps['wireframe'].GetSize()
         offset_x = (container_width - img_width) / 2
@@ -207,8 +210,8 @@ class AnchorManager:
 
         # Fix the anchor point in the image or de-select the selected vertex.
         elif self.mode == ANCHOR_MODE_ANCHOR:
-            mouse_pos = self._get_relative_position(event)
-            mx, my = self._relative_to_image_coords(mouse_pos)
+            pos = self._get_mouse_position()
+            mx, my = self._relative_to_image_coords(pos)
             try:
                 vx, vy = self._get_vertex_image_coords(self.selected_vertex)
             except VertexNotFoundInImageError:
@@ -229,10 +232,10 @@ class AnchorManager:
         """
         if self.mode != ANCHOR_MODE_HIGHLIGHT or self.bitmaps['wireframe'] is None:
             return
-        pos = self._get_relative_position(event)
+        pos = self._get_mouse_position()
 
         # Check if the coordinates are within the image bounds
-        if not (-1 <= pos[0] <= 1 and -1 <= pos[1] <= 1):
+        if not _in_bounds(pos):
             self.on_mouse_leave(event)
             return
 
@@ -270,8 +273,8 @@ class AnchorManager:
         """
         if self.mode != ANCHOR_MODE_ANCHOR or self.selected_vertex is None:
             return
-        pos = self._get_relative_position(event)
-        if not (-1 <= pos[0] <= 1 and -1 <= pos[1] <= 1):
+        pos = self._get_mouse_position()
+        if not _in_bounds(pos):
             self.on_mouse_leave(event)
             return
         self.anchor_point = pos
@@ -283,8 +286,8 @@ class AnchorManager:
         """
         if self.mode != ANCHOR_MODE_ANCHOR or self.selected_vertex is None:
             return
-        pos = self._get_relative_position(event)
-        if not (-1 <= pos[0] <= 1 and -1 <= pos[1] <= 1):
+        pos = self._get_mouse_position()
+        if not _in_bounds(pos):
             return
         self.mode = ANCHOR_MODE_HIGHLIGHT
         self.anchors[self.selected_vertex] = pos
@@ -354,12 +357,10 @@ class AnchorManager:
             if not was_visible:
                 wx.PostEvent(self.app_frame, AnchorsChangedEvent())
             ax, ay = self._relative_to_image_coords(anchor_pos)
-            draw_line = math.sqrt((ax - vx)**2 + (ay - vy)**2) > self.HIGHLIGHT_CIRCLE_RADIUS * 1.2
 
             # Draw a line from the vertex to the anchor point
-            if draw_line:
-                mem_dc.SetPen(wx.Pen((*self.ACTIVE_LINE_COLOUR, 150), 2, wx.PENSTYLE_SHORT_DASH))
-                mem_dc.DrawLine(vx, vy, ax, ay)
+            mem_dc.SetPen(wx.Pen((*self.ACTIVE_LINE_COLOUR, 150), 2, wx.PENSTYLE_SHORT_DASH))
+            mem_dc.DrawLine(vx, vy, ax, ay)
 
             # Draw a circle at the location of the vertex
             colour = self.ACTIVE_COLOUR_FACING if vertex_key[1] == 'facing' else self.ACTIVE_COLOUR_BACK
@@ -368,11 +369,10 @@ class AnchorManager:
             mem_dc.DrawCircle(vx, vy, self.ACTIVE_CIRCLE_RADIUS)
 
             # Draw a cross at the location of the anchor point
-            if draw_line:
-                mem_dc.SetPen(wx.Pen((*self.ACTIVE_CROSS_COLOUR, 150), 1))
-                d = self.ANCHOR_CROSS_SIZE / math.sqrt(2)
-                mem_dc.DrawLine(ax - d, ay - d, ax + d, ay + d)
-                mem_dc.DrawLine(ax + d, ay - d, ax - d, ay + d)
+            mem_dc.SetPen(wx.Pen((*self.ACTIVE_CROSS_COLOUR, 150), 1))
+            d = self.ANCHOR_CROSS_SIZE / math.sqrt(2)
+            mem_dc.DrawLine(ax - d, ay - d, ax + d, ay + d)
+            mem_dc.DrawLine(ax + d, ay - d, ax - d, ay + d)
 
         # Draw a cross at the selected anchor position with a connecting line from the selected vertex
         if self.selected_anchor is not None or self.selected_vertex is not None and self.anchor_point is not None:
@@ -385,16 +385,18 @@ class AnchorManager:
             try:
                 vx, vy = self._get_vertex_image_coords(vertex_key)
                 ax, ay = self._relative_to_image_coords(anchor_point)
+                draw_line = math.sqrt((ax - vx)**2 + (ay - vy)**2) > self.HIGHLIGHT_CIRCLE_RADIUS * 1.2
 
-                # Connecting line
-                mem_dc.SetPen(wx.Pen((*self.ANCHOR_LINE_COLOUR, 255), 2, wx.PENSTYLE_SHORT_DASH))
-                mem_dc.DrawLine(vx, vy, ax, ay)
+                if draw_line:
+                    # Connecting line
+                    mem_dc.SetPen(wx.Pen((*self.ANCHOR_LINE_COLOUR, 255), 2, wx.PENSTYLE_SHORT_DASH))
+                    mem_dc.DrawLine(vx, vy, ax, ay)
 
-                # Cross at the anchor point
-                mem_dc.SetPen(wx.Pen((*self.ANCHOR_CROSS_COLOUR, 255), 2))
-                d = self.ANCHOR_CROSS_SIZE / math.sqrt(2)
-                mem_dc.DrawLine(ax - d, ay - d, ax + d, ay + d)
-                mem_dc.DrawLine(ax + d, ay - d, ax - d, ay + d)
+                    # Cross at the anchor point
+                    mem_dc.SetPen(wx.Pen((*self.ANCHOR_CROSS_COLOUR, 255), 2))
+                    d = self.ANCHOR_CROSS_SIZE / math.sqrt(2)
+                    mem_dc.DrawLine(ax - d, ay - d, ax + d, ay + d)
+                    mem_dc.DrawLine(ax + d, ay - d, ax - d, ay + d)
 
             # If the vertex is not found, reset to highlight mode unless we were trying to show a saved anchor
             except VertexNotFoundInImageError:

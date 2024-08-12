@@ -41,6 +41,7 @@ class ImagePanel(AppPanel):
     }
     active_window: str = 'image'
     scene_image_needs_loading: bool = False
+    images_updating: bool = False
     is_zooming: bool = False
     STEP_ZOOM = 0.1
 
@@ -81,6 +82,7 @@ class ImagePanel(AppPanel):
         }
         for k, lbl in labels.items():
             window = wx.ScrolledWindow(self.image_tabs)
+            window.SetBackgroundStyle(wx.BG_STYLE_PAINT)
             window.SetScrollRate(20, 20)
             window.AlwaysShowScrollbars(True, True)
             window.Bind(wx.EVT_MOUSEWHEEL, self.on_mouse_wheel)
@@ -198,6 +200,9 @@ class ImagePanel(AppPanel):
         """
         if self.images['image'] is None:
             return
+        if self.images_updating:
+            return
+        self.images_updating = True
         if not quiet:
             self._log('Updating images...')
         base_image = self.images['image']
@@ -225,46 +230,66 @@ class ImagePanel(AppPanel):
                 )
                 self.bitmaps['anchors'] = wx.Bitmap(scaled_anchors)
 
-        for i, k in enumerate(['image', 'denoised', 'scene']):
-            if k != self.active_window:
-                continue
-            if k == 'scene' and self.scene_image_needs_loading:
-                self.load_scene_image(update_images=False)
-                self.scene_image_needs_loading = False
-            image, container, window = self.images[k], self.image_containers[k], self.image_windows[k]
-            if image is None or not image.IsOk():
-                container.SetBitmap(wx.NullBitmap)
-                continue
+        # Load the scene image if it needs loading
+        if self.active_window == 'scene' and self.scene_image_needs_loading:
+            self.load_scene_image(update_images=False)
+            self.scene_image_needs_loading = False
 
-            # Scale the image to match the height of the main image
-            sf = base_image.GetHeight() / image.GetHeight()
-            scaled_image = image.Scale(
-                round(image.GetWidth() * sf * self.zoom),
-                round(image.GetHeight() * sf * self.zoom),
-                wx.IMAGE_QUALITY_HIGH
-            )
-            bitmap = wx.Bitmap(scaled_image)
-            self.bitmaps[k] = bitmap
+        # Get the active image and its containers
+        image = self.images[self.active_window]
+        window = self.image_windows[self.active_window]
+        container = self.image_containers[self.active_window]
+        window.Freeze()
 
-            # Draw the wireframe and anchors overlays on the image
-            if self.images['wireframe'] is not None:
-                image_width, image_height = bitmap.GetSize()
-                wireframe_x = (image_width - scaled_wireframe_width) // 2
-                wireframe_y = (image_height - scaled_wireframe_height) // 2
-                mem_dc = wx.MemoryDC()
-                mem_dc.SelectObject(bitmap)
-                mem_dc.DrawBitmap(self.bitmaps['wireframe'], wireframe_x, wireframe_y, True)
-                if self.images['anchors'] is not None:
-                    mem_dc.DrawBitmap(self.bitmaps['anchors'], wireframe_x, wireframe_y, True)
-                mem_dc.SelectObject(wx.NullBitmap)
+        # If there is no image to be shown, clear the container and return
+        if image is None or not image.IsOk():
+            container.SetBitmap(wx.NullBitmap)
+            self.Refresh()
+            if not quiet:
+                self._log('Images updated.')
+            return
 
-            container.SetBitmap(bitmap)
+        # Get the current scroll position
+        scroll_x, scroll_y = window.GetScrollPos(wx.HORIZONTAL), window.GetScrollPos(wx.VERTICAL)
+
+        # Scale the image to match the height of the main image
+        sf = base_image.GetHeight() / image.GetHeight()
+        scaled_image = image.Scale(
+            round(image.GetWidth() * sf * self.zoom),
+            round(image.GetHeight() * sf * self.zoom),
+            wx.IMAGE_QUALITY_HIGH
+        )
+        bitmap = wx.Bitmap(scaled_image)
+        self.bitmaps[self.active_window] = bitmap
+
+        # Draw the wireframe and anchors overlays on the image
+        if self.images['wireframe'] is not None:
+            image_width, image_height = bitmap.GetSize()
+            wireframe_x = (image_width - scaled_wireframe_width) // 2
+            wireframe_y = (image_height - scaled_wireframe_height) // 2
+            mem_dc = wx.MemoryDC()
+            mem_dc.SelectObject(bitmap)
+            mem_dc.DrawBitmap(self.bitmaps['wireframe'], wireframe_x, wireframe_y, True)
+            if self.images['anchors'] is not None:
+                mem_dc.DrawBitmap(self.bitmaps['anchors'], wireframe_x, wireframe_y, True)
+            mem_dc.SelectObject(wx.NullBitmap)
+
+        # Update the image container
+        container.SetBitmap(bitmap)
+
+        # Restore the scroll position
+        window.Layout()
+        if window.GetVirtualSize() != bitmap.GetSize():
             window.SetVirtualSize(bitmap.GetSize())
-            window.SetScrollbars(1, 1, bitmap.GetWidth(), bitmap.GetHeight())
+        window.SetScrollbars(1, 1, bitmap.GetWidth(), bitmap.GetHeight())
+        window.SetScrollRate(int(20 * self.zoom), int(20 * self.zoom))
+        window.Scroll(scroll_x, scroll_y)
+        window.Thaw()
+        window.Refresh()
 
-        self.Refresh()
         if not quiet:
             self._log('Images updated.')
+        self.images_updating = False
 
     def update_wireframe(self, event: wx.Event = None, update_images: bool = True):
         """
@@ -355,21 +380,23 @@ class ImagePanel(AppPanel):
         """
         Handle mouse wheel events.
         """
-        if event.ShiftDown():
-            # Horizontal scrolling
-            scroll_units = -event.GetWheelRotation() / event.GetWheelDelta()
-            window = event.GetEventObject()
-            window.Scroll(window.GetScrollPos(wx.HORIZONTAL) + scroll_units,
-                          window.GetScrollPos(wx.VERTICAL))
-        elif event.ControlDown():
-            # Zoom in/out
+        # Zoom in/out
+        if event.ControlDown():
             if event.GetWheelRotation() > 0:
                 self.on_zoom_in()
             else:
                 self.on_zoom_out()
+
+        # Scrolling
         else:
-            # Vertical scrolling (default behavior)
-            event.Skip()
+            scroll_units = -event.GetWheelRotation() / event.GetWheelDelta()
+            window = event.GetEventObject()
+            if event.ShiftDown():
+                window.Scroll(window.GetScrollPos(wx.HORIZONTAL) + scroll_units,
+                              window.GetScrollPos(wx.VERTICAL))
+            else:
+                window.Scroll(window.GetScrollPos(wx.HORIZONTAL),
+                              window.GetScrollPos(wx.VERTICAL) + scroll_units)
 
     def on_zoom_in(self, event: wx.Event = None):
         """
@@ -401,7 +428,13 @@ class ImagePanel(AppPanel):
         """
         self.lbl_zoom.SetLabel(label=f'Zoom: {self.zoom:.1f}x')
         self.update_images()
-        self.is_zooming = False
+        self.anchor_manager.update_overlay(update_images=True)
+
+        def after_zoom_finished():
+            self.is_zooming = False
+
+        # Delay setting the flag to debounce zoom events
+        wx.CallLater(100, after_zoom_finished)
 
     def on_click_image_L(self, event):
         self.clicL = event.GetPosition()

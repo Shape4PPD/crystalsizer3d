@@ -125,6 +125,9 @@ class AppFrame(wx.Frame):
         if self.projector is not None and self.crystal is not None:
             if id(self.projector.crystal) != id(self.crystal):
                 self.projector.crystal = self.crystal
+        if self.scene is not None and self.crystal is not None:
+            if id(self.scene.crystal) != id(self.crystal):
+                self.scene.crystal = self.crystal
 
         # Build the mesh if required
         build_mesh = event.build_mesh if hasattr(event, 'build_mesh') else True
@@ -149,6 +152,8 @@ class AppFrame(wx.Frame):
             refiner_scene = self.refiner.scene
             if refiner_scene is not None:
                 self.scene = refiner_scene
+        if self.crystal is not None and id(self.scene.crystal) != id(self.crystal):
+            self.scene.crystal = self.crystal
         if self.projector is not None:
             self.projector.zoom = orthographic_scale_factor(self.scene)
         event.Skip()

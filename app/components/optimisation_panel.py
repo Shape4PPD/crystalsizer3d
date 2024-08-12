@@ -182,9 +182,8 @@ class OptimisationPanel(AppPanel):
             return
         self.app_frame.crystal = self.refiner.crystal
         wx.PostEvent(self.app_frame, RefiningEndedEvent())
-        wx.PostEvent(self.app_frame, SceneChangedEvent())
         wx.PostEvent(self.app_frame, DenoisedImageChangedEvent())
-        wx.PostEvent(self.app_frame, SceneImageChangedEvent())
+        wx.PostEvent(self.app_frame, SceneImageChangedEvent(update_images=False))
         wx.CallAfter(wx.PostEvent, self.app_frame, CrystalChangedEvent(build_mesh=False))
         self._log('Initial prediction complete.')
 
@@ -196,8 +195,9 @@ class OptimisationPanel(AppPanel):
 
         # If the refiner is already training, send the stop signal
         if self.refiner.is_training():
-            self.refiner.stop_training()
             self.btn_refine.SetLabel('Stopping...')
+            self.Refresh()
+            self.refiner.stop_training()
             return
 
         # Check that there is a crystal to refine
@@ -211,8 +211,8 @@ class OptimisationPanel(AppPanel):
             if step % refining_update_ui_every_n_steps != 0:
                 return
             self.app_frame.crystal = self.refiner.crystal  # Update the crystal
-            wx.PostEvent(self.app_frame, SceneImageChangedEvent(update_images=False))
             wx.PostEvent(self.app_frame, CrystalChangedEvent(build_mesh=False))
+            wx.PostEvent(self.app_frame, SceneImageChangedEvent(update_images=False))
 
         # Refine the prediction
         def training_thread(stop_event: threading.Event):
@@ -230,8 +230,9 @@ class OptimisationPanel(AppPanel):
             self._log('Prediction refined.')
 
         # Start refining - run in a separate thread to keep the UI responsive
+        self.btn_refine.SetLabel('Stop refining')
+        self.Refresh()
         refining_update_ui_every_n_steps = int(self.config.Read('refining_update_ui_every_n_steps', '5'))
         wx.PostEvent(self.app_frame, RefiningStartedEvent())
-        self.btn_refine.SetLabel('Stop refining')
         thread = threading.Thread(target=training_thread, args=(stop_event,))
         start_thread(thread)
