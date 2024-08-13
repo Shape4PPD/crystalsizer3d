@@ -241,11 +241,13 @@ class Projector:
                     key = (vertex_id, face_idx)
                     pv_keys.append(key)
                     pv_coords.append(self._to_relative_coords(vertices_2d[v_idx]))
+        if len(pv_coords) > 0:
+            pv_coords = torch.stack(pv_coords)
 
         # Store the projected 2D vertices
         self.projected_vertices = pv
         self.projected_vertex_keys = pv_keys
-        self.projected_vertex_coords = torch.stack(pv_coords)
+        self.projected_vertex_coords = pv_coords
 
     def _generate_image(self) -> Tensor:
         """
@@ -319,7 +321,7 @@ class Projector:
         d = torch.abs(dot_product - distance * self.crystal.scale - offset_distance) / n_norm
 
         # Calculate the refraction angles and work out where it refracts on the plane
-        cos_theta_t = torch.sqrt(1 - sin2_theta_t)
+        cos_theta_t = torch.sqrt(torch.clamp(1 - sin2_theta_t, min=1e-3))
         theta_t = torch.arccos(cos_theta_t)
         theta_inc = torch.arccos(cos_theta_inc)
 

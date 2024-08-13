@@ -9,14 +9,14 @@ from app.components.anchor_manager import AnchorManager
 from app.components.app_panel import AppPanel
 from app.components.parallelism import start_thread, stop_event
 from app.components.utils import CrystalChangedEvent, DenoisedImageChangedEvent, EVT_ANCHORS_CHANGED, \
-    EVT_IMAGE_PATH_CHANGED, \
-    ImagePathChangedEvent, RefinerChangedEvent, RefiningEndedEvent, RefiningStartedEvent, SceneChangedEvent, \
-    SceneImageChangedEvent
+    EVT_IMAGE_PATH_CHANGED, EVT_REFINING_STARTED, ImagePathChangedEvent, RefinerChangedEvent, RefiningEndedEvent, \
+    RefiningStartedEvent, SceneImageChangedEvent
 from crystalsizer3d import logger
 
 
 class OptimisationPanel(AppPanel):
     selected_anchor_idx: Optional[int] = None
+    step: int = 0
 
     @property
     def anchor_manager(self) -> AnchorManager:
@@ -83,6 +83,7 @@ class OptimisationPanel(AppPanel):
         """
         self.app_frame.Bind(EVT_IMAGE_PATH_CHANGED, self.image_changed)
         self.app_frame.Bind(EVT_ANCHORS_CHANGED, self.anchors_changed)
+        self.app_frame.Bind(EVT_REFINING_STARTED, self.monitor_refining_updates)
 
     def image_changed(self, event: ImagePathChangedEvent):
         """
@@ -106,7 +107,8 @@ class OptimisationPanel(AppPanel):
             if not self.anchor_manager.anchor_visibility[vertex_key]:
                 self.anchors_list.SetItemTextColour(i, wx.Colour(150, 50, 50))
         self.btn_remove_anchor.Disable()
-        self.btn_remove_all_anchors.Enable(len(self.anchors) > 0)
+        is_training = 'refiner' in self.__dict__ and self.refiner.is_training()
+        self.btn_remove_all_anchors.Enable(len(self.anchors) > 0 and not is_training)
 
     def on_anchor_select(self, event: wx.Event):
         """
@@ -208,31 +210,59 @@ class OptimisationPanel(AppPanel):
             return
 
         def after_refine_step(step: int):
-            if step % refining_update_ui_every_n_steps != 0:
-                return
-            self.app_frame.crystal = self.refiner.crystal  # Update the crystal
-            wx.PostEvent(self.app_frame, CrystalChangedEvent(build_mesh=False))
-            wx.PostEvent(self.app_frame, SceneImageChangedEvent(update_images=False))
+            self.step = step
 
         # Refine the prediction
         def training_thread(stop_event: threading.Event):
             self._log('Refining prediction...')
+
+            # Set the anchors and initial scene
             self.refiner.set_anchors(self.anchors)
             self.refiner.set_initial_scene(self.scene)
+
+            # Run the training
+            wx.CallAfter(wx.PostEvent, self.app_frame, RefiningStartedEvent())
             self.refiner.train(after_refine_step)
             while self.refiner.is_training() and not stop_event.is_set():
                 time.sleep(1)
             self._log('Refining prediction complete.')
             self._log(f'Stopped at step = {self.refiner.step}')
-            after_refine_step(0)  # Force the events by setting step to 0
+
+            # Send events and update buttons
+            self.step = self.refiner.step
             wx.PostEvent(self.app_frame, RefiningEndedEvent())
             self.btn_refine.SetLabel('Refine')
+            self.btn_initial_prediction.Enable()
+            self.btn_remove_all_anchors.Enable(len(self.anchors) > 0)
             self._log('Prediction refined.')
 
-        # Start refining - run in a separate thread to keep the UI responsive
+        # Disable the other action buttons
+        self.btn_initial_prediction.Disable()
+        self.btn_remove_anchor.Disable()
+        self.btn_remove_all_anchors.Disable()
         self.btn_refine.SetLabel('Stop refining')
         self.Refresh()
-        refining_update_ui_every_n_steps = int(self.config.Read('refining_update_ui_every_n_steps', '5'))
-        wx.PostEvent(self.app_frame, RefiningStartedEvent())
+
+        # Start refining - run in a separate thread to keep the UI responsive
         thread = threading.Thread(target=training_thread, args=(stop_event,))
+        start_thread(thread)
+
+    def monitor_refining_updates(self, event: RefiningStartedEvent):
+        """
+        Monitor the refining updates.
+        """
+        event.Skip()
+        sleep_time = int(self.config.Read('refining_update_ui_every_n_seconds', '2'))
+
+        def update_ui_thread(stop_event: threading.Event):
+            while self.refiner.is_training() and not stop_event.is_set():
+                if self.app_frame.image_panel.images_updating:
+                    time.sleep(2)
+                    continue
+                self.app_frame.crystal = self.refiner.crystal  # Update the crystal
+                wx.PostEvent(self.app_frame, CrystalChangedEvent(build_mesh=False))
+                wx.PostEvent(self.app_frame, SceneImageChangedEvent(update_images=False))
+                time.sleep(sleep_time)
+
+        thread = threading.Thread(target=update_ui_thread, args=(stop_event,))
         start_thread(thread)

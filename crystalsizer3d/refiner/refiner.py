@@ -584,7 +584,8 @@ class Refiner:
                 self.crystal.copy_parameters_from(scene.crystal)
                 scene.crystal = self.crystal
             self.crystal.to('cpu')
-            scene.light_radiance = nn.Parameter(init_tensor(scene.light_radiance, device=self.device), requires_grad=True)
+            scene.light_radiance = nn.Parameter(init_tensor(scene.light_radiance, device=self.device),
+                                                requires_grad=True)
             scene.build_mi_scene()
             self.scene = scene
             self.scene_params = mi.traverse(scene.mi_scene)
@@ -828,6 +829,10 @@ class Refiner:
         if (self.step + 1) % self.args.acc_grad_steps == 0:
             if self.args.clip_grad_norm > 0:
                 nn.utils.clip_grad_norm_([self.crystal.distances], max_norm=self.args.clip_grad_norm)
+            for group in self.optimiser.param_groups:
+                for param in group['params']:
+                    if param.grad is not None:
+                        assert not is_bad(param.grad), 'Bad gradients detected!'
             self.optimiser.step()
             self.optimiser.zero_grad()
             self.crystal.clamp_parameters(rescale=False)
@@ -1209,7 +1214,7 @@ class Refiner:
             group_idxs = (self.symmetry_idx == i).nonzero().squeeze().tolist()
             if len(group_idxs) == 1:
                 continue
-            d_group = self.crystal.distances[group_idxs]
+            d_group = self.crystal.all_distances[group_idxs]
             l = ((d_group - d_group.mean())**2).mean()
             loss = loss + l
         stats = {'losses/symmetry': loss.item()}

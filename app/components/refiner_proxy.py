@@ -10,6 +10,7 @@ from torch import Tensor
 
 from app import REFINER_PROPERTY_TYPES
 from app.components.parallelism import start_process, start_thread, stop_event
+from crystalsizer3d import logger
 from crystalsizer3d.args.refiner_args import RefinerArgs
 from crystalsizer3d.crystal import Crystal
 from crystalsizer3d.refiner.refiner import Refiner
@@ -29,9 +30,15 @@ def sanitise(data: Any) -> Any:
     elif isinstance(data, dict):
         return {key: sanitise(value) for key, value in data.items()}
     elif isinstance(data, Crystal):
-        return data.to_dict(include_buffers=True)
+        return {
+            'type': 'Crystal',
+            'data': data.to_dict(include_buffers=True)
+        }
     elif isinstance(data, Scene):
-        return data.to_dict()
+        return {
+            'type': 'Scene',
+            'data': data.to_dict()
+        }
     else:
         return data
 
@@ -45,13 +52,13 @@ def unsanitise(data: Any) -> Any:
     elif isinstance(data, tuple):
         return tuple(unsanitise(item) for item in data)
     elif isinstance(data, dict):
-        try:
-            return Crystal.from_dict(data)
-        except Exception:
-            try:
-                return Scene.from_dict(data)
-            except Exception:
-                pass
+        if 'type' in data:
+            if data['type'] == 'Crystal':
+                return Crystal.from_dict(data['data'])
+            elif data['type'] == 'Scene':
+                return Scene.from_dict(data['data'])
+            else:
+                raise ValueError(f'Unrecognised type: {data["type"]}')
         return {key: unsanitise(value) for key, value in data.items()}
     else:
         return data
@@ -101,7 +108,13 @@ def refiner_worker(
 
             # Method call
             elif callable(attr):
-                result = attr(*unsanitise(args))
+                try:
+                    result = attr(*unsanitise(args))
+                except Exception as e:
+                    logger.error(f'Error calling method {attr_name}: {e}')
+                    raise e  # todo: remove
+                    response_queue.put({'type': 'error', 'message': str(e)})
+                    return
 
             else:
                 response_queue.put({'type': 'error', 'message': f'Invalid attribute/method: {attr_name}'})
@@ -298,10 +311,11 @@ class RefinerProxy:
             if response['type'] == 'error':
                 raise AttributeError(response['message'])
             data = response['data']
-            if name == 'crystal' and isinstance(data, dict):
-                data = Crystal.from_dict(data)
-            elif name == 'scene' and isinstance(data, dict):
-                data = Scene.from_dict(data)
+            if isinstance(data, dict):
+                if 'type' in data and data['type'] == 'Crystal':
+                    data = Crystal.from_dict(data['data'])
+                elif 'type' in data and data['type'] == 'Scene':
+                    data = Scene.from_dict(data['data'])
             return data
 
     def is_training(self) -> bool:
