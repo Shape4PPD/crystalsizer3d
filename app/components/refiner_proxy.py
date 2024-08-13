@@ -10,9 +10,58 @@ from torch import Tensor
 
 from app import REFINER_PROPERTY_TYPES
 from app.components.parallelism import start_process, start_thread, stop_event
+from crystalsizer3d import logger
 from crystalsizer3d.args.refiner_args import RefinerArgs
 from crystalsizer3d.crystal import Crystal
 from crystalsizer3d.refiner.refiner import Refiner
+from crystalsizer3d.scene_components.scene import Scene
+
+
+def sanitise(data: Any) -> Any:
+    """
+    Convert data to a serialisable format.
+    """
+    if isinstance(data, Tensor):
+        return data.detach().cpu()
+    elif isinstance(data, list):
+        return [sanitise(item) for item in data]
+    elif isinstance(data, tuple):
+        return tuple(sanitise(item) for item in data)
+    elif isinstance(data, dict):
+        return {key: sanitise(value) for key, value in data.items()}
+    elif isinstance(data, Crystal):
+        return {
+            'type': 'Crystal',
+            'data': data.to_dict(include_buffers=True)
+        }
+    elif isinstance(data, Scene):
+        return {
+            'type': 'Scene',
+            'data': data.to_dict()
+        }
+    else:
+        return data
+
+
+def unsanitise(data: Any) -> Any:
+    """
+    Convert data back from a serialisable format to the original format.
+    """
+    if isinstance(data, list):
+        return [unsanitise(item) for item in data]
+    elif isinstance(data, tuple):
+        return tuple(unsanitise(item) for item in data)
+    elif isinstance(data, dict):
+        if 'type' in data:
+            if data['type'] == 'Crystal':
+                return Crystal.from_dict(data['data'])
+            elif data['type'] == 'Scene':
+                return Scene.from_dict(data['data'])
+            else:
+                raise ValueError(f'Unrecognised type: {data["type"]}')
+        return {key: unsanitise(value) for key, value in data.items()}
+    else:
+        return data
 
 
 def refiner_worker(
@@ -48,20 +97,6 @@ def refiner_worker(
                 wrapped_args.append(arg)
         return wrapped_args
 
-    def sanitise(data: Any) -> Any:
-        if isinstance(data, Tensor):
-            return data.detach().cpu()
-        elif isinstance(data, list):
-            return [sanitise(item) for item in data]
-        elif isinstance(data, tuple):
-            return tuple(sanitise(item) for item in data)
-        elif isinstance(data, dict):
-            return {key: sanitise(value) for key, value in data.items()}
-        elif isinstance(data, Crystal):
-            return data.to_dict(include_buffers=True)
-        else:
-            return data
-
     def handle_attribute_request(channel: str, attr_name: str, args: list):
         response_queue = queues[channel]['response']
         if hasattr(refiner, attr_name):
@@ -73,7 +108,13 @@ def refiner_worker(
 
             # Method call
             elif callable(attr):
-                result = attr(*args)
+                try:
+                    result = attr(*unsanitise(args))
+                except Exception as e:
+                    logger.error(f'Error calling method {attr_name}: {e}')
+                    raise e  # todo: remove
+                    response_queue.put({'type': 'error', 'message': str(e)})
+                    return
 
             else:
                 response_queue.put({'type': 'error', 'message': f'Invalid attribute/method: {attr_name}'})
@@ -162,6 +203,7 @@ class RefinerProxy:
         self.args = args
         self.output_dir = output_dir
         self.active_methods = {}
+        self.return_values = {}
         self._callbacks = {}
         self._init_property_types_cache()
 
@@ -171,7 +213,9 @@ class RefinerProxy:
                 'request': mp.Queue(),
                 'response': mp.Queue()
             }
-            for channel in ['check_types', 'properties', 'callback_signals', 'make_initial_prediction', 'train']
+            for channel in ['check_types', 'properties', 'callback_signals',
+                            'set_anchors', 'set_initial_scene', 'make_initial_prediction',
+                            'train']
         }
 
         # Start the worker process
@@ -227,9 +271,10 @@ class RefinerProxy:
             response_queue = self.queues[name]['response']
 
             def wrapper(*args):
-                processed_args = [self._wrap_callables(name, arg) for arg in args]
+                processed_args = [self._wrap_callables_and_sanitise(name, arg) for arg in args]
                 request_queue.put((name, processed_args))
                 self.active_methods[name] = 1
+                self.return_values[name] = None
 
                 def monitor_queue():
                     while True:
@@ -241,13 +286,19 @@ class RefinerProxy:
 
                         # Stop monitoring and mark method as inactive
                         self.active_methods[name] = 0
-                        if response is None:
-                            return None
+                        self.return_values[name] = None
                         if response['type'] == 'result':
-                            return response['data']
+                            self.return_values[name] = response['data']
+
+                        # Stop monitoring
+                        return
 
                 thread = threading.Thread(target=monitor_queue)
                 start_thread(thread)
+                thread.join()
+                return_val = self.return_values[name]
+                self.return_values[name] = None
+                return return_val
 
             return wrapper
 
@@ -260,8 +311,11 @@ class RefinerProxy:
             if response['type'] == 'error':
                 raise AttributeError(response['message'])
             data = response['data']
-            if name == 'crystal' and isinstance(data, dict):
-                data = Crystal.from_dict(data)
+            if isinstance(data, dict):
+                if 'type' in data and data['type'] == 'Crystal':
+                    data = Crystal.from_dict(data['data'])
+                elif 'type' in data and data['type'] == 'Scene':
+                    data = Scene.from_dict(data['data'])
             return data
 
     def is_training(self) -> bool:
@@ -278,11 +332,12 @@ class RefinerProxy:
         """
         self.queues['callback_signals']['request'].put(('train', False))
 
-    def _wrap_callables(self, channel: str, arg: Any):
+    def _wrap_callables_and_sanitise(self, channel: str, arg: Any):
         """
-        Wrap a callable in a dictionary that can be serialised
+        Wrap a callable in a dictionary that can be serialised or sanitise the argument.
         """
         if callable(arg):
             self._callbacks[channel] = arg
             return {'type': 'callback', 'channel': channel}
-        return arg
+        else:
+            return sanitise(arg)

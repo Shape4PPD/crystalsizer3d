@@ -224,7 +224,7 @@ class Scene:
         """
         assert path.exists(), f'YAML file not found at {path}'
         with open(path, 'r') as f:
-            scene_args = yaml.load(f)
+            scene_args = yaml.load(f, Loader=yaml.FullLoader)
         return cls.from_dict(scene_args)
 
     @property

@@ -26,16 +26,21 @@ class RefinerArgs(BaseArgs):
             initial_pred_noise_min: float = 0.0,
             initial_pred_noise_max: float = 0.2,
 
+            # Refining settings
+            use_inverse_rendering: bool = True,
+            use_perceptual_model: bool = True,
+            use_latents_model: bool = True,
+            use_rcf_model: bool = True,
+
             # Rendering settings
             working_image_size: int = 200,
             spp: int = 64,
             integrator_max_depth: int = 16,
             integrator_rr_depth: int = 5,
 
-            # Superresolution settings
-            superres_model: str = 'CompVis/ldm-super-resolution-4x-openimages',
-            superres_n_patches: int = 0,
-            superres_patch_size: int = 64,
+            # Patches settings
+            n_patches: int = 0,
+            patch_size: int = 64,
 
             # Optimisation settings
             seed: Optional[int] = None,
@@ -96,6 +101,7 @@ class RefinerArgs(BaseArgs):
             w_patches: float = 1.0,
             w_fullsize: float = 1.0,
             w_switch_probs: float = 1.0,
+            w_anchors: float = 1.0,
 
             # Loss decay factors
             l_decay_l1: float = 1.0,
@@ -174,16 +180,21 @@ class RefinerArgs(BaseArgs):
         self.initial_pred_noise_min = initial_pred_noise_min
         self.initial_pred_noise_max = initial_pred_noise_max
 
+        # Refining settings
+        self.use_inverse_rendering = use_inverse_rendering
+        self.use_perceptual_model = use_inverse_rendering & use_perceptual_model
+        self.use_latents_model = use_inverse_rendering & use_latents_model
+        self.use_rcf_model = use_inverse_rendering & use_rcf_model
+
         # Rendering settings
         self.working_image_size = working_image_size
         self.spp = spp
         self.integrator_max_depth = integrator_max_depth
         self.integrator_rr_depth = integrator_rr_depth
 
-        # Superresolution settings
-        self.superres_model = superres_model
-        self.superres_n_patches = superres_n_patches
-        self.superres_patch_size = superres_patch_size
+        # Patches settings
+        self.n_patches = n_patches
+        self.patch_size = patch_size
 
         # Optimisation settings
         self.seed = seed
@@ -248,6 +259,7 @@ class RefinerArgs(BaseArgs):
         self.w_patches = w_patches
         self.w_fullsize = w_fullsize
         self.w_switch_probs = w_switch_probs
+        self.w_anchors = w_anchors
 
         # Loss decay factors
         self.l_decay_l1 = l_decay_l1
@@ -258,13 +270,10 @@ class RefinerArgs(BaseArgs):
 
         # Helper models
         self.perceptual_model = perceptual_model
-        # self.perceptual_model = None
         self.latents_model = latents_model
-        # self.latents_model = None
         self.mv2_config_path = mv2_config_path
         self.mv2_checkpoint_path = mv2_checkpoint_path
-        # self.rcf_model_path = rcf_model_path
-        self.rcf_model_path = None
+        self.rcf_model_path = rcf_model_path
         self.rcf_loss_type = rcf_loss_type
 
         # Runtime args
@@ -325,6 +334,16 @@ class RefinerArgs(BaseArgs):
         group.add_argument('--initial-pred-noise-max', type=float, default=0.1,
                            help='Maximum noise to add to the initial prediction.')
 
+        # Refining settings
+        group.add_argument('--use-inverse-rendering', type=str2bool, default=True,
+                           help='Use inverse rendering.')
+        group.add_argument('--use-perceptual-model', type=str2bool, default=True,
+                           help='Use the perceptual model. Requires inverse rendering.')
+        group.add_argument('--use-latents-model', type=str2bool, default=True,
+                           help='Use the latents model. Requires inverse rendering.')
+        group.add_argument('--use-rcf-model', type=str2bool, default=True,
+                           help='Use the RCF model. Requires inverse rendering.')
+
         # Rendering settings
         group.add_argument('--working-image-size', type=int, default=300,
                            help='Size of the working image.')
@@ -335,13 +354,11 @@ class RefinerArgs(BaseArgs):
         group.add_argument('--integrator-rr-depth', type=int, default=4,
                            help='Russian roulette depth.')
 
-        # Superresolution settings
-        group.add_argument('--superres-model', type=str, default='CompVis/ldm-super-resolution-4x-openimages',
-                           help='Superresolution model to use.')
-        group.add_argument('--superres-n-patches', type=int, default=0,
-                           help='Number of patches to use for superresolution.')
-        group.add_argument('--superres-patch-size', type=int, default=40,
-                           help='Size of the patches to use for superresolution.')
+        # Patch settings
+        group.add_argument('--n-patches', type=int, default=0,
+                           help='Number of zooming-in patches to use.')
+        group.add_argument('--patch-size', type=int, default=40,
+                           help='Size of the patches to use for zooming-in.')
 
         # Optimisation settings
         group.add_argument('--seed', type=int,
@@ -369,17 +386,17 @@ class RefinerArgs(BaseArgs):
         group.add_argument('--material-ior-noise', type=float, default=0.0,
                            help='Standard deviation of the noise to add to the material IOR.')
         group.add_argument('--radiance-noise', type=float, default=0.,
-                            help='Standard deviation of the noise to add to the light radiance.')
+                           help='Standard deviation of the noise to add to the light radiance.')
 
         # Conjugate face switching
         group.add_argument('--use-conj-switching', type=str2bool, default=True,
-                            help='Use conjugate face switching.')
+                           help='Use conjugate face switching.')
         group.add_argument('--conj-switch-prob-init', type=float, default=0.4,
-                            help='Initial probability of switching a face.')
+                           help='Initial probability of switching a face.')
         group.add_argument('--conj-switch-prob-min', type=float, default=1e-2,
-                            help='Minimum probability of switching a face.')
+                           help='Minimum probability of switching a face.')
         group.add_argument('--conj-switch-prob-max', type=float, default=1 - 1e-2,
-                            help='Maximum probability of switching a face.')
+                           help='Maximum probability of switching a face.')
 
         # Learning rates
         group.add_argument('--lr-scale', type=float, default=0.,
@@ -395,7 +412,7 @@ class RefinerArgs(BaseArgs):
         group.add_argument('--lr-light', type=float, default=5e-3,
                            help='Learning rate for the light.')
         group.add_argument('--lr-switches', type=float, default=1e-1,
-                            help='Learning rate for the conjugate switching probabilities.')
+                           help='Learning rate for the conjugate switching probabilities.')
 
         # Learning rate scheduler
         group.add_argument('--lr-scheduler', type=str, default='none',
@@ -443,13 +460,15 @@ class RefinerArgs(BaseArgs):
         group.add_argument('--w-z-pos', type=float, default=10.0,
                            help='Weight of the z position loss.')
         group.add_argument('--w-rotation-xy', type=float, default=1.0,
-                            help='Weight of the rotation xy loss.')
+                           help='Weight of the rotation xy loss.')
         group.add_argument('--w-patches', type=float, default=0.,
                            help='Weight of the patch loss.')
         group.add_argument('--w-fullsize', type=float, default=1.,
                            help='Weight of the combined losses on the full sized image. Only needed when using patches.')
         group.add_argument('--w-switch-probs', type=float, default=0.1,
-                            help='Weight of the conjugate face switching probabilities loss regulariser term.')
+                           help='Weight of the conjugate face switching probabilities loss regulariser term.')
+        group.add_argument('--w-anchors', type=float, default=1.,
+                           help='Weight of the anchors loss.')
 
         # Loss decay factors
         group.add_argument('--l-decay-l1', type=float, default=0.5,
