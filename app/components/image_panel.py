@@ -42,6 +42,8 @@ class ImagePanel(AppPanel):
     active_window: str = 'image'
     scene_image_needs_loading: bool = False
     images_updating: bool = False
+    scroll_x: int = 0
+    scroll_y: int = 0
     is_zooming: bool = False
     STEP_ZOOM = 0.1
 
@@ -155,6 +157,8 @@ class ImagePanel(AppPanel):
         """
         self.active_window = ['image', 'denoised', 'scene'][event.GetSelection()]
         self.update_images(quiet=True)
+        window = self.image_windows[self.active_window]
+        window.Scroll(self.scroll_x, self.scroll_y)
 
     def load_image(self, event: ImagePathChangedEvent):
         """
@@ -249,9 +253,6 @@ class ImagePanel(AppPanel):
                 self._log('Images updated.')
             return
 
-        # Get the current scroll position
-        scroll_x, scroll_y = window.GetScrollPos(wx.HORIZONTAL), window.GetScrollPos(wx.VERTICAL)
-
         # Scale the image to match the height of the main image
         sf = base_image.GetHeight() / image.GetHeight()
         scaled_image = image.Scale(
@@ -283,7 +284,7 @@ class ImagePanel(AppPanel):
             window.SetVirtualSize(bitmap.GetSize())
         window.SetScrollbars(1, 1, bitmap.GetWidth(), bitmap.GetHeight())
         window.SetScrollRate(int(20 * self.zoom), int(20 * self.zoom))
-        window.Scroll(scroll_x, scroll_y)
+        window.Scroll(self.scroll_x, self.scroll_y)
         window.Thaw()
         window.Refresh()
 
@@ -373,7 +374,8 @@ class ImagePanel(AppPanel):
             update_images = event.update_images
         if update_images:
             self.update_images()
-        image.SaveFile(str(SCENE_IMAGE_PATH), wx.BITMAP_TYPE_PNG)
+        if not image.IsSameAs(wx.Image()):
+            image.SaveFile(str(SCENE_IMAGE_PATH), wx.BITMAP_TYPE_PNG)
         self._log('Scene image loaded.')
 
     def on_mouse_wheel(self, event: wx.MouseEvent):
@@ -392,11 +394,12 @@ class ImagePanel(AppPanel):
             scroll_units = -event.GetWheelRotation() / event.GetWheelDelta()
             window = event.GetEventObject()
             if event.ShiftDown():
-                window.Scroll(window.GetScrollPos(wx.HORIZONTAL) + scroll_units,
-                              window.GetScrollPos(wx.VERTICAL))
+                self.scroll_x = window.GetScrollPos(wx.HORIZONTAL) + scroll_units
+                self.scroll_y = window.GetScrollPos(wx.VERTICAL)
             else:
-                window.Scroll(window.GetScrollPos(wx.HORIZONTAL),
-                              window.GetScrollPos(wx.VERTICAL) + scroll_units)
+                self.scroll_x = window.GetScrollPos(wx.HORIZONTAL)
+                self.scroll_y = window.GetScrollPos(wx.VERTICAL) + scroll_units
+            window.Scroll(self.scroll_x, self.scroll_y)
 
     def on_zoom_in(self, event: wx.Event = None):
         """
