@@ -111,23 +111,28 @@ class ImagePanel(AppPanel):
 
         # Zoom controls
         self.lbl_zoom = wx.StaticText(self, label=f'Zoom: {self.zoom:.1f}x')
-        self.btn_zoom_in = wx.Button(self, label='Zoom in')
+        self.btn_zoom_in = wx.Button(self, label='+')
         self.btn_zoom_in.Bind(wx.EVT_BUTTON, self.on_zoom_in)
-        self.btn_zoom_out = wx.Button(self, label='Zoom out')
+        self.btn_zoom_out = wx.Button(self, label='-')
         self.btn_zoom_out.Bind(wx.EVT_BUTTON, self.on_zoom_out)
-        zoom_sizer_t = wx.BoxSizer(wx.HORIZONTAL)
-        zoom_sizer_t.Add(self.lbl_zoom, wx.EXPAND | wx.ALL, 5)
-        zoom_sizer_b = wx.BoxSizer(wx.HORIZONTAL)
-        zoom_sizer_b.Add(self.btn_zoom_in, 1, wx.EXPAND | wx.ALL, 2)
-        zoom_sizer_b.Add(self.btn_zoom_out, 1, wx.EXPAND | wx.ALL, 2)
-        zoom_sizer = wx.StaticBoxSizer(wx.VERTICAL, parent=self)
-        zoom_sizer.Add(zoom_sizer_t, 1, wx.EXPAND | wx.ALL, 1)
-        zoom_sizer.Add(zoom_sizer_b, 1, wx.EXPAND | wx.ALL, 1)
+        zoom_sizer = wx.BoxSizer(wx.HORIZONTAL)
+        zoom_sizer.Add(self.lbl_zoom,2, wx.EXPAND | wx.ALL, 2)
+        zoom_sizer.Add(self.btn_zoom_in, 1, wx.EXPAND | wx.ALL, 2)
+        zoom_sizer.Add(self.btn_zoom_out, 1, wx.EXPAND | wx.ALL, 2)
+
+        # Wireframe checkbox
+        self.ckbx_wireframe=wx.CheckBox(self, label='Show wireframe')
+        self.ckbx_wireframe.SetValue(True)
+        self.ckbx_wireframe.Bind(wx.EVT_CHECKBOX,self.on_wireframe_ckbx)
+
+        controls_sizer_r = wx.StaticBoxSizer(wx.VERTICAL, parent=self)
+        controls_sizer_r.Add(zoom_sizer, 1, wx.EXPAND | wx.ALL, 1)
+        controls_sizer_r.Add(self.ckbx_wireframe, 1, wx.EXPAND| wx.ALL, 1)
 
         # Controls sizer
         controls_sizer = wx.BoxSizer(wx.HORIZONTAL)
         controls_sizer.Add(measurement_sizer, 1, wx.EXPAND | wx.ALL, 2)
-        controls_sizer.Add(zoom_sizer, 1, wx.EXPAND | wx.ALL, 2)
+        controls_sizer.Add(controls_sizer_r, 1, wx.EXPAND | wx.ALL, 2)
 
         # Main sizer
         main_sizer = wx.BoxSizer(wx.VERTICAL)
@@ -232,7 +237,7 @@ class ImagePanel(AppPanel):
             self.bitmaps[k] = bitmap
 
             # Draw the wireframe and anchors overlays on the image
-            if self.images['wireframe'] is not None:
+            if self.images['wireframe'] is not None and self.ckbx_wireframe.IsChecked() == True:
                 image_width, image_height = bitmap.GetSize()
                 wireframe_x = (image_width - scaled_wireframe_width) // 2
                 wireframe_y = (image_height - scaled_wireframe_height) // 2
@@ -380,6 +385,9 @@ class ImagePanel(AppPanel):
         self.lbl_zoom.SetLabel(label=f'Zoom: {self.zoom:.1f}x')
         self.update_images()
         self.is_zooming = False
+
+    def on_wireframe_ckbx(self,event):
+        self.update_images()
 
     def on_click_image_L(self, event):
         self.clicL = event.GetPosition()

@@ -23,6 +23,7 @@ class CrystalSizerApp(wx.App):
         # Load the frame and start the app
         self.frame = AppFrame(self.config)
         self.frame.Show()
+        self.frame.Maximize(True)
         wx.CallLater(0, self.frame.load_state)  # Wait until the GUI has been drawn fully
         return True
 

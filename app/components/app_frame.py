@@ -9,6 +9,7 @@ from ruamel.yaml import YAML
 
 from app import ANCHORS_PATH, APP_ASSETS_PATH, APP_DATA_PATH, CRYSTAL_DATA_PATH, DENOISED_IMAGE_PATH, REFINER_ARGS_PATH, \
     SCENE_IMAGE_PATH, SCENE_PATH
+
 from app.components.control_panel import ControlPanel
 from app.components.image_panel import ImagePanel
 from app.components.optimisation_panel import OptimisationPanel
@@ -32,9 +33,12 @@ class AppFrame(wx.Frame):
     projector: Optional[Projector] = None
 
     def __init__(self, config: wx.Config):
-        super().__init__(parent=None, title='Crystal Sizer 3D', size=(1280, 720))
+        super().__init__(parent=None, title='Crystal Sizer 3D')
+        # super().__init__(parent=None, title='Crystal Sizer 3D', size=(1920, 1200))
         self.config = config
-        self.SetWindowStyle(style=wx.DEFAULT_DIALOG_STYLE | wx.MINIMIZE_BOX)
+
+        # Disable re-size of the window
+        # self.SetWindowStyle(style=wx.DEFAULT_DIALOG_STYLE | wx.MINIMIZE_BOX)
 
         # Initialise panels
         self.control_panel = ControlPanel(self)
@@ -42,7 +46,7 @@ class AppFrame(wx.Frame):
         self.optimisation_panel = OptimisationPanel(self)
 
         # Put panels together
-        base_sizer = wx.BoxSizer(wx.HORIZONTAL)
+        base_sizer=wx.BoxSizer(wx.HORIZONTAL)
         base_sizer.Add(self.control_panel, 1, wx.EXPAND)
         base_sizer.Add(self.image_panel, 3, wx.EXPAND)
         base_sizer.Add(self.optimisation_panel, 1, wx.EXPAND)
@@ -275,7 +279,7 @@ class AppFrame(wx.Frame):
         self.projector = Projector(
             crystal=self.crystal,
             image_size=image_size,
-            zoom=orthographic_scale_factor(self.scene),
+            # zoom=orthographic_scale_factor(self.scene),
             transparent_background=True
         )
 
