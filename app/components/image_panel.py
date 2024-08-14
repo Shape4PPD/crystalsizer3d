@@ -250,19 +250,6 @@ class ImagePanel(AppPanel):
         container = self.image_containers[self.active_window]
         window.Freeze()
 
-# <<<<<<< HEAD
-#             # Draw the wireframe and anchors overlays on the image
-#             if self.images['wireframe'] is not None and self.ckbx_wireframe.IsChecked() == True:
-#                 image_width, image_height = bitmap.GetSize()
-#                 wireframe_x = (image_width - scaled_wireframe_width) // 2
-#                 wireframe_y = (image_height - scaled_wireframe_height) // 2
-#                 mem_dc = wx.MemoryDC()
-#                 mem_dc.SelectObject(bitmap)
-#                 mem_dc.DrawBitmap(self.bitmaps['wireframe'], wireframe_x, wireframe_y, True)
-#                 if self.images['anchors'] is not None:
-#                     mem_dc.DrawBitmap(self.bitmaps['anchors'], wireframe_x, wireframe_y, True)
-#                 mem_dc.SelectObject(wx.NullBitmap)
-# =======
         # If there is no image to be shown, clear the container and return
         if image is None or not image.IsOk():
             container.SetBitmap(wx.NullBitmap)

@@ -280,6 +280,6 @@ class AppFrame(wx.Frame):
         self.projector = Projector(
             crystal=self.crystal,
             image_size=image_size,
-            # zoom=orthographic_scale_factor(self.scene),
+            zoom=orthographic_scale_factor(self.scene),
             transparent_background=True
         )
