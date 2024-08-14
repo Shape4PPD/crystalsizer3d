@@ -63,6 +63,7 @@ class ControlPanel(AppPanel):
         d_sizer.Add(self.btn_distance_down, 1, wx.EXPAND)
 
         # Panel for adjusting scale (normal distances * scale param)
+        self.lbl_scale=wx.StaticText(self,label='Scale: ')
         self.btn_scale_up = wx.Button(self, label='Scl. +')
         self.btn_scale_up.Bind(wx.EVT_BUTTON, self.on_scale_change)
         self.btn_scale_down = wx.Button(self, label='Scl. -')
@@ -70,12 +71,13 @@ class ControlPanel(AppPanel):
         self.btn_normalise=wx.Button(self,label='Normalise Scale')
         self.btn_normalise.Bind(wx.EVT_BUTTON,self.on_scale_change)
 
-        s_sizer_top=wx.BoxSizer(wx.HORIZONTAL)
-        s_sizer_top.Add(self.btn_scale_up, 1, wx.EXPAND)
-        s_sizer_top.Add(self.btn_scale_down, 1, wx.EXPAND)
+        s_sizer_btn=wx.BoxSizer(wx.HORIZONTAL)
+        s_sizer_btn.Add(self.btn_scale_up, 1, wx.EXPAND)
+        s_sizer_btn.Add(self.btn_scale_down, 1, wx.EXPAND)
 
         s_sizer = wx.BoxSizer(wx.VERTICAL)
-        s_sizer.Add(s_sizer_top,1,wx.EXPAND|wx.ALL,1)
+        s_sizer.Add(self.lbl_scale,1,wx.EXPAND|wx.ALL,1)
+        s_sizer.Add(s_sizer_btn,1,wx.EXPAND|wx.ALL,1)
         s_sizer.Add(self.btn_normalise, 1, wx.EXPAND | wx.ALL, 1)
 
         # Panel for controlling crystal rotation and position (transformation)
@@ -210,6 +212,7 @@ class ControlPanel(AppPanel):
         self.lbl_rotation.SetLabel(label=f'Rotation: {np.rad2deg(to_numpy(self.crystal.rotation[2])):.1f}°')
         self.lbl_position.SetLabel(label=f'Origin: ({self.crystal.origin[0]:.2f}, {self.crystal.origin[1]:.2f})')
         self.lbl_ior.SetLabel(label=f'IOR: {self.crystal.material_ior.item():.2f}')
+        self.lbl_scale.SetLabel(label=f'Scale: {self.crystal.scale.item():.2f}')
 
     def on_save_crystal(self, event):
         """
@@ -303,15 +306,21 @@ class ControlPanel(AppPanel):
             return
         button = event.GetEventObject()
         label = button.GetLabel()
-        assert label in ['Scl. +', 'Scl. -', 'Normalise Scale']
+        assert label in ['Scl. +', 'Scl. -','Normalise Scale']
         if label == 'Scl. +':
-            sf = 1 + self.STEP_SCALE
+            sf = self.STEP_SCALE
         elif label=='Scl. -':
-            sf = 1 - self.STEP_SCALE
+            sf = - self.STEP_SCALE
         else:
-            sf = 1/ np.max(self.crystal.distances.data.tolist())
+            # Update distance here and adjusting scale
+            sd = 1 / np.max(self.crystal.distances.data.tolist())
+            print('Normalise Scale')
         with torch.no_grad():
-            self.crystal.distances.data *= sf
+            if label=='Normalise Scale':
+                self.crystal.distances.data *= sd
+                self.crystal.scale/=sd
+            else:
+                self.crystal.scale+=sf
         wx.PostEvent(self.app_frame, CrystalChangedEvent())
 
     def on_ior_change(self, event):
