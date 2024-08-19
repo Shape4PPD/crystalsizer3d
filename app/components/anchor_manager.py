@@ -2,11 +2,12 @@ import math
 from collections import OrderedDict
 from typing import Dict, Optional, TYPE_CHECKING, Tuple
 
+import cv2
 import torch
 import wx
 from torch import Tensor
 
-from app.components.utils import AnchorsChangedEvent, EVT_REFINING_ENDED, EVT_REFINING_STARTED
+from app.components.utils import AnchorsChangedEvent, EVT_REFINING_ENDED, EVT_REFINING_STARTED, wx_image_to_numpy
 from crystalsizer3d.projector import ProjectedVertexKey
 
 if TYPE_CHECKING:
@@ -424,9 +425,17 @@ class AnchorManager:
 
             try:
                 vx, vy = self._get_vertex_image_coords((v_id, face_idx))
-                mem_dc.SetPen(wx.Pen(outline_colour, 1))
-                mem_dc.SetBrush(wx.Brush(fill_colour))
-                mem_dc.DrawCircle(vx, vy, radius)
+                # mem_dc.SetPen(wx.Pen(outline_colour, 1))
+                # mem_dc.SetBrush(wx.Brush(fill_colour))
+                # mem_dc.DrawCircle(vx, vy, radius)
+                image = canvas.ConvertToImage()
+                npimg = wx_image_to_numpy(image)
+                npimg=cv2.circle(npimg, [int(vx), int(vy)], radius, outline_colour, 2)
+                npimg=cv2.circle(npimg, [int(vx), int(vy)], radius, fill_colour, -1)
+                (b, g, r, a) = cv2.split(npimg)
+
+                image = wx.Image(len(npimg), len(npimg[0]), cv2.merge((b, g, r)), a)
+                canvas=image.ConvertToBitmap()
 
             # If the vertex is not found, reset to highlight mode unless we were trying to show a saved anchor
             except VertexNotFoundInImageError:
