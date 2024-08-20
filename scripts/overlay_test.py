@@ -89,6 +89,41 @@ def make_overlay_1():
     plt.imshow(npimg2)
     plt.show()
 
+def make_overlay_2():
+    """
+    Make an overlay image.
+    Use wx.GraphicsContext instead of wx.DC
+    """
+    canvas = _new_canvas()
+
+    # Create a graphics context from the bitmap
+    mem_dc = wx.MemoryDC(canvas)
+    gc = wx.GraphicsContext.Create(mem_dc)
+
+    # Set the pen and brush with the specified colours and alpha
+    colour = HIGHLIGHT_COLOUR_FACING
+    outline_colour = (*colour, HIGHLIGHT_OUTLINE_ALPHA)
+    fill_colour = (*colour, HIGHLIGHT_FILL_ALPHA)
+    pen = gc.CreatePen(wx.Pen(outline_colour, 1))
+    brush = gc.CreateBrush(wx.Brush(fill_colour))
+
+    gc.SetPen(pen)
+    gc.SetBrush(brush)
+
+    radius = HIGHLIGHT_CIRCLE_RADIUS
+    vx, vy = 0, 0
+
+    # Draw the circle with the graphics context
+    gc.DrawEllipse(vx - radius, vy - radius, 2 * radius, 2 * radius)
+
+    # Clean up
+    mem_dc.SelectObject(wx.NullBitmap)
+    image = canvas.ConvertToImage()
+    npimg = wx_image_to_numpy(image)
+    print(npimg)
+    plt.imshow(npimg)
+    plt.show()
+
 
 class TestApp(wx.App):
     pass
@@ -96,4 +131,4 @@ class TestApp(wx.App):
 
 if __name__ == '__main__':
     app = TestApp()
-    make_overlay_1()
+    make_overlay_2()
