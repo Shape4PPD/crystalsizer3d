@@ -220,7 +220,7 @@ class AnchorManager:
                 return
 
             # Close to the selected vertex so deselect it
-            if math.sqrt((mx - vx)**2 + (my - vy)**2) < self.HIGHLIGHT_CIRCLE_RADIUS * 1.2:
+            if math.sqrt((mx - vx) ** 2 + (my - vy) ** 2) < self.HIGHLIGHT_CIRCLE_RADIUS * 1.2:
                 self.deselect_vertex()
 
             # Not too close to the selected vertex so fix the anchor point here
@@ -339,8 +339,6 @@ class AnchorManager:
         if self.bitmaps['wireframe'] is None:
             return
         canvas = self._new_canvas()
-        mem_dc = wx.MemoryDC()
-        mem_dc.SelectObject(canvas)
 
         # Draw the active (saved) anchors
         for vertex_key, anchor_pos in self.anchors.items():
@@ -359,21 +357,37 @@ class AnchorManager:
                 wx.PostEvent(self.app_frame, AnchorsChangedEvent())
             ax, ay = self._relative_to_image_coords(anchor_pos)
 
+            image = canvas.ConvertToImage()
+            npimg = wx_image_to_numpy(image)
+
             # Draw a line from the vertex to the anchor point
-            mem_dc.SetPen(wx.Pen((*self.ACTIVE_LINE_COLOUR, 150), 2, wx.PENSTYLE_SHORT_DASH))
-            mem_dc.DrawLine(vx, vy, ax, ay)
+            # mem_dc.SetPen(wx.Pen((*self.ACTIVE_LINE_COLOUR, 150), 2, wx.PENSTYLE_SHORT_DASH))
+            # mem_dc.DrawLine(vx, vy, ax, ay)
+            npimg = cv2.line(npimg, [int(vx), int(vy)], [int(ax), int(ay)], (*self.ACTIVE_LINE_COLOUR, 150), 2)
 
             # Draw a circle at the location of the vertex
             colour = self.ACTIVE_COLOUR_FACING if vertex_key[1] == 'facing' else self.ACTIVE_COLOUR_BACK
-            mem_dc.SetPen(wx.Pen((*colour, self.ACTIVE_OUTLINE_ALPHA), 1))
-            mem_dc.SetBrush(wx.Brush((*colour, self.ACTIVE_FILL_ALPHA)))
-            mem_dc.DrawCircle(vx, vy, self.ACTIVE_CIRCLE_RADIUS)
+            # mem_dc.SetPen(wx.Pen((*colour, self.ACTIVE_OUTLINE_ALPHA), 1))
+            # mem_dc.SetBrush(wx.Brush((*colour, self.ACTIVE_FILL_ALPHA)))
+            # mem_dc.DrawCircle(vx, vy, self.ACTIVE_CIRCLE_RADIUS)
+            npimg = cv2.circle(npimg, [int(vx), int(vy)], self.ACTIVE_CIRCLE_RADIUS,
+                               (*colour, self.ACTIVE_OUTLINE_ALPHA), 1)
+            npimg = cv2.circle(npimg, [int(vx), int(vy)], self.ACTIVE_CIRCLE_RADIUS, (*colour, self.ACTIVE_FILL_ALPHA),
+                               -1)
 
             # Draw a cross at the location of the anchor point
-            mem_dc.SetPen(wx.Pen((*self.ACTIVE_CROSS_COLOUR, 150), 1))
+            # mem_dc.SetPen(wx.Pen((*self.ACTIVE_CROSS_COLOUR, 150), 1))
             d = self.ANCHOR_CROSS_SIZE / math.sqrt(2)
-            mem_dc.DrawLine(ax - d, ay - d, ax + d, ay + d)
-            mem_dc.DrawLine(ax + d, ay - d, ax - d, ay + d)
+            # mem_dc.DrawLine(ax - d, ay - d, ax + d, ay + d)
+            # mem_dc.DrawLine(ax + d, ay - d, ax - d, ay + d)
+            npimg = cv2.line(npimg, [int(ax - d), int(ay - d)], [int(ax + d), int(ay + d)],
+                             (*self.ACTIVE_LINE_COLOUR, 150), 2)
+            npimg = cv2.line(npimg, [int(ax + d), int(ay - d)], [int(ax - d), int(ay + d)],
+                             (*self.ACTIVE_LINE_COLOUR, 150), 2)
+
+            (b, g, r, a) = cv2.split(npimg)
+            image = wx.Image(len(npimg), len(npimg[0]), cv2.merge((b, g, r)), a)
+            canvas = image.ConvertToBitmap()
 
         # Draw a cross at the selected anchor position with a connecting line from the selected vertex
         if self.selected_anchor is not None or self.selected_vertex is not None and self.anchor_point is not None:
@@ -386,18 +400,30 @@ class AnchorManager:
             try:
                 vx, vy = self._get_vertex_image_coords(vertex_key)
                 ax, ay = self._relative_to_image_coords(anchor_point)
-                draw_line = math.sqrt((ax - vx)**2 + (ay - vy)**2) > self.HIGHLIGHT_CIRCLE_RADIUS * 1.2
+                draw_line = math.sqrt((ax - vx) ** 2 + (ay - vy) ** 2) > self.HIGHLIGHT_CIRCLE_RADIUS * 1.2
 
                 if draw_line:
+                    image = canvas.ConvertToImage()
+                    npimg = wx_image_to_numpy(image)
+
                     # Connecting line
-                    mem_dc.SetPen(wx.Pen((*self.ANCHOR_LINE_COLOUR, 255), 2, wx.PENSTYLE_SHORT_DASH))
-                    mem_dc.DrawLine(vx, vy, ax, ay)
+                    # mem_dc.SetPen(wx.Pen((*self.ANCHOR_LINE_COLOUR, 255), 2, wx.PENSTYLE_SHORT_DASH))
+                    # mem_dc.DrawLine(vx, vy, ax, ay)
+                    npimg = cv2.line(npimg, [int(vx), int(vy)], [int(ax), int(ay)], (*self.ANCHOR_LINE_COLOUR, 255), 2)
 
                     # Cross at the anchor point
-                    mem_dc.SetPen(wx.Pen((*self.ANCHOR_CROSS_COLOUR, 255), 2))
+                    # mem_dc.SetPen(wx.Pen((*self.ANCHOR_CROSS_COLOUR, 255), 2))
                     d = self.ANCHOR_CROSS_SIZE / math.sqrt(2)
-                    mem_dc.DrawLine(ax - d, ay - d, ax + d, ay + d)
-                    mem_dc.DrawLine(ax + d, ay - d, ax - d, ay + d)
+                    # mem_dc.DrawLine(ax - d, ay - d, ax + d, ay + d)
+                    # mem_dc.DrawLine(ax + d, ay - d, ax - d, ay + d)
+                    npimg = cv2.line(npimg, [int(ax - d), int(ay - d)], [int(ax + d), int(ay + d)],
+                                     (*self.ANCHOR_CROSS_COLOUR, 255), 2)
+                    npimg = cv2.line(npimg, [int(ax + d), int(ay - d)], [int(ax - d), int(ay + d)],
+                                     (*self.ANCHOR_CROSS_COLOUR, 255), 2)
+
+                    (b, g, r, a) = cv2.split(npimg)
+                    image = wx.Image(len(npimg), len(npimg[0]), cv2.merge((b, g, r)), a)
+                    canvas = image.ConvertToBitmap()
 
             # If the vertex is not found, reset to highlight mode unless we were trying to show a saved anchor
             except VertexNotFoundInImageError:
@@ -425,24 +451,20 @@ class AnchorManager:
 
             try:
                 vx, vy = self._get_vertex_image_coords((v_id, face_idx))
-                # mem_dc.SetPen(wx.Pen(outline_colour, 1))
-                # mem_dc.SetBrush(wx.Brush(fill_colour))
-                # mem_dc.DrawCircle(vx, vy, radius)
+
                 image = canvas.ConvertToImage()
                 npimg = wx_image_to_numpy(image)
-                npimg=cv2.circle(npimg, [int(vx), int(vy)], radius, outline_colour, 2)
-                npimg=cv2.circle(npimg, [int(vx), int(vy)], radius, fill_colour, -1)
+                npimg = cv2.circle(npimg, [int(vx), int(vy)], radius, outline_colour, 2)
+                npimg = cv2.circle(npimg, [int(vx), int(vy)], radius, fill_colour, -1)
                 (b, g, r, a) = cv2.split(npimg)
-
                 image = wx.Image(len(npimg), len(npimg[0]), cv2.merge((b, g, r)), a)
-                canvas=image.ConvertToBitmap()
+                canvas = image.ConvertToBitmap()
 
             # If the vertex is not found, reset to highlight mode unless we were trying to show a saved anchor
             except VertexNotFoundInImageError:
                 if self.selected_anchor is None:
                     return self._reset_to_highlight_mode()
 
-        mem_dc.SelectObject(wx.NullBitmap)
         self.images['anchors'] = canvas.ConvertToImage()
         if update_images:
             self.update_images(quiet=True)
