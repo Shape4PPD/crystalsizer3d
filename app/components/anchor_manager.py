@@ -101,6 +101,13 @@ class AnchorManager:
         x -= offset_x
         y -= offset_y
 
+        # Adjust for DPI scaling if necessary (assuming 96 PPI as the baseline)
+        sf_x, sf_y = wx.GetDisplayPPI() / 96
+        x /= sf_x
+        y /= sf_y
+        img_width /= sf_x
+        img_height /= sf_y
+
         # Normalise coordinates relative to the centre of the image
         rel_x = (x - img_width / 2) / (img_width / 2)
         rel_y = (y - img_height / 2) / (img_height / 2)
