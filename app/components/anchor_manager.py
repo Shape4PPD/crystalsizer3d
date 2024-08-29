@@ -1,4 +1,5 @@
 import math
+import sys
 from collections import OrderedDict
 from typing import Dict, Optional, TYPE_CHECKING, Tuple
 
@@ -101,12 +102,15 @@ class AnchorManager:
         x -= offset_x
         y -= offset_y
 
-        # Adjust for DPI scaling if necessary (assuming 96 PPI as the baseline)
-        sf_x, sf_y = wx.GetDisplayPPI() / 96
-        x /= sf_x
-        y /= sf_y
-        img_width /= sf_x
-        img_height /= sf_y
+        # # Adjust for DPI scaling if necessary (assuming 96 PPI as the baseline)
+        # # This line returns 1,1 somehow
+        # sf_x, sf_y = wx.GetDisplayPPI()/ 96
+        # self._log(f'sfx={sf_x}, sfy={sf_y}')
+        # x /= sf_x
+        # y /= sf_y
+        # img_width /= sf_x
+        # img_height /= sf_y
+        # self._log(f'Scaled x={x}, y={y}')
 
         # Normalise coordinates relative to the centre of the image
         rel_x = (x - img_width / 2) / (img_width / 2)
@@ -114,6 +118,20 @@ class AnchorManager:
         rel_y = -rel_y  # Flip y-axis to make it -1 at bottom and +1 at top
         pos = torch.tensor([rel_x, rel_y])
 
+        # Adjust DPI scaling based on system scaling
+        if sys.platform == 'win32':
+            sf = self.GetDPIScaleFactor()
+            self._log(f'Adjusting DPI scaling from: {sf}x')
+            if sf in [1, 1.25, 1.5]:
+                sf = 1
+            elif sf in [1.75, 2.0, 2.25]:
+                sf = 2
+            elif sf in [2.5]:
+                sf = 3
+            pos /= sf
+
+        self._log(f'Mouse rel pos: {pos}')
+        self._log(f'DPI scale factor: {self.GetDPIScaleFactor()}')
         return pos
 
     def _relative_to_image_coords(self, rel_coords: Tensor) -> Tuple[float, float]:
@@ -369,11 +387,11 @@ class AnchorManager:
 
             # Draw a line from the vertex to the anchor point
             gc.SetPen(wx.Pen((*self.ACTIVE_LINE_COLOUR, 150), 2, wx.PENSTYLE_SHORT_DASH))
-            gc.StrokeLine(int(vx),int(vy),int(ax),int(ay))
+            gc.StrokeLine(int(vx), int(vy), int(ax), int(ay))
 
             # Draw a circle at the location of the vertex
             colour = self.ACTIVE_COLOUR_FACING if vertex_key[1] == 'facing' else self.ACTIVE_COLOUR_BACK
-            radius=self.ACTIVE_CIRCLE_RADIUS
+            radius = self.ACTIVE_CIRCLE_RADIUS
             gc.SetPen(wx.Pen((*colour, self.ACTIVE_OUTLINE_ALPHA), 1))
             gc.SetBrush(wx.Brush((*colour, self.ACTIVE_FILL_ALPHA)))
             gc.DrawEllipse(vx - radius, vy - radius, 2 * radius, 2 * radius)
@@ -383,7 +401,6 @@ class AnchorManager:
             gc.SetPen(wx.Pen((*self.ACTIVE_CROSS_COLOUR, 150), 1))
             gc.StrokeLine(int(ax - d), int(ay - d), int(ax + d), int(ay + d))
             gc.StrokeLine(int(ax + d), int(ay - d), int(ax - d), int(ay + d))
-
 
         # Draw a cross at the selected anchor position with a connecting line from the selected vertex
         if self.selected_anchor is not None or self.selected_vertex is not None and self.anchor_point is not None:
@@ -401,7 +418,7 @@ class AnchorManager:
                 if draw_line:
                     # Connecting line
                     gc.SetPen(wx.Pen((*self.ANCHOR_LINE_COLOUR, 255), 2, wx.PENSTYLE_SHORT_DASH))
-                    gc.StrokeLine(int(vx),int(vy),int(ax),int(ay))
+                    gc.StrokeLine(int(vx), int(vy), int(ax), int(ay))
 
                     # Cross at the anchor point
                     d = self.ANCHOR_CROSS_SIZE / math.sqrt(2)
