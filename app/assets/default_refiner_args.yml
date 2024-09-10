@@ -103,7 +103,7 @@ perceptual_model: timm/regnetz_d8.ra3_in1k
 latents_model: MAGVIT2
 mv2_config_path: %%DATA_PATH%%/MAGVIT2/imagenet_lfqgan_256_B.yaml
 mv2_checkpoint_path: %%DATA_PATH%%/MAGVIT2/imagenet_256_B.ckpt
-rcf_model_path: null
+rcf_model_path: %%DATA_PATH%%/bsds500_pascal_model.pth
 rcf_loss_type: l2
 
 # Runtime args

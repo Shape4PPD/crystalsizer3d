@@ -5,6 +5,7 @@ from typing import TYPE_CHECKING
 import wx
 
 from app.components.refiner_proxy import RefinerProxy
+from crystalsizer3d.args.refiner_args import RefinerArgs
 from crystalsizer3d.crystal import Crystal
 from crystalsizer3d.projector import Projector
 from crystalsizer3d.scene_components.scene import Scene
@@ -39,6 +40,18 @@ class AppPanel(wx.Panel, metaclass=AppPanelMeta):
     @property
     def crystal(self) -> Crystal:
         return self.app_frame.crystal
+
+    @property
+    def refiner_args(self) -> RefinerArgs:
+        if self.app_frame.refiner_args is None:
+            self.app_frame.init_refiner_args()
+        return self.app_frame.refiner_args
+
+    @property
+    def refiner_args_defaults(self) -> RefinerArgs:
+        if self.app_frame.refiner_args_defaults is None:
+            self.app_frame.init_refiner_args()
+        return self.app_frame.refiner_args_defaults
 
     @property
     def refiner(self) -> RefinerProxy:

@@ -332,8 +332,39 @@ class Refiner:
         """
         Calculate the RCF features on the original target image.
         """
-        model_input = self.X_target[None, ...].permute(0, 3, 1, 2)
-        self.rcf_feats_og = self.rcf(model_input, apply_sigmoid=False)
+        if self.rcf is None:
+            self.rcf_feats_og = None
+        else:
+            model_input = self.X_target[None, ...].permute(0, 3, 1, 2)
+            self.rcf_feats_og = self.rcf(model_input, apply_sigmoid=False)
+
+    def _resize_to_wis(self, X: Tensor) -> Tensor:
+        """
+        Resize the image to the working image size.
+        """
+        trim_batch_dim = False
+        if X.ndim == 3:
+            X = X[None, ...]
+            trim_batch_dim = True
+        if X.ndim != 4:
+            raise ValueError(f'Invalid input shape: {X.shape}')
+        out_hwc = False
+        if X.shape[-1] == 3:  # HWC
+            X = X.permute(0, 3, 1, 2)
+            out_hwc = True
+        if X.shape[-1] != self.args.working_image_size:
+            wis = (self.args.working_image_size, self.args.working_image_size)
+            X = F.interpolate(
+                X,
+                size=wis,
+                mode='bilinear',
+                align_corners=False
+            )
+        if out_hwc:
+            X = X.permute(0, 2, 3, 1)
+        if trim_batch_dim:
+            X = X[0]
+        return X
 
     def _init_X_target(self):
         """
@@ -343,6 +374,7 @@ class Refiner:
         if cache_path.exists():
             try:
                 X_target = torch.load(cache_path)
+                X_target = self._resize_to_wis(X_target)
                 self.X_target = X_target.to(self.device)
                 logger.info('Loaded target image.')
                 return
@@ -359,21 +391,12 @@ class Refiner:
             if X_target.shape[0] == 4:
                 assert torch.allclose(X_target[3], torch.ones_like(X_target[3])), 'Transparent images not supported.'
                 X_target = X_target[:3]
-
-            # Crop and resize the image to the working image size
             X_target = center_crop(X_target, min(X_target.shape[-2:]))
-            X_target = F.interpolate(
-                X_target[None, ...],
-                size=self.manager.image_shape[-1],
-                mode='bilinear',
-                align_corners=False
-            )[0]
-        X_target = default_collate([X_target, ])
-        X_target = X_target.to(self.device)
 
         # Resize target image to the working image size for inverse rendering
+        X_target = X_target.to(self.device)
         wis = (self.args.working_image_size, self.args.working_image_size)
-        X_target = F.interpolate(X_target, size=wis, mode='bilinear', align_corners=False)[0]
+        X_target = self._resize_to_wis(X_target)
         X_target = X_target.permute(1, 2, 0)  # HWC
 
         # Multiscale
@@ -395,6 +418,7 @@ class Refiner:
         if cache_path.exists():
             try:
                 X_target_denoised = torch.load(cache_path)
+                X_target_denoised = self._resize_to_wis(X_target_denoised)
                 self.X_target_denoised = X_target_denoised.to(self.device)
                 logger.info('Loaded denoised target image.')
                 return
@@ -417,7 +441,7 @@ class Refiner:
                     n_tiles=self.args.denoiser_n_tiles,
                     overlap=self.args.denoiser_tile_overlap,
                     batch_size=self.args.denoiser_batch_size
-                )[None, ...]
+                )
 
             # Destroy the denoiser to free up space
             logger.info('Destroying denoiser to free up space.')
@@ -430,8 +454,7 @@ class Refiner:
             return None
 
         # Resize target image to the working image size for inverse rendering
-        wis = (self.args.working_image_size, self.args.working_image_size)
-        X_denoised = F.interpolate(X_denoised, size=wis, mode='bilinear', align_corners=False)[0]
+        X_denoised = self._resize_to_wis(X_denoised)
         X_denoised = X_denoised.permute(1, 2, 0)
 
         # Multiscale
@@ -1155,7 +1178,7 @@ class Refiner:
         """
         loss = torch.tensor(0., device=self.device)
         stats = {}
-        if not self.args.use_rcf_model or self.rcf is not None:
+        if not self.args.use_rcf_model or self.rcf is None:
             return loss, stats
 
         # If multiscale, just use the first (largest) image

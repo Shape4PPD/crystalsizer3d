@@ -8,8 +8,10 @@ from torch import Tensor
 from app.components.anchor_manager import AnchorManager
 from app.components.app_panel import AppPanel
 from app.components.parallelism import start_thread, stop_event
+from app.components.refiner_settings_dialog import RefinerSettingsDialog
 from app.components.utils import CrystalChangedEvent, DenoisedImageChangedEvent, EVT_ANCHORS_CHANGED, \
-    EVT_IMAGE_PATH_CHANGED, EVT_REFINING_STARTED, ImagePathChangedEvent, RefinerChangedEvent, RefiningEndedEvent, \
+    EVT_IMAGE_PATH_CHANGED, EVT_REFINING_STARTED, ImagePathChangedEvent, RefinerArgsChangedEvent, RefinerChangedEvent, \
+    RefiningEndedEvent, \
     RefiningStartedEvent, SceneImageChangedEvent
 from crystalsizer3d import logger
 
@@ -31,6 +33,10 @@ class OptimisationPanel(AppPanel):
         Initialise the optimisation panel components.
         """
         self.title = wx.StaticText(self, label='Mesh Optimiser')
+
+        # Settings dialog
+        self.btn_settings = wx.Button(self, label='Settings')
+        self.btn_settings.Bind(wx.EVT_BUTTON, self.show_settings_dialog)
 
         # Initial prediction
         self.btn_initial_prediction = wx.Button(self, label='Make Initial Prediction')
@@ -72,6 +78,7 @@ class OptimisationPanel(AppPanel):
         # Main sizer
         main_sizer = wx.BoxSizer(wx.VERTICAL)
         main_sizer.Add(self.title, 0, wx.ALIGN_CENTER_HORIZONTAL | wx.ALL, 5)
+        main_sizer.Add(self.btn_settings, 0, wx.EXPAND | wx.ALL, 5)
         main_sizer.Add(self.btn_initial_prediction, 0, wx.EXPAND | wx.ALL, 5)
         main_sizer.Add(anchors_sizer, 0, wx.EXPAND | wx.ALL, 5)
         main_sizer.Add(self.btn_refine, 0, wx.EXPAND | wx.ALL, 5)
@@ -81,17 +88,8 @@ class OptimisationPanel(AppPanel):
         """
         Initialise the event listeners.
         """
-        self.app_frame.Bind(EVT_IMAGE_PATH_CHANGED, self.image_changed)
         self.app_frame.Bind(EVT_ANCHORS_CHANGED, self.anchors_changed)
         self.app_frame.Bind(EVT_REFINING_STARTED, self.monitor_refining_updates)
-
-    def image_changed(self, event: ImagePathChangedEvent):
-        """
-        Image has changed, so we need a new refiner.
-        """
-        self.app_frame.refiner = None
-        wx.PostEvent(self.app_frame, RefinerChangedEvent())
-        event.Skip()
 
     def anchors_changed(self, event: wx.Event):
         """
@@ -164,6 +162,16 @@ class OptimisationPanel(AppPanel):
         event.Skip()
         self.anchor_manager.remove_all_anchors()
 
+    def show_settings_dialog(self, event: wx.Event):
+        """
+        Show the settings dialog and update the settings.
+        """
+        dialog = RefinerSettingsDialog(self, self.refiner_args.clone(), self.refiner_args_defaults.clone())
+        if dialog.ShowModal() == wx.ID_OK:
+            self.app_frame.refiner_args = dialog.refiner_args
+            wx.PostEvent(self.app_frame, RefinerArgsChangedEvent())
+        dialog.Destroy()
+
     def make_initial_prediction(self, event: wx.Event):
         """
         Get the initial crystal prediction using a trained neural network predictor model.
@@ -175,6 +183,7 @@ class OptimisationPanel(AppPanel):
         self._log('Generating initial prediction...')
         wx.PostEvent(self.app_frame, RefiningStartedEvent())
         try:
+            self.refiner.update_args(self.refiner_args)
             self.refiner.make_initial_prediction()
         except Exception as e:
             wx.MessageBox(message=str(e), caption='Error making initial prediction',
@@ -216,6 +225,9 @@ class OptimisationPanel(AppPanel):
         def training_thread(stop_event: threading.Event):
             self._log('Refining prediction...')
 
+            # Update the arguments - if they have changed then the refiner will be reinitialised
+            self.refiner.update_args(self.refiner_args)
+
             # Set the anchors and initial scene
             self.refiner.set_anchors(self.anchors)
             self.refiner.set_initial_scene(self.scene)
@@ -232,11 +244,13 @@ class OptimisationPanel(AppPanel):
             self.step = self.refiner.step
             wx.PostEvent(self.app_frame, RefiningEndedEvent())
             self.btn_refine.SetLabel('Refine')
+            self.btn_settings.Enable()
             self.btn_initial_prediction.Enable()
             self.btn_remove_all_anchors.Enable(len(self.anchors) > 0)
             self._log('Prediction refined.')
 
         # Disable the other action buttons
+        self.btn_settings.Disable()
         self.btn_initial_prediction.Disable()
         self.btn_remove_anchor.Disable()
         self.btn_remove_all_anchors.Disable()

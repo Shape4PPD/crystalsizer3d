@@ -9,12 +9,13 @@ import yaml
 from torch import Tensor
 
 from app import REFINER_PROPERTY_TYPES
-from app.components.parallelism import start_process, start_thread, stop_event
+from app.components.parallelism import start_process, start_thread, stop_event as global_stop_event
 from crystalsizer3d import logger
 from crystalsizer3d.args.refiner_args import RefinerArgs
 from crystalsizer3d.crystal import Crystal
 from crystalsizer3d.refiner.refiner import Refiner
 from crystalsizer3d.scene_components.scene import Scene
+from crystalsizer3d.util.utils import hash_data
 
 
 def sanitise(data: Any) -> Any:
@@ -68,6 +69,7 @@ def refiner_worker(
         refiner_args: RefinerArgs,
         output_dir: Path,
         queues: dict,
+        stop_event: mp.Event
 ):
     """
     Process worker for the Refiner instance.
@@ -141,10 +143,10 @@ def refiner_worker(
                 'message': f'Invalid attribute/method: {check_key}'
             })
 
-    def monitor_queue(channel: str, stop_event: threading.Event):
+    def monitor_queue(channel: str, stop_event: mp.Event, global_stop_event: threading.Event):
         nonlocal callback_signals, requests
         request_queue = queues[channel]['request']
-        while not stop_event.is_set():
+        while not stop_event.is_set() and not global_stop_event.is_set():
             try:
                 request = request_queue.get(timeout=1)
             except Empty:
@@ -175,12 +177,14 @@ def refiner_worker(
             time.sleep(1)
 
     # Start monitoring the request queues
+    threads = []
     for channel in queues.keys():
-        thread = threading.Thread(target=monitor_queue, args=(channel, stop_event))
+        thread = threading.Thread(target=monitor_queue, args=(channel, stop_event, global_stop_event))
         start_thread(thread)
+        threads.append(thread)
 
     # Process main-thread requests
-    while True:
+    while not stop_event.is_set() and not global_stop_event.is_set():
         if len(requests) == 0:
             time.sleep(1)
             continue
@@ -192,6 +196,11 @@ def refiner_worker(
         # Method requests
         wrapped_args = wrap_callables(channel, args)
         handle_attribute_request(channel, key, wrapped_args)
+
+    # Close the threads
+    logger.info('Closing refiner worker threads.')
+    for thread in threads:
+        thread.join()
 
 
 class RefinerProxy:
@@ -219,11 +228,37 @@ class RefinerProxy:
         }
 
         # Start the worker process
+        self.stop_event = mp.Event()
+        self._start_process()
+
+    def _start_process(self):
+        """
+        Start the worker process.
+        """
         self.process = mp.Process(
             target=refiner_worker,
-            args=(self.args, self.output_dir, self.queues),
+            args=(self.args, self.output_dir, self.queues, self.stop_event),
         )
         start_process(self.process)
+
+    def update_args(self, args: RefinerArgs):
+        """
+        Update the RefinerArgs instance.
+        """
+        if hash_data(args.to_dict()) == hash_data(self.args.to_dict()):
+            return
+
+        # Stop the current process
+        if self.process.is_alive():
+            logger.info('Stopping refiner worker process.')
+            self.stop_event.set()
+            self.process.join()
+
+        # Start a new process
+        logger.info('Starting refiner worker process.')
+        self.stop_event.clear()
+        self.args = args
+        self._start_process()
 
     def _init_property_types_cache(self):
         """
