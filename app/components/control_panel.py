@@ -152,23 +152,21 @@ class ControlPanel(AppPanel):
         """
         Show the file dialog to load an image.
         """
-        loadImgDiag = wx.FileDialog(self, message='Load Image', wildcard='Images|*.jpg;*.png',
-                                    style=wx.FD_OPEN | wx.FD_FILE_MUST_EXIST)
-        if loadImgDiag.ShowModal() == wx.ID_CANCEL:
+        dialog = wx.FileDialog(self, message='Load Image', wildcard='Images|*.jpg;*.png',
+                               style=wx.FD_OPEN | wx.FD_FILE_MUST_EXIST)
+        if dialog.ShowModal() == wx.ID_CANCEL:
             return
-        filepath = loadImgDiag.GetPath()
+        filepath = dialog.GetPath()
         try:
             image = wx.Image(filepath, wx.BITMAP_TYPE_ANY)
             assert image.IsOk(), 'Invalid image file'
             self.app_frame.image_path = filepath
-            self.config.Write('image_path', filepath)
-            self.config.Flush()
             wx.PostEvent(self.app_frame, ImagePathChangedEvent())
         except Exception as e:
             self._log('Loading image failed.')
             logger.error(f'Loading image failed: {e}')
             wx.MessageBox(message=str(e), caption='Error', style=wx.OK | wx.ICON_ERROR)
-        loadImgDiag.Destroy()
+        dialog.Destroy()
 
     def on_load_crystal(self, event: wx.Event):
         """

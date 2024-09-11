@@ -10,7 +10,7 @@ from crystalsizer3d.util.utils import str2bool
 class RefinerArgs(BaseArgs):
     def __init__(
             self,
-            predictor_model_path: Path,
+            predictor_model_path: Optional[Path] = None,
             image_path: Optional[Path] = None,
             ds_idx: int = 0,
 
@@ -158,8 +158,9 @@ class RefinerArgs(BaseArgs):
             rcf_model_path = Path(rcf_model_path)
 
         # Predictor model and target image
-        assert predictor_model_path.exists(), f'Predictor model path does not exist: {predictor_model_path}'
-        assert predictor_model_path.suffix == '.json', f'Predictor model path must be a json file: {predictor_model_path}'
+        if predictor_model_path is not None:
+            assert predictor_model_path.exists(), f'Predictor model path does not exist: {predictor_model_path}'
+            assert predictor_model_path.suffix == '.json', f'Predictor model path must be a json file: {predictor_model_path}'
         self.predictor_model_path = predictor_model_path
         if image_path is not None:
             assert image_path.exists(), f'Image path does not exist: {image_path}'
@@ -320,9 +321,9 @@ class RefinerArgs(BaseArgs):
         group.add_argument('--denoiser-n-tiles', type=int, default=9,
                            help='Number of tiles to split the image into for denoising.')
         group.add_argument('--denoiser-tile-overlap', type=float, default=0.05,
-                           help='Overlap between tiles for denoising.')
+                           help='Ratio of overlap between tiles for denoising.')
         group.add_argument('--denoiser-batch-size', type=int, default=3,
-                           help='Batch size for denoising.')
+                           help='Number of tiles to denoise at a time.')
 
         # Initial prediction settings
         group.add_argument('--initial-pred-from', type=str, default='denoised', choices=['denoised', 'original'],
@@ -330,29 +331,30 @@ class RefinerArgs(BaseArgs):
         group.add_argument('--initial-pred-batch-size', type=int, default=8,
                            help='Batch size for the initial prediction.')
         group.add_argument('--initial-pred-noise-min', type=float, default=0.0,
-                           help='Minimum noise to add to the initial prediction.')
+                           help='Minimum amount of noise to add to the batch of images used to generate the initial prediction.')
         group.add_argument('--initial-pred-noise-max', type=float, default=0.1,
-                           help='Maximum noise to add to the initial prediction.')
+                           help='Minimum amount of noise to add to the batch of images used to generate the initial prediction.')
 
         # Refining settings
         group.add_argument('--use-inverse-rendering', type=str2bool, default=True,
                            help='Use inverse rendering.')
         group.add_argument('--use-perceptual-model', type=str2bool, default=True,
-                           help='Use the perceptual model. Requires inverse rendering.')
+                           help='Use a perceptual model. Requires inverse rendering.')
         group.add_argument('--use-latents-model', type=str2bool, default=True,
-                           help='Use the latents model. Requires inverse rendering.')
+                           help='Use a latents model. Requires inverse rendering.')
         group.add_argument('--use-rcf-model', type=str2bool, default=True,
                            help='Use the RCF model. Requires inverse rendering.')
 
         # Rendering settings
         group.add_argument('--working-image-size', type=int, default=300,
-                           help='Size of the working image.')
+                           help='Resolution of the (square) rendered image in pixels. '
+                                'Larger images are slower to render and use more resources, but may be more accurate.')
         group.add_argument('--spp', type=int, default=32,
-                           help='Samples per pixel.')
+                           help='Ray-tracing samples per pixel. Affects the sharpness and clarity of the rendered image.')
         group.add_argument('--integrator-max-depth', type=int, default=16,
-                           help='Maximum depth of the integrator.')
+                           help='Maximum depth of the ray-tracing integrator.')
         group.add_argument('--integrator-rr-depth', type=int, default=4,
-                           help='Russian roulette depth.')
+                           help='Path depth at which rays will begin to use the russian roulette termination criterion.')
 
         # Patch settings
         group.add_argument('--n-patches', type=int, default=0,
@@ -376,39 +378,40 @@ class RefinerArgs(BaseArgs):
 
         # Noise
         group.add_argument('--image-noise-std', type=float, default=0.0,
-                           help='Standard deviation of the noise to add to the image.')
+                           help='Standard deviation of the zero-mean Gaussian noise to add to the image.')
         group.add_argument('--distances-noise', type=float, default=0.0,
-                           help='Standard deviation of the noise to add to the distances.')
+                           help='Standard deviation of the zero-mean Gaussian noise to add to the distances.')
         group.add_argument('--rotation-noise', type=float, default=0.0,
-                           help='Standard deviation of the noise to add to the rotation.')
+                           help='Standard deviation of the zero-mean Gaussian noise to add to the rotation.')
         group.add_argument('--material-roughness-noise', type=float, default=0.0,
-                           help='Standard deviation of the noise to add to the material roughness.')
+                           help='Standard deviation of the zero-mean Gaussian noise to add to the material roughness.')
         group.add_argument('--material-ior-noise', type=float, default=0.0,
-                           help='Standard deviation of the noise to add to the material IOR.')
+                           help='Standard deviation of the zero-mean Gaussian noise to add to the material IOR.')
         group.add_argument('--radiance-noise', type=float, default=0.,
-                           help='Standard deviation of the noise to add to the light radiance.')
+                           help='Standard deviation of the zero-mean Gaussian noise to add to the light radiance.')
 
         # Conjugate face switching
         group.add_argument('--use-conj-switching', type=str2bool, default=True,
-                           help='Use conjugate face switching.')
+                           help='Stochastically switch the distances of two conjugate faces during the refinement process. '
+                                'Can sometimes help to get out of local minima.')
         group.add_argument('--conj-switch-prob-init', type=float, default=0.4,
-                           help='Initial probability of switching a face.')
+                           help='Initial probability of switching a pair of conjugate faces.')
         group.add_argument('--conj-switch-prob-min', type=float, default=1e-2,
-                           help='Minimum probability of switching a face.')
+                           help='Minimum probability of switching a pair of conjugate faces.')
         group.add_argument('--conj-switch-prob-max', type=float, default=1 - 1e-2,
-                           help='Maximum probability of switching a face.')
+                           help='Maximum probability of switching a pair of conjugate faces.')
 
         # Learning rates
         group.add_argument('--lr-scale', type=float, default=0.,
                            help='Learning rate for the scale parameter.')
         group.add_argument('--lr-distances', type=float, default=5e-3,
-                           help='Learning rate for the distances.')
+                           help='Learning rate for the crystal face distances.')
         group.add_argument('--lr-origin', type=float, default=5e-3,
-                           help='Learning rate for the origin.')
+                           help='Learning rate for the origin position.')
         group.add_argument('--lr-rotation', type=float, default=5e-3,
                            help='Learning rate for the rotation.')
         group.add_argument('--lr-material', type=float, default=1e-3,
-                           help='Learning rate for the material.')
+                           help='Learning rate for the material properties (IOR/roughness).')
         group.add_argument('--lr-light', type=float, default=5e-3,
                            help='Learning rate for the light.')
         group.add_argument('--lr-switches', type=float, default=1e-1,
@@ -420,7 +423,7 @@ class RefinerArgs(BaseArgs):
         group.add_argument('--lr-min', type=float, default=1e-3,
                            help='Minimum learning rate.')
         group.add_argument('--lr-warmup', type=float, default=1e-3,
-                           help='Warmup learning rate.')
+                           help='Learning rate used during the warmup steps.')
         group.add_argument('--lr-warmup-steps', type=int, default=1,
                            help='Number of warmup steps.')
         group.add_argument('--lr-decay-steps', type=int, default=30,
@@ -444,31 +447,41 @@ class RefinerArgs(BaseArgs):
 
         # Loss weightings
         group.add_argument('--w-img-l1', type=float, default=10.,
-                           help='Weight of the L1 image loss.')
+                           help='Weight of the L1 image loss. Requires inverse rendering.')
         group.add_argument('--w-img-l2', type=float, default=0.,
-                           help='Weight of the L2 image loss.')
+                           help='Weight of the L2 image loss. Requires inverse rendering.')
         group.add_argument('--w-perceptual', type=float, default=1e-2,
-                           help='Weight of the perceptual loss.')
+                           help='Weight of the perceptual loss. Uses a pre-trained neural network to extract '
+                                'perceptual features of the target and rendered images and minimises the loss between the two. '
+                                'Requires inverse rendering. ')
         group.add_argument('--w-latent', type=float, default=1e-1,
-                           help='Weight of the latent encoding loss.')
+                           help='Weight of the latent encoding loss. Uses a pre-trained neural network to extract '
+                                'latent encodings of the target and rendered images and minimises the loss between the two. '
+                                'Requires inverse rendering.')
         group.add_argument('--w-rcf', type=float, default=0.,
-                           help='Weight of the RCF loss.')
+                           help='Weight of the RCF loss. Uses a pre-trained neural network to extract '
+                                'edge features of the target and rendered images and minimises the loss between the two. '
+                                'Requires inverse rendering.')
         group.add_argument('--w-overshoot', type=float, default=10.0,
-                           help='Weight of the overshoot loss.')
+                           help='Weight of the overshoot loss.'
+                                'Minimises the face distances that correspond to grown-out/zero-area faces.')
         group.add_argument('--w-symmetry', type=float, default=0.1,
-                           help='Weight of the symmetry loss.')
+                           help='Weight of the symmetry loss. '
+                                'Encourages pairs of faces to have similar distances from the origin.')
         group.add_argument('--w-z-pos', type=float, default=10.0,
-                           help='Weight of the z position loss.')
+                           help='Weight of the z position loss.'
+                                'Encourages the lowest z-coordinate of the crystal to be at z=0.')
         group.add_argument('--w-rotation-xy', type=float, default=1.0,
-                           help='Weight of the rotation xy loss.')
+                           help='Weight of the rotation xy loss.'
+                                'Encourages the crystal to be aligned with the xy plane.')
         group.add_argument('--w-patches', type=float, default=0.,
-                           help='Weight of the patch loss.')
+                           help='Weight of the patch loss. Only used when using patches.')
         group.add_argument('--w-fullsize', type=float, default=1.,
-                           help='Weight of the combined losses on the full sized image. Only needed when using patches.')
+                           help='Weight of the combined losses on the full sized image. Only used when using patches.')
         group.add_argument('--w-switch-probs', type=float, default=0.1,
                            help='Weight of the conjugate face switching probabilities loss regulariser term.')
         group.add_argument('--w-anchors', type=float, default=1.,
-                           help='Weight of the anchors loss.')
+                           help='Weight of the manually-defined anchors loss.')
 
         # Loss decay factors
         group.add_argument('--l-decay-l1', type=float, default=0.5,
