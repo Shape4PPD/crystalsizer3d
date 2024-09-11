@@ -9,16 +9,67 @@ import yaml
 from torch import Tensor
 
 from app import REFINER_PROPERTY_TYPES
-from app.components.parallelism import start_process, start_thread, stop_event
+from app.components.parallelism import start_process, start_thread, stop_event as global_stop_event
+from crystalsizer3d import logger
 from crystalsizer3d.args.refiner_args import RefinerArgs
 from crystalsizer3d.crystal import Crystal
 from crystalsizer3d.refiner.refiner import Refiner
+from crystalsizer3d.scene_components.scene import Scene
+from crystalsizer3d.util.utils import hash_data
+
+
+def sanitise(data: Any) -> Any:
+    """
+    Convert data to a serialisable format.
+    """
+    if isinstance(data, Tensor):
+        return data.detach().cpu()
+    elif isinstance(data, list):
+        return [sanitise(item) for item in data]
+    elif isinstance(data, tuple):
+        return tuple(sanitise(item) for item in data)
+    elif isinstance(data, dict):
+        return {key: sanitise(value) for key, value in data.items()}
+    elif isinstance(data, Crystal):
+        return {
+            'type': 'Crystal',
+            'data': data.to_dict(include_buffers=True)
+        }
+    elif isinstance(data, Scene):
+        return {
+            'type': 'Scene',
+            'data': data.to_dict()
+        }
+    else:
+        return data
+
+
+def unsanitise(data: Any) -> Any:
+    """
+    Convert data back from a serialisable format to the original format.
+    """
+    if isinstance(data, list):
+        return [unsanitise(item) for item in data]
+    elif isinstance(data, tuple):
+        return tuple(unsanitise(item) for item in data)
+    elif isinstance(data, dict):
+        if 'type' in data:
+            if data['type'] == 'Crystal':
+                return Crystal.from_dict(data['data'])
+            elif data['type'] == 'Scene':
+                return Scene.from_dict(data['data'])
+            else:
+                raise ValueError(f'Unrecognised type: {data["type"]}')
+        return {key: unsanitise(value) for key, value in data.items()}
+    else:
+        return data
 
 
 def refiner_worker(
         refiner_args: RefinerArgs,
         output_dir: Path,
         queues: dict,
+        stop_event: mp.Event
 ):
     """
     Process worker for the Refiner instance.
@@ -48,20 +99,6 @@ def refiner_worker(
                 wrapped_args.append(arg)
         return wrapped_args
 
-    def sanitise(data: Any) -> Any:
-        if isinstance(data, Tensor):
-            return data.detach().cpu()
-        elif isinstance(data, list):
-            return [sanitise(item) for item in data]
-        elif isinstance(data, tuple):
-            return tuple(sanitise(item) for item in data)
-        elif isinstance(data, dict):
-            return {key: sanitise(value) for key, value in data.items()}
-        elif isinstance(data, Crystal):
-            return data.to_dict(include_buffers=True)
-        else:
-            return data
-
     def handle_attribute_request(channel: str, attr_name: str, args: list):
         response_queue = queues[channel]['response']
         if hasattr(refiner, attr_name):
@@ -73,7 +110,13 @@ def refiner_worker(
 
             # Method call
             elif callable(attr):
-                result = attr(*args)
+                try:
+                    result = attr(*unsanitise(args))
+                except Exception as e:
+                    logger.error(f'Error calling method {attr_name}: {e}')
+                    raise e  # todo: remove
+                    response_queue.put({'type': 'error', 'message': str(e)})
+                    return
 
             else:
                 response_queue.put({'type': 'error', 'message': f'Invalid attribute/method: {attr_name}'})
@@ -100,10 +143,10 @@ def refiner_worker(
                 'message': f'Invalid attribute/method: {check_key}'
             })
 
-    def monitor_queue(channel: str, stop_event: threading.Event):
+    def monitor_queue(channel: str, stop_event: mp.Event, global_stop_event: threading.Event):
         nonlocal callback_signals, requests
         request_queue = queues[channel]['request']
-        while not stop_event.is_set():
+        while not stop_event.is_set() and not global_stop_event.is_set():
             try:
                 request = request_queue.get(timeout=1)
             except Empty:
@@ -134,12 +177,14 @@ def refiner_worker(
             time.sleep(1)
 
     # Start monitoring the request queues
+    threads = []
     for channel in queues.keys():
-        thread = threading.Thread(target=monitor_queue, args=(channel, stop_event))
+        thread = threading.Thread(target=monitor_queue, args=(channel, stop_event, global_stop_event))
         start_thread(thread)
+        threads.append(thread)
 
     # Process main-thread requests
-    while True:
+    while not stop_event.is_set() and not global_stop_event.is_set():
         if len(requests) == 0:
             time.sleep(1)
             continue
@@ -152,6 +197,11 @@ def refiner_worker(
         wrapped_args = wrap_callables(channel, args)
         handle_attribute_request(channel, key, wrapped_args)
 
+    # Close the threads
+    logger.info('Closing refiner worker threads.')
+    for thread in threads:
+        thread.join()
+
 
 class RefinerProxy:
     def __init__(
@@ -162,6 +212,7 @@ class RefinerProxy:
         self.args = args
         self.output_dir = output_dir
         self.active_methods = {}
+        self.return_values = {}
         self._callbacks = {}
         self._init_property_types_cache()
 
@@ -171,15 +222,43 @@ class RefinerProxy:
                 'request': mp.Queue(),
                 'response': mp.Queue()
             }
-            for channel in ['check_types', 'properties', 'callback_signals', 'make_initial_prediction', 'train']
+            for channel in ['check_types', 'properties', 'callback_signals',
+                            'set_anchors', 'set_initial_scene', 'make_initial_prediction',
+                            'train']
         }
 
         # Start the worker process
+        self.stop_event = mp.Event()
+        self._start_process()
+
+    def _start_process(self):
+        """
+        Start the worker process.
+        """
         self.process = mp.Process(
             target=refiner_worker,
-            args=(self.args, self.output_dir, self.queues),
+            args=(self.args, self.output_dir, self.queues, self.stop_event),
         )
         start_process(self.process)
+
+    def update_args(self, args: RefinerArgs):
+        """
+        Update the RefinerArgs instance.
+        """
+        if hash_data(args.to_dict()) == hash_data(self.args.to_dict()):
+            return
+
+        # Stop the current process
+        if self.process.is_alive():
+            logger.info('Stopping refiner worker process.')
+            self.stop_event.set()
+            self.process.join()
+
+        # Start a new process
+        logger.info('Starting refiner worker process.')
+        self.stop_event.clear()
+        self.args = args
+        self._start_process()
 
     def _init_property_types_cache(self):
         """
@@ -227,9 +306,10 @@ class RefinerProxy:
             response_queue = self.queues[name]['response']
 
             def wrapper(*args):
-                processed_args = [self._wrap_callables(name, arg) for arg in args]
+                processed_args = [self._wrap_callables_and_sanitise(name, arg) for arg in args]
                 request_queue.put((name, processed_args))
                 self.active_methods[name] = 1
+                self.return_values[name] = None
 
                 def monitor_queue():
                     while True:
@@ -241,13 +321,19 @@ class RefinerProxy:
 
                         # Stop monitoring and mark method as inactive
                         self.active_methods[name] = 0
-                        if response is None:
-                            return None
+                        self.return_values[name] = None
                         if response['type'] == 'result':
-                            return response['data']
+                            self.return_values[name] = response['data']
+
+                        # Stop monitoring
+                        return
 
                 thread = threading.Thread(target=monitor_queue)
                 start_thread(thread)
+                thread.join()
+                return_val = self.return_values[name]
+                self.return_values[name] = None
+                return return_val
 
             return wrapper
 
@@ -260,8 +346,11 @@ class RefinerProxy:
             if response['type'] == 'error':
                 raise AttributeError(response['message'])
             data = response['data']
-            if name == 'crystal' and isinstance(data, dict):
-                data = Crystal.from_dict(data)
+            if isinstance(data, dict):
+                if 'type' in data and data['type'] == 'Crystal':
+                    data = Crystal.from_dict(data['data'])
+                elif 'type' in data and data['type'] == 'Scene':
+                    data = Scene.from_dict(data['data'])
             return data
 
     def is_training(self) -> bool:
@@ -278,11 +367,12 @@ class RefinerProxy:
         """
         self.queues['callback_signals']['request'].put(('train', False))
 
-    def _wrap_callables(self, channel: str, arg: Any):
+    def _wrap_callables_and_sanitise(self, channel: str, arg: Any):
         """
-        Wrap a callable in a dictionary that can be serialised
+        Wrap a callable in a dictionary that can be serialised or sanitise the argument.
         """
         if callable(arg):
             self._callbacks[channel] = arg
             return {'type': 'callback', 'channel': channel}
-        return arg
+        else:
+            return sanitise(arg)

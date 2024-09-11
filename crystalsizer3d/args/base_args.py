@@ -26,6 +26,12 @@ class BaseArgs(ABC):
         else:
             raise ValueError(f'Unrecognised args type: {type(args)}')
 
+    def clone(self) -> 'BaseArgs':
+        """
+        Clone the arguments into a new class.
+        """
+        return self.__class__(**self.to_dict())
+
     def to_dict(self) -> dict:
         """
         Convert the class to a dictionary.

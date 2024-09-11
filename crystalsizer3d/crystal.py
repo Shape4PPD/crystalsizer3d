@@ -32,6 +32,7 @@ class Crystal(nn.Module):
     N: Tensor
     vertices_og: Tensor
     vertices: Tensor
+    vertex_ids: Tensor
     faces: Dict[Tuple[int, int, int], Tensor]
     areas: Dict[Tuple[int, int, int], float]
     missing_faces: List[Tuple[int, int, int]]
@@ -85,8 +86,10 @@ class Crystal(nn.Module):
 
         # The angles alpha, beta, gamma within the unit cell
         assert len(lattice_angles) == 3, 'Lattice angles must be a list of 3 floats'
+        if isinstance(lattice_angles, np.ndarray):
+            lattice_angles = lattice_angles.tolist()
         if not all(0 < a < np.pi for a in lattice_angles):
-            lattice_angles = [np.deg2rad(a) for a in lattice_angles]
+            lattice_angles = [float(np.deg2rad(a)) for a in lattice_angles]
         self.lattice_angles = lattice_angles
 
         # Miller indices should be a list of tuples
@@ -203,6 +206,21 @@ class Crystal(nn.Module):
         crystal.to(self.origin.device)
         return crystal
 
+    def copy_parameters_from(self, crystal: 'Crystal'):
+        """
+        Copy the parameters from another crystal.
+        """
+        with torch.no_grad():
+            self.scale.data = crystal.scale.data
+            self.distances.data = crystal.distances.data
+            self.origin.data = crystal.origin.data
+            self.rotation.data = crystal.rotation.data
+            self.material_roughness.data = crystal.material_roughness.data
+            self.material_ior.data = crystal.material_ior.data
+            self.bumpmap.data = crystal.bumpmap.data
+            self.bumpmap_texture = crystal.bumpmap_texture
+            self.use_bumpmap = crystal.use_bumpmap
+
     def to_dict(self, include_buffers: bool = True) -> dict:
         """
         Convert the crystal to a dictionary.
@@ -232,6 +250,7 @@ class Crystal(nn.Module):
                 'N': self.N.detach().cpu(),
                 'vertices_og': self.vertices_og.detach().cpu(),
                 'vertices': self.vertices.detach().cpu(),
+                'vertex_ids': self.vertex_ids.detach().cpu(),
                 'faces': {k: v.detach().cpu() for k, v in self.faces.items()},
                 'areas': self.areas,
                 'missing_faces': self.missing_faces,
@@ -448,17 +467,21 @@ class Crystal(nn.Module):
 
         # Step 1: Calculate all intersection points of all combinations of 3 planes
         all_combinations = list(combinations(range(len(self.N)), 3))
+        intersection_idxs = []
         intersection_points = []
-        for combo in all_combinations:
+        for i, combo in enumerate(all_combinations):
             point = self._plane_intersection(*combo)
             if point is not None:
+                intersection_idxs.append(i)
                 intersection_points.append(point)
+        intersection_idxs = torch.tensor(intersection_idxs, device=device)
         intersection_points = torch.stack(intersection_points)
 
         # Step 2: Only select points that are in the polyhedron
         T = intersection_points @ self.N.T
         R = torch.all(T <= self.all_distances + tol, dim=1)
         vertices = intersection_points[R]
+        vertex_ids = intersection_idxs[R]
 
         # Step 3: Take vertices, assign them to a face, and define faces
         R = self.N @ vertices.T
@@ -569,6 +592,7 @@ class Crystal(nn.Module):
         # Set properties to self
         self.vertices_og = vertices_og
         self.vertices = vertices
+        self.vertex_ids = vertex_ids
         self.faces = faces
         self.areas = areas
         self.missing_faces = [tuple(hkl) for hkl in self.all_miller_indices.tolist() if tuple(hkl) not in faces]

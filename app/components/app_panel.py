@@ -1,12 +1,17 @@
 from abc import ABCMeta, abstractmethod
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import wx
 
 from app.components.refiner_proxy import RefinerProxy
+from crystalsizer3d.args.refiner_args import RefinerArgs
 from crystalsizer3d.crystal import Crystal
 from crystalsizer3d.projector import Projector
 from crystalsizer3d.scene_components.scene import Scene
+
+if TYPE_CHECKING:
+    from app.components.app_frame import AppFrame
 
 
 class AppPanelMeta(ABCMeta, type(wx.Panel)):
@@ -19,7 +24,7 @@ class AppPanel(wx.Panel, metaclass=AppPanelMeta):
     """
 
     def __init__(self, app_frame: 'AppFrame' = None):
-        self.app_frame = app_frame
+        self.app_frame: AppFrame = app_frame
         super().__init__(parent=app_frame)
 
         # Initialise components
@@ -35,6 +40,18 @@ class AppPanel(wx.Panel, metaclass=AppPanelMeta):
     @property
     def crystal(self) -> Crystal:
         return self.app_frame.crystal
+
+    @property
+    def refiner_args(self) -> RefinerArgs:
+        if self.app_frame.refiner_args is None:
+            self.app_frame.init_refiner_args()
+        return self.app_frame.refiner_args
+
+    @property
+    def refiner_args_defaults(self) -> RefinerArgs:
+        if self.app_frame.refiner_args_defaults is None:
+            self.app_frame.init_refiner_args()
+        return self.app_frame.refiner_args_defaults
 
     @property
     def refiner(self) -> RefinerProxy:

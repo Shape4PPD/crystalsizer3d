@@ -1,18 +1,26 @@
-from typing import List, Optional, Tuple, Union
+from typing import Dict, List, Optional, Tuple, Union
 
 import numpy as np
 import torch
-from matplotlib import pyplot as plt
-
-from crystalsizer3d.crystal import Crystal
-from crystalsizer3d.util.geometry import is_point_in_bounds, line_equation_coefficients, line_intersection, normalise
-from crystalsizer3d.util.utils import init_tensor, to_numpy
 from kornia.core.check import KORNIA_CHECK, KORNIA_CHECK_SHAPE
 from kornia.geometry import axis_angle_to_rotation_matrix, center_crop, quaternion_to_rotation_matrix
 from kornia.utils import draw_line
 from kornia.utils.draw import _batch_polygons, _get_convex_edges
+from shapely.geometry import Point
+from shapely.geometry.polygon import Polygon
 from torch import Tensor
 from torch.nn.functional import interpolate
+
+from crystalsizer3d.crystal import Crystal
+from crystalsizer3d.util.geometry import is_point_in_bounds, line_equation_coefficients, line_intersection, normalise
+from crystalsizer3d.util.utils import init_tensor
+
+# A vertex can appear in multiple faces due to refraction, so we need to store the face index (or 'facing') as well
+ProjectedVertexKey = Tuple[int, Union[str, int]]
+
+
+class TotalInternalReflectionError(Exception):
+    pass
 
 
 def replace_convex_polygon(
@@ -58,10 +66,14 @@ def replace_convex_polygon(
 
 class Projector:
     vertices: Tensor
+    vertex_ids: Tensor
     faces: List[Tensor]
     face_normals: Tensor
     distances: Tensor
     vertices_2d: Tensor
+    projected_vertices: Dict[int, Tensor]
+    projected_vertex_keys: List[ProjectedVertexKey]
+    projected_vertex_coords: Tensor
     image: Tensor
 
     def __init__(
@@ -123,6 +135,16 @@ class Projector:
         self.image = self.project()
         
 
+    def _to_relative_coords(self, coords: Tensor) -> Tensor:
+        """
+        Convert absolute coordinates to relative coordinates.
+        """
+        image_size = torch.tensor(self.image_size, device=self.device)
+        return torch.stack([
+            (coords[0] / image_size[1] - 0.5) * 2,
+            (0.5 - coords[1] / image_size[0]) * 2
+        ])
+
     def set_background(self, background_image: Optional[Union[Tensor, np.ndarray]] = None):
         """
         Set the background image for the projector.
@@ -145,11 +167,12 @@ class Projector:
                 )[0]
         self.background_image = background_image
 
-    def project(self) -> Tensor:
+    def project(self, generate_image: bool = True) -> Optional[Tensor]:
         """
         Project the crystal onto an image.
         """
         self.vertices = self.crystal.vertices.clone()
+        self.vertex_ids = self.crystal.vertex_ids.clone()
         self.faces = [
             self.crystal.faces[tuple(hkl)].clone()
             if tuple(hkl) in self.crystal.faces else torch.tensor([], device=self.device)
@@ -167,22 +190,80 @@ class Projector:
         # Orthogonally project original vertices
         self.vertices_2d = self._orthogonal_projection(self.vertices)
 
-        # Generate the refracted wireframe image
-        self.image = self._generate_image()
+        # Project the vertices including all refractions
+        self._project_vertices()
 
-        return self.image
+        # Generate the refracted wireframe image
+        if generate_image:
+            self.image = self._generate_image()
+
+            return self.image
+
+    def _project_vertices(self):
+        """
+        Projected the vertices including all refractions.
+        """
+        pv = {}
+        pv_keys = []
+        pv_coords = []
+
+        for face_idx, (face, normal, distance) in enumerate(zip(self.faces, self.face_normals, self.distances)):
+            # Only consider the faces that are facing the camera
+            is_facing = normal @ self.view_axis < 0
+            if len(face) < 3 or not is_facing:
+                continue
+
+            # As this face is facing the camera, all the vertices are directly visible
+            for idx in face:
+                vertex_id = int(self.vertex_ids[idx])
+                key = (vertex_id, 'facing')
+                if key in pv_keys:
+                    continue
+                pv_keys.append(key)
+                pv_coords.append(self._to_relative_coords(self.vertices_2d[idx]))
+
+            # Refract the points and project them to 2d
+            try:
+                refracted_points = self._refract_points(normal, distance)
+            except TotalInternalReflectionError:
+                continue
+            vertices_2d = self._orthogonal_projection(refracted_points)
+            pv[face_idx] = vertices_2d
+
+            # Check that the points on the face did not move
+            face_vertices_og = self.vertices_2d[face]
+            face_vertices = vertices_2d[face]
+            # assert torch.allclose(face_vertices_og, face_vertices, rtol=1e-2), 'Face vertices moved during refraction.'
+
+            # Filter the refracted vertices to the ones visible through this face
+            polygon = Polygon(self.vertices_2d[face].tolist())
+            for v_idx, v_ref in enumerate(vertices_2d):
+                vertex_id = int(self.vertex_ids[v_idx])
+                if vertex_id in face:  # Skip vertices that are already visible
+                    continue
+                point = Point(v_ref.tolist())
+                if polygon.contains(point):
+                    key = (vertex_id, face_idx)
+                    pv_keys.append(key)
+                    pv_coords.append(self._to_relative_coords(vertices_2d[v_idx]))
+        if len(pv_coords) > 0:
+            pv_coords = torch.stack(pv_coords)
+
+        # Store the projected 2D vertices
+        self.projected_vertices = pv
+        self.projected_vertex_keys = pv_keys
+        self.projected_vertex_coords = pv_coords
 
     def _generate_image(self) -> Tensor:
         """
         Generate the projected wireframe image including all refractions.
         """
         image = self.canvas_image.clone()
-        faces_img = self.canvas_image.clone()
-        vertices_2d_og = self._orthogonal_projection(self.vertices)
 
         # Draw hidden refracted edges first
-        for face, normal, distance in zip(self.faces, self.face_normals, self.distances):
-            if len(face) < 3 or normal @ self.view_axis > 0:
+        for face_idx, (face, normal, distance) in enumerate(zip(self.faces, self.face_normals, self.distances)):
+            is_facing = normal @ self.view_axis < 0
+            if len(face) < 3 or not is_facing:
                 continue
 
             if self.multi_line:
@@ -458,11 +539,10 @@ class Projector:
         Refract the crystal vertices in the plane given by the normal and the distance.
         """
         points = self.vertices
-        # eta = n_1 / n_2
         eta = self.external_ior / self.crystal.material_ior
 
-        # The incident vector is pointing towards the camera
-        incident = -self.view_axis / self.view_axis.norm()  # this has mag of 1
+        # The incident vector is pointing towards the camera (normalised)
+        incident = -self.view_axis / self.view_axis.norm()
 
         # Normalise the normal vector
         n_norm = normal.norm()
@@ -470,72 +550,40 @@ class Projector:
 
         # Calculate cosines and sine^2 for the incident and transmitted angles
         cos_theta_inc = incident @ normal
-        sin2_theta_t = eta**2 * (1 - cos_theta_inc ** 2)
+        sin2_theta_t = eta**2 * (1 - cos_theta_inc**2)
+
+        # Check for total internal reflection
+        if sin2_theta_t > 1:
+            raise TotalInternalReflectionError()
 
         # Calculate the distance from each point to the plane
         dot_product = points @ normal
-        offset_distance = self.crystal.origin @ normal # offset from origin due to normal vectors being based off 0,0,0
+        offset_distance = self.crystal.origin @ normal  # offset from origin due to normal vectors being based off 0,0,0
         d = torch.abs(dot_product - distance * self.crystal.scale - offset_distance) / n_norm
 
-        
-        # Check for total internal reflection ###### not required, if true just don't return anything
-        if sin2_theta_t > 1:
-            R = incident - 2 * cos_theta_inc * normal
-            points = points + d[:, None] * R / R.norm()
+        # Calculate the refraction angles and work out where it refracts on the plane
+        cos_theta_t = torch.sqrt(torch.clamp(1 - sin2_theta_t, min=1e-3))
+        theta_t = torch.arccos(cos_theta_t)
+        theta_inc = torch.arccos(cos_theta_inc)
 
-        # Calculate the refracted vertices
-        else:
-            # once you've calculated the refraction angles
-            # you need to work out where it refracts on the plane
-            cos_theta_t = torch.sqrt(1 - sin2_theta_t)
-            theta_t = torch.arccos(cos_theta_t)
-            theta_inc = torch.arccos(cos_theta_inc)
-            
-            # calculate magatude of translation in xy direction
-            # S is the right angle triangle between inc and T, S dot inc = 0
-            s_mag = d[:,None] * torch.sin(theta_inc - theta_t) / torch.cos(theta_t)
-            # calculate unit vector translation in direction perpendicular to inc
-            T = (eta) * incident + ((eta) * cos_theta_inc - cos_theta_t) * normal
-            T = T / T.norm()
-            # find how far T travels in inc direction
-            T_in_inc = T * incident
-            S = -T/T_in_inc.norm() + incident
+        # Calculate magnitude of translation in xy direction
+        # S is the right angle triangle between inc and T, S dot inc = 0
+        s_mag = d[:, None] * torch.sin(theta_inc - theta_t) / torch.cos(theta_t)
 
-            if torch.is_nonzero(S.norm()):
-                S = S/ S.norm()
-                shift = s_mag*S
-            else:
-                shift = 0
+        # Calculate unit vector translation in direction perpendicular to inc
+        T = eta * incident + (eta * cos_theta_inc - cos_theta_t) * normal
+        T = T / T.norm()
 
+        # Calculate how far T travels in incident direction
+        T_in_inc = T * incident
+        S = -T / T_in_inc.norm() + incident
+        S_norm = S.norm()
+
+        # Adjust the points
+        if S_norm > 0:
+            S = S / S_norm
+            shift = s_mag * S
             points = points + shift
-            
-        # Add distance to plane
-        
-        return points
-
-    def _refract_points_old(self, normal: Tensor, distance: Tensor) -> Tensor:
-        """
-        Refract the crystal vertices in the plane given by the normal and the distance.
-        """
-        eta = self.external_ior / self.crystal.material_ior
-        eta = 1 / eta
-
-        # Calculate the refracted vertices
-        points = self.vertices
-        incident = -self.view_axis / self.view_axis.norm()
-        n_norm = normal.norm()
-        # cos_theta_inc = torch.cos(-normal @ incident / n_norm)
-        cos_theta_inc = incident @ (normal / n_norm)
-        cos_theta_t = torch.sqrt(1 - (eta**2) * (1 - cos_theta_inc**2))
-        T = eta * incident + (eta * cos_theta_inc - cos_theta_t) * normal / n_norm
-
-        # Calculate the distance from each point to the plane
-        dot_product = points @ (normal / n_norm)
-        offset_distance = self.crystal.origin @ (normal / n_norm)
-        d = torch.abs(dot_product - distance * self.crystal.scale - offset_distance) / n_norm
-
-        # Add distance to plane
-        points = points + (d[:, None] / cos_theta_inc) * T / T.norm()
 
         return points
 

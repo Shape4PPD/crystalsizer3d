@@ -37,6 +37,7 @@ setup(
         'timm >= 0.9, < 0.10',
         'torch >= 2.3, < 2.4',
         'torchvision >= 0.18, < 1.0',
+        'transformers >= 4.37, < 4.38',
         'trimesh >= 4.1, < 4.2',
         'wxpython >= 4.2, < 4.3',
     ],

@@ -7,25 +7,29 @@ import wx
 import yaml
 from ruamel.yaml import YAML
 
-from app import APP_ASSETS_PATH, APP_DATA_PATH, CRYSTAL_DATA_PATH, DENOISED_IMAGE_PATH, REFINER_ARGS_PATH, \
+from app import ANCHORS_PATH, APP_ASSETS_PATH, APP_DATA_PATH, CRYSTAL_DATA_PATH, DENOISED_IMAGE_PATH, REFINER_ARGS_PATH, \
     SCENE_IMAGE_PATH, SCENE_PATH
 from app.components.control_panel import ControlPanel
 from app.components.image_panel import ImagePanel
 from app.components.optimisation_panel import OptimisationPanel
 from app.components.refiner_proxy import RefinerProxy
-from app.components.utils import CrystalChangedEvent, CrystalMeshChangedEvent, EVT_CRYSTAL_CHANGED, EVT_REFINER_CHANGED, \
-    EVT_SCENE_CHANGED, ImagePathChangedEvent, RefinerChangedEvent, SceneChangedEvent
+from app.components.utils import AnchorsChangedEvent, CrystalChangedEvent, CrystalMeshChangedEvent, EVT_ANCHORS_CHANGED, \
+    EVT_CRYSTAL_CHANGED, EVT_IMAGE_PATH_CHANGED, EVT_REFINER_ARGS_CHANGED, EVT_SCENE_CHANGED, ImagePathChangedEvent, \
+    RefinerArgsChangedEvent, RefinerChangedEvent, SceneChangedEvent
 from crystalsizer3d import DATA_PATH, ROOT_PATH, logger
 from crystalsizer3d.args.refiner_args import RefinerArgs
 from crystalsizer3d.crystal import Crystal
 from crystalsizer3d.projector import Projector
 from crystalsizer3d.scene_components.scene import Scene
 from crystalsizer3d.scene_components.utils import orthographic_scale_factor
+from crystalsizer3d.util.utils import hash_data
 
 
 class AppFrame(wx.Frame):
     crystal: Crystal = None
     image_path: Path = None
+    refiner_args: Optional[RefinerArgs] = None
+    refiner_args_defaults: Optional[RefinerArgs] = None
     refiner: Optional[RefinerProxy] = None
     scene: Optional[Scene] = None
     projector: Optional[Projector] = None
@@ -52,9 +56,11 @@ class AppFrame(wx.Frame):
         self.SetStatusText('CrystalSizer3D')
 
         # Add event listeners
+        self.Bind(EVT_IMAGE_PATH_CHANGED, self.update_image_path)
         self.Bind(EVT_CRYSTAL_CHANGED, self.update_crystal)
         self.Bind(EVT_SCENE_CHANGED, self.update_scene)
-        self.Bind(EVT_REFINER_CHANGED, self.update_refiner)
+        self.Bind(EVT_REFINER_ARGS_CHANGED, self.update_refiner_args)
+        self.Bind(EVT_ANCHORS_CHANGED, self.update_anchors)
 
     def _log(self, message: str):
         """
@@ -67,6 +73,7 @@ class AppFrame(wx.Frame):
         """
         Load the application state.
         """
+        # Load the image(s)
         image_path = self.config.Read('image_path')
         if image_path != '':
             image_path = Path(image_path)
@@ -77,28 +84,29 @@ class AppFrame(wx.Frame):
                 # Load the denoised image if it exists
                 if DENOISED_IMAGE_PATH.exists():
                     def load_denoised_image():
-                        if self.image_panel.image is None:
+                        if self.image_panel.images['image'] is None:
                             wx.CallLater(100, load_denoised_image)
                         else:
-                            self.image_panel.load_denoised_image()
+                            self.image_panel.load_denoised_image(update_images=False)
 
                     wx.CallAfter(load_denoised_image)
 
                 # Load the scene image if it exists
                 if SCENE_IMAGE_PATH.exists():
                     def load_scene_image():
-                        if self.image_panel.image is None:
+                        if self.image_panel.images['image'] is None:
                             wx.CallLater(100, load_scene_image)
                         else:
-                            self.image_panel.load_scene_image()
+                            self.image_panel.load_scene_image(update_images=False)
 
                     wx.CallAfter(load_scene_image)
 
-        if CRYSTAL_DATA_PATH.exists():
-            self.crystal = Crystal.from_json(CRYSTAL_DATA_PATH)
-            wx.CallAfter(lambda: wx.PostEvent(self, CrystalChangedEvent(build_mesh=False)))
+        # Instantiate the refiner args
+        self.init_refiner_args()
 
+        # Load the scene
         if SCENE_PATH.exists():
+            self._ensure_scene_parameters_consistency()
             with open(SCENE_PATH, 'r') as f:
                 scene_args = yaml.load(f, Loader=yaml.FullLoader)
             if self.crystal is not None:
@@ -106,19 +114,31 @@ class AppFrame(wx.Frame):
             self.scene = Scene.from_dict(scene_args)
             wx.CallAfter(lambda: wx.PostEvent(self, SceneChangedEvent()))
 
+        # Load the crystal
+        if CRYSTAL_DATA_PATH.exists():
+            self.crystal = Crystal.from_json(CRYSTAL_DATA_PATH)
+
+            # Load any anchors first then update the crystal
+            if ANCHORS_PATH.exists():
+                with open(ANCHORS_PATH, 'r') as f:
+                    anchors = yaml.load(f, Loader=yaml.FullLoader)
+                for anchor in anchors:
+                    self.image_panel.anchor_manager.anchors[anchor['key']] = torch.tensor(anchor['value'])
+                    self.image_panel.anchor_manager.anchor_visibility[anchor['key']] = True
+                wx.CallAfter(lambda: wx.PostEvent(self, AnchorsChangedEvent()))
+
+            wx.CallAfter(lambda: wx.PostEvent(self, CrystalChangedEvent(build_mesh=False)))
+
     def update_crystal(self, event: CrystalChangedEvent):
         """
         Handle crystal updates.
         """
-        # Pull crystal updates from the refiner if available
-        if self.refiner is not None:
-            refiner_crystal = self.refiner.crystal
-            if refiner_crystal is not None:
-                self.crystal = refiner_crystal
         if self.projector is not None and self.crystal is not None:
             if id(self.projector.crystal) != id(self.crystal):
                 self.projector.crystal = self.crystal
-        event.Skip()
+        if self.scene is not None and self.crystal is not None:
+            if id(self.scene.crystal) != id(self.crystal):
+                self.scene.crystal = self.crystal
 
         # Build the mesh if required
         build_mesh = event.build_mesh if hasattr(event, 'build_mesh') else True
@@ -128,6 +148,7 @@ class AppFrame(wx.Frame):
 
         # Notify listeners that the crystal mesh has changed
         wx.CallAfter(lambda: wx.PostEvent(self, CrystalMeshChangedEvent()))
+        event.Skip()
 
         # Save the crystal data to file
         if self.crystal is not None:
@@ -142,6 +163,8 @@ class AppFrame(wx.Frame):
             refiner_scene = self.refiner.scene
             if refiner_scene is not None:
                 self.scene = refiner_scene
+        if self.crystal is not None and id(self.scene.crystal) != id(self.crystal):
+            self.scene.crystal = self.crystal
         if self.projector is not None:
             self.projector.zoom = orthographic_scale_factor(self.scene)
         event.Skip()
@@ -150,31 +173,106 @@ class AppFrame(wx.Frame):
         if self.scene is not None:
             self.scene.to_yml(SCENE_PATH, overwrite=True)
 
-    def update_refiner(self, event: wx.Event):
+    def update_image_path(self, event: ImagePathChangedEvent):
         """
-        Update the refiner.
+        Update the image path references on disk.
         """
-        pass
+        self.config.Write('image_path', str(self.image_path))
+        self.config.Flush()
+        self.update_refiner_args()
+        event.Skip()
 
-    def init_refiner(self):
+    def update_refiner_args(self, event: RefinerArgsChangedEvent = None):
         """
-        Initialise the refiner.
+        Update the refiner arguments on disk.
         """
-        if self.refiner is not None:
-            return
-        assert self.image_path is not None
-        self._log('Initialising refiner...')
+        if self.refiner_args is None:
+            self.init_refiner_args()
         yaml = YAML()
         yaml.preserve_quotes = True
 
-        # Copy over default refiner args if they don't exist
-        if not REFINER_ARGS_PATH.exists():
-            with open(APP_ASSETS_PATH / 'default_refiner_args.yml') as f:
-                default_args = f.read()
-            default_args = default_args.replace('%%ROOT_PATH%%', str(ROOT_PATH))
-            default_args = default_args.replace('%%DATA_PATH%%', str(DATA_PATH))
+        # Ensure the image paths are correct
+        self.refiner_args.image_path = self.image_path
+        self.refiner_args_defaults.image_path = self.image_path
+
+        # Update just the values present in the refiner args file
+        args_updated = False
+        with open(REFINER_ARGS_PATH, 'r') as f:
+            args_yml = yaml.load(f)
+        hash_og = hash_data(args_yml)
+        args_dict = self.refiner_args.to_dict()
+        for k, v in args_dict.items():
+            if k in args_yml:
+                args_yml[k] = v
+        hash_new = hash_data(args_yml)
+        if hash_og != hash_new:
+            REFINER_ARGS_PATH.rename(REFINER_ARGS_PATH.with_suffix('.bak'))
+            try:
+                with open(REFINER_ARGS_PATH, 'w') as f:
+                    yaml.dump(args_yml, f)
+                REFINER_ARGS_PATH.with_suffix('.bak').unlink()
+                self._log('Optimisation settings updated.')
+                args_updated = True
+            except Exception as e:
+                # Restore previous version if there is an error
+                REFINER_ARGS_PATH.unlink()
+                REFINER_ARGS_PATH.with_suffix('.bak').rename(REFINER_ARGS_PATH)
+                self.init_refiner_args()
+                self._log('Error updating optimisation settings.')
+                logger.error(e)
+
+            self.refiner = None  # This will force the refiner to be reinitialised when next needed
+
+        # Rebuild the scene
+        if args_updated:
+            self.scene = None
+            self.init_scene()
+
+        if event is not None:
+            event.Skip()
+
+    def update_anchors(self, event: AnchorsChangedEvent):
+        """
+        Update the anchors on file.
+        """
+        event.Skip()
+        data = []
+        for k, v in self.image_panel.anchor_manager.anchors.items():
+            data.append({
+                'key': k,
+                'value': v.tolist()
+            })
+        with open(ANCHORS_PATH, 'w') as f:
+            yaml.dump(data, f)
+
+    def init_refiner_args(self):
+        """
+        Initialise the refiner args.
+        """
+        assert self.image_path is not None
+        self._log('Initialising refiner args...')
+        yaml = YAML()
+        yaml.preserve_quotes = True
+
+        # Load default refiner args
+        with open(APP_ASSETS_PATH / 'default_refiner_args.yml') as f:
+            default_args_str = f.read()
+        default_args_str = default_args_str.replace('%%ROOT_PATH%%', str(ROOT_PATH))
+        default_args_str = default_args_str.replace('%%DATA_PATH%%', str(DATA_PATH))
+        default_args_yml = yaml.load(default_args_str)
+        default_args = RefinerArgs.from_args(default_args_yml)
+
+        # Check if working refiner args exists and are correct
+        args_ok = False
+        if REFINER_ARGS_PATH.exists():
+            with open(REFINER_ARGS_PATH, 'r') as f:
+                args_yml = yaml.load(f)
+            args_ok = isinstance(args_yml, dict) and all(k in args_yml for k in default_args_yml)
+
+        # Write default refiner args if they don't exist or are broken somehow
+        if not args_ok:
             with open(REFINER_ARGS_PATH, 'w') as f:
-                f.write(default_args)
+                f.write(default_args_str)
 
         # Load the refiner args from file
         with open(REFINER_ARGS_PATH, 'r') as f:
@@ -190,17 +288,51 @@ class AppFrame(wx.Frame):
             with open(REFINER_ARGS_PATH, 'w') as f:
                 yaml.dump(args_yml, f)
 
+        self.refiner_args = args
+        self.refiner_args_defaults = default_args
+
+    def init_refiner(self):
+        """
+        Initialise the refiner.
+        """
+        if self.refiner is not None:
+            return
+        assert self.image_path is not None
+        self._log('Initialising refiner...')
+
         # Instantiate the refiner
         try:
-            self.refiner = RefinerProxy(args=args, output_dir=APP_DATA_PATH / 'refiner')
+            self.refiner = RefinerProxy(args=self.refiner_args, output_dir=APP_DATA_PATH / 'refiner')
         except Exception as e:
             wx.MessageBox(message=str(e), caption='Error initialising refiner',
                           style=wx.OK | wx.ICON_ERROR)
             self._log(f'Error initialising refiner.')
             return
 
+        # Notify listeners that the refiner has changed
         wx.PostEvent(self, RefinerChangedEvent())
         wx.PostEvent(self, SceneChangedEvent())
+
+    def _ensure_scene_parameters_consistency(self):
+        """
+        Ensure that the scene is consistent with the refiner args
+        """
+        yaml = YAML()
+        yaml.preserve_quotes = True
+
+        # Load the scene args from file
+        with open(SCENE_PATH, 'r') as f:
+            args = yaml.load(f)
+
+        # Check that the scene args are consistent with the refiner args
+        args_hash = hash_data(args)
+        args['res'] = self.refiner_args.working_image_size
+        args['spp'] = self.refiner_args.spp
+        args['integrator_max_depth'] = self.refiner_args.integrator_max_depth
+        args['integrator_rr_depth'] = self.refiner_args.integrator_rr_depth
+        if args_hash != hash_data(args):
+            with open(SCENE_PATH, 'w') as f:
+                yaml.dump(args, f)
 
     def init_scene(self):
         """
@@ -216,23 +348,23 @@ class AppFrame(wx.Frame):
         if not SCENE_PATH.exists():
             shutil.copy(APP_ASSETS_PATH / 'default_scene.yml', SCENE_PATH)
 
+        # Ensure that the scene parameters are consistent with the refiner args
+        self._ensure_scene_parameters_consistency()
+
         # Load the scene args from file
         with open(SCENE_PATH, 'r') as f:
             args = yaml.load(f)
+        del args['crystal']
 
         # Instantiate the scene
         try:
-            working_image_size = self.config.Read('working_image_size', '300,300')
-            image_size = tuple(map(int, working_image_size.split(',')))
-            self.scene = Scene(
-                crystal=self.crystal,
-                res=min(image_size),
-                **args
-            )
+            self.scene = Scene(crystal=self.crystal, **args)
+            self._log('Scene initialised.')
         except Exception as e:
             wx.MessageBox(message=str(e), caption='Error initialising scene',
                           style=wx.OK | wx.ICON_ERROR)
             self._log(f'Error initialising scene.')
+            logger.error(e)
             return
 
     def init_projector(self):
@@ -253,99 +385,3 @@ class AppFrame(wx.Frame):
             zoom=orthographic_scale_factor(self.scene),
             transparent_background=True
         )
-
-    def on_optim(self, event):
-        print('> vertices')
-        print(self.crystal.vertices)
-        print(self.vertices_2d)
-        print('> faces')
-        print(self.crystal.faces)
-
-        # # One time use only - generate target positions from fitted crystal
-        # # 24/06/24 - ImageBitmap size change - Remember to redo all coordinates!
-        # dctlst = []
-        # for i in range(len(self.crystal.vertices)):
-        #     fcslst = []
-        #     for mlr_idx in self.crystal.faces:
-        #         if i in self.crystal.faces[mlr_idx].tolist():
-        #             fcslst.append(mlr_idx)
-        #     dctlst.append({'faces': fcslst, 'position_2d': self.vertices_2d[i].tolist()})
-        # print(dctlst)
-
-        # Fitted crystal - alpha4.json
-        target_positions = [
-            {'faces': [(0, 0, 1), (1, 1, 1), (1, -1, 1)], 'position_2d': [460.37896728515625, 409.05523681640625]},
-            {'faces': [(0, 0, 1), (1, 1, 1), (0, 1, 1)], 'position_2d': [344.228759765625, 360.9009704589844]},
-            {'faces': [(0, 0, 1), (1, -1, 1), (0, -1, 1)], 'position_2d': [542.4766845703125, 322.4871520996094]},
-            {'faces': [(0, 0, 1), (-1, 1, 1), (-1, -1, 1)], 'position_2d': [412.1661376953125, 260.7255859375]},
-            {'faces': [(0, 0, 1), (-1, 1, 1), (0, 1, 1)], 'position_2d': [339.2733154296875, 337.5874938964844]},
-            {'faces': [(0, 0, 1), (-1, -1, 1), (0, -1, 1)], 'position_2d': [540.6732788085938, 314.00286865234375]},
-            {'faces': [(0, 0, -1), (1, 1, -1), (1, -1, -1)], 'position_2d': [456.6241760253906, 419.4239807128906]},
-            {'faces': [(0, 0, -1), (1, 1, -1), (0, 1, -1)], 'position_2d': [351.35150146484375, 375.77935791015625]},
-            {'faces': [(0, 0, -1), (1, -1, -1), (0, -1, -1)], 'position_2d': [546.0210571289062, 325.1593017578125]},
-            {'faces': [(0, 0, -1), (-1, 1, -1), (-1, -1, -1)], 'position_2d': [425.3760681152344, 249.98631286621094]},
-            {'faces': [(0, 0, -1), (-1, 1, -1), (0, 1, -1)], 'position_2d': [343.0623779296875, 336.7821044921875]},
-            {'faces': [(0, 0, -1), (-1, -1, -1), (0, -1, -1)], 'position_2d': [540.1574096679688, 297.5730895996094]},
-            {'faces': [(1, 1, 1), (1, 1, -1), (1, 0, 0)], 'position_2d': [452.66888427734375, 429.6434631347656]},
-            {'faces': [(1, 1, 1), (1, 1, -1), (0, 1, -1)], 'position_2d': [332.44146728515625, 379.7987976074219]},
-            {'faces': [(1, 1, 1), (1, -1, 1), (1, 0, 0)], 'position_2d': [464.232666015625, 427.18548583984375]},
-            {'faces': [(1, 1, 1), (0, 1, 1), (0, 1, -1)], 'position_2d': [317.7055358886719, 366.5386657714844]},
-            {'faces': [(1, 1, -1), (1, -1, -1), (1, 0, 0)], 'position_2d': [458.53155517578125, 428.3973083496094]},
-            {'faces': [(1, -1, 1), (1, -1, -1), (1, 0, 0)], 'position_2d': [470.0953063964844, 425.9393615722656]},
-            {'faces': [(1, -1, 1), (1, -1, -1), (0, -1, -1)], 'position_2d': [570.6322021484375, 319.92803955078125]},
-            {'faces': [(1, -1, 1), (0, -1, 1), (0, -1, -1)], 'position_2d': [572.3182983398438, 316.1440734863281]},
-            {'faces': [(-1, 1, 1), (-1, 1, -1), (-1, 0, 0)], 'position_2d': [405.86444091796875, 245.04063415527344]},
-            {'faces': [(-1, 1, 1), (-1, 1, -1), (0, 1, 1), (0, 1, -1)],
-             'position_2d': [312.7500915527344, 343.2251892089844]},
-            {'faces': [(-1, 1, 1), (-1, 1, -1), (0, 1, 1), (0, 1, -1)],
-             'position_2d': [312.7500915527344, 343.2251892089844]},
-            {'faces': [(-1, 1, 1), (-1, -1, 1), (-1, 0, 0)], 'position_2d': [408.7038879394531, 244.43707275390625]},
-            {'faces': [(-1, 1, 1), (-1, 1, -1), (0, 1, 1), (0, 1, -1)],
-             'position_2d': [312.7500915527344, 343.2251892089844]},
-            {'faces': [(-1, 1, -1), (-1, -1, -1), (-1, 0, 0)], 'position_2d': [423.5268249511719, 241.286376953125]},
-            {'faces': [(-1, 1, 1), (-1, 1, -1), (0, 1, 1), (0, 1, -1)],
-             'position_2d': [312.7500915527344, 343.2251892089844]},
-            {'faces': [(-1, -1, 1), (-1, -1, -1), (-1, 0, 0)], 'position_2d': [426.3663024902344, 240.6828155517578]},
-            {'faces': [(-1, -1, 1), (-1, -1, -1), (0, -1, -1)], 'position_2d': [555.646728515625, 294.2807312011719]},
-            {'faces': [(-1, -1, 1), (0, -1, 1), (0, -1, -1)], 'position_2d': [570.514892578125, 307.6598815917969]}]
-
-        # Optimizer from Tom I
-        opt = torch.optim.Adam([
-            self.crystal.distances
-        ], lr=0.01)
-
-        for i in range(100):
-            opt.zero_grad()
-            self.update_crystal(None)
-            # self.crystal.update_mesh()
-            loss = 0
-            for target_position in target_positions:
-
-                # Find the joining vertex from faces - index is 'x'
-                # Continue if not found or find more than 1
-                xf = list(range(0, len(self.crystal.vertices)))
-                for face in target_position['faces']:
-                    if face in self.crystal.faces:
-                        xf = list(set(xf).intersection(set(self.crystal.faces[face].tolist())))
-                    else:
-                        continue
-                if len(xf) != 1:
-                    continue
-                x = xf[0]
-
-                loss = loss + torch.norm(
-                    self.vertices_2d[x] - torch.tensor(target_position['position_2d'])
-                )
-            loss.backward()
-            print(f'Step {i}, Loss: {loss.item()}, Distances: {self.crystal.distances}')
-
-            # Update distances in list
-            for t in range(0, len(self.crystal.distances)):
-                self.face_list.SetItem(t, 1, str(format(self.crystal.distances[t], '.2f')))
-
-            # Save image of every step
-            filename = 'Step_' + '{:03d}'.format(i) + '.jpg'
-            bitmap = self.img_bitmap.GetBitmap()
-            bitmap.SaveFile('../TestData_Optimizer_2/demo/optimSteps/' + filename, wx.BITMAP_TYPE_JPEG)
-
-            opt.step()
