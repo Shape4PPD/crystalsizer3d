@@ -360,19 +360,19 @@ class AnchorManager:
 
             # Draw a line from the vertex to the anchor point
             mem_dc.SetPen(wx.Pen((*self.ACTIVE_LINE_COLOUR, 150), 2, wx.PENSTYLE_SHORT_DASH))
-            mem_dc.DrawLine(vx, vy, ax, ay)
+            mem_dc.DrawLine(wx.Point((vx, vy)), wx.Point((ax, ay)))
 
             # Draw a circle at the location of the vertex
             colour = self.ACTIVE_COLOUR_FACING if vertex_key[1] == 'facing' else self.ACTIVE_COLOUR_BACK
             mem_dc.SetPen(wx.Pen((*colour, self.ACTIVE_OUTLINE_ALPHA), 1))
             mem_dc.SetBrush(wx.Brush((*colour, self.ACTIVE_FILL_ALPHA)))
-            mem_dc.DrawCircle(vx, vy, self.ACTIVE_CIRCLE_RADIUS)
+            mem_dc.DrawCircle(wx.Point((vx, vy)), self.ACTIVE_CIRCLE_RADIUS)
 
             # Draw a cross at the location of the anchor point
             mem_dc.SetPen(wx.Pen((*self.ACTIVE_CROSS_COLOUR, 150), 1))
             d = self.ANCHOR_CROSS_SIZE / math.sqrt(2)
-            mem_dc.DrawLine(ax - d, ay - d, ax + d, ay + d)
-            mem_dc.DrawLine(ax + d, ay - d, ax - d, ay + d)
+            mem_dc.DrawLine(wx.Point((ax - d, ay - d)), wx.Point((ax + d, ay + d)))
+            mem_dc.DrawLine(wx.Point((ax + d, ay - d)), wx.Point((ax - d, ay + d)))
 
         # Draw a cross at the selected anchor position with a connecting line from the selected vertex
         if self.selected_anchor is not None or self.selected_vertex is not None and self.anchor_point is not None:
@@ -390,13 +390,13 @@ class AnchorManager:
                 if draw_line:
                     # Connecting line
                     mem_dc.SetPen(wx.Pen((*self.ANCHOR_LINE_COLOUR, 255), 2, wx.PENSTYLE_SHORT_DASH))
-                    mem_dc.DrawLine(vx, vy, ax, ay)
+                    mem_dc.DrawLine(wx.Point((vx, vy)), wx.Point((ax, ay)))
 
                     # Cross at the anchor point
                     mem_dc.SetPen(wx.Pen((*self.ANCHOR_CROSS_COLOUR, 255), 2))
                     d = self.ANCHOR_CROSS_SIZE / math.sqrt(2)
-                    mem_dc.DrawLine(ax - d, ay - d, ax + d, ay + d)
-                    mem_dc.DrawLine(ax + d, ay - d, ax - d, ay + d)
+                    mem_dc.DrawLine(wx.Point((ax - d, ay - d)), wx.Point((ax + d, ay + d)))
+                    mem_dc.DrawLine(wx.Point((ax + d, ay - d)), wx.Point((ax - d, ay + d)))
 
             # If the vertex is not found, reset to highlight mode unless we were trying to show a saved anchor
             except VertexNotFoundInImageError:
@@ -426,7 +426,7 @@ class AnchorManager:
                 vx, vy = self._get_vertex_image_coords((v_id, face_idx))
                 mem_dc.SetPen(wx.Pen(outline_colour, 1))
                 mem_dc.SetBrush(wx.Brush(fill_colour))
-                mem_dc.DrawCircle(vx, vy, radius)
+                mem_dc.DrawCircle(wx.Point((vx, vy)), radius)
 
             # If the vertex is not found, reset to highlight mode unless we were trying to show a saved anchor
             except VertexNotFoundInImageError:

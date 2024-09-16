@@ -158,7 +158,7 @@ class ImagePanel(AppPanel):
         self.active_window = ['image', 'denoised', 'scene'][event.GetSelection()]
         self.update_images(quiet=True)
         window = self.image_windows[self.active_window]
-        window.Scroll(self.scroll_x, self.scroll_y)
+        window.Scroll(round(self.scroll_x), round(self.scroll_y))
 
     def load_image(self, event: ImagePathChangedEvent):
         """
@@ -284,7 +284,7 @@ class ImagePanel(AppPanel):
             window.SetVirtualSize(bitmap.GetSize())
         window.SetScrollbars(1, 1, bitmap.GetWidth(), bitmap.GetHeight())
         window.SetScrollRate(int(20 * self.zoom), int(20 * self.zoom))
-        window.Scroll(self.scroll_x, self.scroll_y)
+        window.Scroll(round(self.scroll_x), round(self.scroll_y))
         window.Thaw()
         window.Refresh()
 
@@ -308,7 +308,19 @@ class ImagePanel(AppPanel):
         self._log('Projecting crystal wireframe...')
         wireframe = to_numpy(self.projector.project() * 255).astype(np.uint8).squeeze().transpose(1, 2, 0)
         self.images['wireframe'] = numpy_to_wx_image(wireframe)
-        self.bitmaps['wireframe'] = wx.Bitmap(self.images['wireframe'])
+
+        # Scale the wireframe bitmap
+        base_image = self.images['image']
+        wireframe = self.images['wireframe']
+        sf = base_image.GetHeight() / wireframe.GetHeight()
+        scaled_wireframe_width = round(wireframe.GetWidth() * sf * self.zoom)
+        scaled_wireframe_height = round(wireframe.GetHeight() * sf * self.zoom)
+        scaled_wireframe = wireframe.Scale(
+            scaled_wireframe_width,
+            scaled_wireframe_height,
+            wx.IMAGE_QUALITY_HIGH
+        )
+        self.bitmaps['wireframe'] = wx.Bitmap(scaled_wireframe)
 
         # Update the anchors overlay
         if len(self.anchor_manager.anchors) > 0:
@@ -399,7 +411,7 @@ class ImagePanel(AppPanel):
             else:
                 self.scroll_x = window.GetScrollPos(wx.HORIZONTAL)
                 self.scroll_y = window.GetScrollPos(wx.VERTICAL) + scroll_units
-            window.Scroll(self.scroll_x, self.scroll_y)
+            window.Scroll(round(self.scroll_x), round(self.scroll_y))
 
     def on_zoom_in(self, event: wx.Event = None):
         """
