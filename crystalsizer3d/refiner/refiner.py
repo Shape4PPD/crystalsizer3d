@@ -285,7 +285,7 @@ class Refiner:
 
         def load_pips(self, name='vgg_lpips'):
             ckpt = get_ckpt_path(name, DATA_PATH / 'vgg_lpips')
-            self.load_state_dict(torch.load(ckpt, map_location=torch.device('cpu')), strict=False)
+            self.load_state_dict(torch.load(ckpt, map_location=torch.device('cpu'), weights_only=True), strict=False)
             logger.info(f'Loaded pretrained LPIPS loss from {ckpt}.')
 
         LPIPS.load_from_pretrained = load_pips
@@ -294,7 +294,7 @@ class Refiner:
         config = OmegaConf.load(self.args.mv2_config_path)
         self.dn_config = config
         model = VQModel(**config.model.init_args)
-        sd = torch.load(self.args.mv2_checkpoint_path, map_location='cpu')['state_dict']
+        sd = torch.load(self.args.mv2_checkpoint_path, map_location='cpu', weights_only=True)['state_dict']
         model.load_state_dict(sd, strict=False)
         model.eval()
 
@@ -317,7 +317,7 @@ class Refiner:
             return
 
         rcf = RCF()
-        checkpoint = torch.load(rcf_path)
+        checkpoint = torch.load(rcf_path, weights_only=True)
         rcf.load_state_dict(checkpoint, strict=False)
         rcf.eval()
 
@@ -373,7 +373,7 @@ class Refiner:
         cache_path = self.save_dir / 'cache' / 'X_target.pt'
         if cache_path.exists():
             try:
-                X_target = torch.load(cache_path)
+                X_target = torch.load(cache_path, weights_only=True)
                 X_target = self._resize_to_wis(X_target)
                 self.X_target = X_target.to(self.device)
                 logger.info('Loaded target image.')
@@ -417,7 +417,7 @@ class Refiner:
         cache_path = self.save_dir / 'cache' / 'X_target_denoised.pt'
         if cache_path.exists():
             try:
-                X_target_denoised = torch.load(cache_path)
+                X_target_denoised = torch.load(cache_path, weights_only=True)
                 X_target_denoised = self._resize_to_wis(X_target_denoised)
                 self.X_target_denoised = X_target_denoised.to(self.device)
                 logger.info('Loaded denoised target image.')
@@ -591,7 +591,8 @@ class Refiner:
         """
         Set the manually-defined anchor points.
         """
-        self.anchors = anchors
+        logger.info('Setting anchor points.')
+        self.anchors = {k: v.to(self.device) for k, v in anchors.items()}
 
     @torch.no_grad()
     def set_initial_scene(self, scene: Scene):
@@ -606,7 +607,8 @@ class Refiner:
             else:
                 self.crystal.copy_parameters_from(scene.crystal)
                 scene.crystal = self.crystal
-            self.crystal.to('cpu')
+            # self.crystal.to('cpu')
+            self.crystal.to(self.device)
             scene.light_radiance = nn.Parameter(init_tensor(scene.light_radiance, device=self.device),
                                                 requires_grad=True)
             scene.build_mi_scene()
@@ -643,7 +645,7 @@ class Refiner:
         X_pred_path = cache_dir / 'X_pred.pt'
         if scene_path.exists():
             try:
-                self.X_pred = torch.load(X_pred_path)
+                self.X_pred = torch.load(X_pred_path, weights_only=True)
                 self.scene = Scene.from_yml(scene_path)
                 self.scene.crystal.to('cpu')
                 self.scene_params = mi.traverse(self.scene.mi_scene)

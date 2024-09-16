@@ -269,10 +269,12 @@ class OptimisationPanel(AppPanel):
         sleep_time = int(self.config.Read('refining_update_ui_every_n_seconds', '2'))
 
         def update_ui_thread(stop_event: threading.Event):
+            last_updated_at_step = -1
             while self.refiner.is_training() and not stop_event.is_set():
-                if self.app_frame.image_panel.images_updating:
+                if self.app_frame.image_panel.images_updating or last_updated_at_step == self.step:
                     time.sleep(2)
                     continue
+                last_updated_at_step = self.step
                 self.app_frame.crystal = self.refiner.crystal  # Update the crystal
                 wx.PostEvent(self.app_frame, CrystalChangedEvent(build_mesh=False))
                 wx.PostEvent(self.app_frame, SceneImageChangedEvent(update_images=False))

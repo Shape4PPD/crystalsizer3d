@@ -398,6 +398,7 @@ class AnchorManager:
 
             # Draw a cross at the location of the anchor point
             d = self.ANCHOR_CROSS_SIZE / math.sqrt(2)
+
             gc.SetPen(wx.Pen((*self.ACTIVE_CROSS_COLOUR, 150), 1))
             gc.StrokeLine(int(ax - d), int(ay - d), int(ax + d), int(ay + d))
             gc.StrokeLine(int(ax + d), int(ay - d), int(ax - d), int(ay + d))
@@ -425,7 +426,6 @@ class AnchorManager:
                     gc.SetPen(wx.Pen((*self.ANCHOR_CROSS_COLOUR, 255), 2))
                     gc.StrokeLine(int(ax - d), int(ay - d), int(ax + d), int(ay + d))
                     gc.StrokeLine(int(ax + d), int(ay - d), int(ax - d), int(ay + d))
-
 
             # If the vertex is not found, reset to highlight mode unless we were trying to show a saved anchor
             except VertexNotFoundInImageError:
