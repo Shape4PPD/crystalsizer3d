@@ -482,6 +482,7 @@ class Projector:
         h, w = image.shape[-2:]
         if image.ndim == 4:
             image = image[0]  # Remove batch dimension
+        edges = []
 
         def in_frame(p):
             return 1 <= p[0] < w - 1 and 1 <= p[1] < h - 1
@@ -529,6 +530,13 @@ class Projector:
                             v0 = intersections[((v0 - vc) @ (intersections - ic)).argmax()]
                         if not in_frame(v1):
                             v1 = intersections[((v1 - vc) @ (intersections - ic)).argmax()]
+
+                # Check if the edge has already been drawn
+                edge = torch.stack([v0, v1])
+                if len(edges) != 0 and (edge == torch.stack(edges)).all(dim=(1, 2)).any():
+                    continue
+                edges.append(edge)
+                edges.append(edge.flip(dims=(0,)))  # Add the reverse edge to the list
 
                 # Check if the edge is facing the camera or passing through another face
                 if facing_camera:
