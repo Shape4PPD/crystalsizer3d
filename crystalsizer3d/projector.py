@@ -325,25 +325,22 @@ class Projector:
             intersections, start_inside, end_inside = line_face_intersection(front_face_2d, [start_vertex, end_vertex])
             visible_points = []
 
-            # No intersections, either both inside or no intersections with the face
-            if len(intersections) == 0:
-                # If both vertices are inside, keep both
-                if start_inside and end_inside:
-                    visible_points = [start_vertex, end_vertex]
+            # If the end points are inside the face then add them to the visible points
+            if start_inside:
+                visible_points.append(start_vertex)
+            if end_inside:
+                visible_points.append(end_vertex)
 
-            # If there is a single intersections, we need to replace one of the points
-            elif len(intersections) == 1:
-                # End point needs to be replaced
-                if start_inside:
-                    visible_points = [start_vertex, intersections[0]]
-
-                # Start point needs to be replaced
-                elif end_inside:
-                    visible_points = [intersections[0], end_vertex]
-
-            # If there are two intersections, keep both
-            elif len(intersections) == 2:
+            # If there are intersections, add them to the visible points
+            if len(visible_points) == 0 and len(intersections) == 2:
                 visible_points = intersections
+            elif len(visible_points) == 1:
+                if len(intersections) == 2:
+                    intersections = torch.stack(intersections)
+                    existing_points = torch.norm(intersections - visible_points[0], dim=1) < 1e-3
+                    intersections = intersections[~existing_points]
+                assert len(intersections) == 1, 'Expected a single intersection point.'
+                visible_points.append(intersections[0])
 
             # Draw the line segment on the image
             if len(visible_points) > 0:

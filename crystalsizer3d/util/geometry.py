@@ -149,15 +149,15 @@ def line_segment_intersection(ls1: List[Tensor], ls2: List[Tensor]) -> Optional[
 
 
 @torch.jit.script
-def line_face_intersection(face_vertices: Tensor, test_edge: List[Tensor]):
-    """Checks whether an edge crosses a face in 2d.
+def line_face_intersection(face_vertices: Tensor, test_edge: List[Tensor]) -> Tuple[List[Tensor], bool, bool]:
+    """Checks whether an edge crosses a face in 2d and return the intersections.
 
     Args:
         face_vertices: face given in 2d coordinates
         edge: [xy1, xy2] two vertices given as a list
     """
-    assert face_vertices.ndim == 2 and face_vertices.shape[
-        1] == 2, f'Invalid face vertices shape: {face_vertices.shape}'
+    assert face_vertices.ndim == 2 and face_vertices.shape[1] == 2, \
+        f'Invalid face vertices shape: {face_vertices.shape}'
     assert len(test_edge) == 2, f'Invalid edge shape: {len(test_edge)}'
     assert test_edge[0].shape == test_edge[1].shape == (2,), f'Invalid edge vertices shape: {test_edge[0].shape}'
 
