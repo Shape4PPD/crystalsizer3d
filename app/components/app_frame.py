@@ -37,11 +37,8 @@ class AppFrame(wx.Frame):
 
     def __init__(self, config: wx.Config):
         super().__init__(parent=None, title='Crystal Sizer 3D')
-        # super().__init__(parent=None, title='Crystal Sizer 3D', size=(1920, 1200))
         self.config = config
-
-        # Disable re-size of the window
-        # self.SetWindowStyle(style=wx.DEFAULT_DIALOG_STYLE | wx.MINIMIZE_BOX)
+        self.SetMinSize((1200, 600))
 
         # Initialise panels
         self.control_panel = ControlPanel(self)
@@ -49,7 +46,7 @@ class AppFrame(wx.Frame):
         self.optimisation_panel = OptimisationPanel(self)
 
         # Put panels together
-        base_sizer=wx.BoxSizer(wx.HORIZONTAL)
+        base_sizer = wx.BoxSizer(wx.HORIZONTAL)
         base_sizer.Add(self.control_panel, 1, wx.EXPAND)
         base_sizer.Add(self.image_panel, 3, wx.EXPAND)
         base_sizer.Add(self.optimisation_panel, 1, wx.EXPAND)
