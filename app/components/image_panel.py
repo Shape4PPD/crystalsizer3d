@@ -155,6 +155,7 @@ class ImagePanel(AppPanel):
         self.app_frame.Bind(EVT_DENOISED_IMAGE_CHANGED, self.load_denoised_image)
         self.app_frame.Bind(EVT_SCENE_IMAGE_CHANGED, self.load_scene_image)
         self.app_frame.Bind(EVT_CRYSTAL_MESH_CHANGED, self.update_wireframe)
+        self.image_tabs.Bind(wx.EVT_SIZE, self.find_best_zoom)
 
     def on_image_tab_changed(self, event: wx.Event):
         """
@@ -164,6 +165,26 @@ class ImagePanel(AppPanel):
         self.update_images(quiet=True)
         window = self.image_windows[self.active_window]
         window.Scroll(round(self.scroll_x), round(self.scroll_y))
+
+    def find_best_zoom(self, event: wx.Event = None):
+        """
+        Find the best zoom level for the image.
+        """
+        if event is not None:
+            event.Skip()
+        image = self.images['image']
+        if image is None:
+            return
+        img_width, img_height = self.images['image'].GetSize()
+        window_width, window_height = self.image_tabs.GetClientSize()
+        zoom_x = window_width / img_width
+        zoom_y = window_height / img_height
+        zoom = min(zoom_x, zoom_y)
+        zoom = round(zoom * 10) / 10
+        new_zoom = max(0.1, min(zoom, 10))
+        if new_zoom != self.zoom:
+            self.zoom = new_zoom
+            self.on_zoom_changed()
 
     def load_image(self, event: ImagePathChangedEvent):
         """
@@ -185,22 +206,8 @@ class ImagePanel(AppPanel):
             if SCENE_IMAGE_PATH.exists():
                 SCENE_IMAGE_PATH.unlink()
             self.update_wireframe(update_images=False)
-
-        # Find the best zoom level for the image that fits it all in the frame
-        def find_best_zoom():
-            img_width, img_height = image.GetSize()
-            window_width, window_height = self.image_tabs.GetClientSize()
-            zoom_x = window_width / img_width
-            zoom_y = window_height / img_height
-            zoom = min(zoom_x, zoom_y)
-            zoom = round(zoom * 10) / 10
-            self.zoom = max(0.1, min(zoom, 10))
-
-            # Update the images
-            self.on_zoom_changed()
-            self._log('Image loaded.')
-
-        wx.CallLater(0, find_best_zoom)
+        wx.CallLater(100, self.find_best_zoom)
+        self._log('Image loaded.')
         event.Skip()
 
     def update_images(self, quiet: bool = False):
