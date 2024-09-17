@@ -122,18 +122,18 @@ class ImagePanel(AppPanel):
         self.btn_zoom_out = wx.Button(self, label='-')
         self.btn_zoom_out.Bind(wx.EVT_BUTTON, self.on_zoom_out)
         zoom_sizer = wx.BoxSizer(wx.HORIZONTAL)
-        zoom_sizer.Add(self.lbl_zoom,2, wx.EXPAND | wx.ALL, 2)
+        zoom_sizer.Add(self.lbl_zoom, 2, wx.EXPAND | wx.ALL, 2)
         zoom_sizer.Add(self.btn_zoom_in, 1, wx.EXPAND | wx.ALL, 2)
         zoom_sizer.Add(self.btn_zoom_out, 1, wx.EXPAND | wx.ALL, 2)
 
         # Wireframe checkbox
-        self.ckbx_wireframe=wx.CheckBox(self, label='Show wireframe')
+        self.ckbx_wireframe = wx.CheckBox(self, label='Show wireframe')
         self.ckbx_wireframe.SetValue(True)
-        self.ckbx_wireframe.Bind(wx.EVT_CHECKBOX,self.on_wireframe_ckbx)
+        self.ckbx_wireframe.Bind(wx.EVT_CHECKBOX, self.on_wireframe_ckbx)
 
         controls_sizer_r = wx.StaticBoxSizer(wx.VERTICAL, parent=self)
         controls_sizer_r.Add(zoom_sizer, 1, wx.EXPAND | wx.ALL, 1)
-        controls_sizer_r.Add(self.ckbx_wireframe, 1, wx.EXPAND| wx.ALL, 1)
+        controls_sizer_r.Add(self.ckbx_wireframe, 1, wx.EXPAND | wx.ALL, 1)
 
         # Controls sizer
         controls_sizer = wx.BoxSizer(wx.HORIZONTAL)
@@ -264,7 +264,6 @@ class ImagePanel(AppPanel):
             if not quiet:
                 self._log('Images updated.')
             return
-
 
         # Scale the image to match the height of the main image
         sf = base_image.GetHeight() / image.GetHeight()
@@ -464,7 +463,7 @@ class ImagePanel(AppPanel):
         # Delay setting the flag to debounce zoom events
         wx.CallLater(100, after_zoom_finished)
 
-    def on_wireframe_ckbx(self,event):
+    def on_wireframe_ckbx(self, event):
         self.update_images()
 
     def on_click_image_L(self, event):

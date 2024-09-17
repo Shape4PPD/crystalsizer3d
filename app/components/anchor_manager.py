@@ -244,7 +244,7 @@ class AnchorManager:
                 return
 
             # Close to the selected vertex so deselect it
-            if math.sqrt((mx - vx) ** 2 + (my - vy) ** 2) < self.HIGHLIGHT_CIRCLE_RADIUS * 1.2:
+            if math.sqrt((mx - vx)**2 + (my - vy)**2) < self.HIGHLIGHT_CIRCLE_RADIUS * 1.2:
                 self.deselect_vertex()
 
             # Not too close to the selected vertex so fix the anchor point here
@@ -398,7 +398,6 @@ class AnchorManager:
 
             # Draw a cross at the location of the anchor point
             d = self.ANCHOR_CROSS_SIZE / math.sqrt(2)
-
             gc.SetPen(wx.Pen((*self.ACTIVE_CROSS_COLOUR, 150), 1))
             gc.StrokeLine(int(ax - d), int(ay - d), int(ax + d), int(ay + d))
             gc.StrokeLine(int(ax + d), int(ay - d), int(ax - d), int(ay + d))
@@ -414,7 +413,7 @@ class AnchorManager:
             try:
                 vx, vy = self._get_vertex_image_coords(vertex_key)
                 ax, ay = self._relative_to_image_coords(anchor_point)
-                draw_line = math.sqrt((ax - vx) ** 2 + (ay - vy) ** 2) > self.HIGHLIGHT_CIRCLE_RADIUS * 1.2
+                draw_line = math.sqrt((ax - vx)**2 + (ay - vy)**2) > self.HIGHLIGHT_CIRCLE_RADIUS * 1.2
 
                 if draw_line:
                     # Connecting line
