@@ -335,10 +335,6 @@ class Projector:
             if len(visible_points) == 0 and len(intersections) == 2:
                 visible_points = intersections
             elif len(visible_points) == 1:
-                if len(intersections) == 2:
-                    intersections = torch.stack(intersections)
-                    existing_points = torch.norm(intersections - visible_points[0], dim=1) < 1e-3
-                    intersections = intersections[~existing_points]
                 assert len(intersections) == 1, 'Expected a single intersection point.'
                 visible_points.append(intersections[0])
 
