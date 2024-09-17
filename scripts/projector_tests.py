@@ -268,6 +268,7 @@ def match_to_scene():
         image_size=(res, res),
         zoom=zoom,
         transparent_background=True,
+        multi_line=True
     )
     img_overlay = to_numpy(projector.image * 255).astype(np.uint8).squeeze().transpose(1, 2, 0)
     img_overlay[:, :, 3] = (img_overlay[:, :, 3] * 0.5).astype(np.uint8)

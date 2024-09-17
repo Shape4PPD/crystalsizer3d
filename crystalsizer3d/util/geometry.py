@@ -98,6 +98,106 @@ def is_point_in_bounds(p: Tensor, bounds: List[Tensor], eps: float = 1e-6) -> bo
 
 
 @torch.jit.script
+def polygon_area(vertices: Tensor) -> Tensor:
+    """
+    Calculate the area of a 2D polygon given its vertices.
+    """
+    assert vertices.ndim == 2 and vertices.shape[1] == 2, f'Invalid vertices shape: {vertices.shape}'
+    x = vertices[:, 0]
+    y = vertices[:, 1]
+
+    # Calculate the area using the shoelace formula
+    area = 0.5 * torch.abs(torch.dot(x, torch.roll(y, -1)) - torch.dot(y, torch.roll(x, -1)))
+
+    return area
+
+
+@torch.jit.script
+def is_point_in_polygon(vertices: Tensor, point: Tensor) -> bool:
+    """
+    Check if a point is inside a 2D polygon.
+    """
+    n = vertices.shape[0]
+    intersections = 0
+
+    for i in range(n):
+        v1 = vertices[i]
+        v2 = vertices[(i + 1) % n]
+
+        if (v1[1] > point[1]) != (v2[1] > point[1]):
+            intersection_x = (v2[0] - v1[0]) * (point[1] - v1[1]) / (v2[1] - v1[1]) + v1[0]
+            if point[0] < intersection_x:
+                intersections += 1
+
+    return intersections % 2 == 1
+
+
+@torch.jit.script
+def line_segment_intersection(ls1: List[Tensor], ls2: List[Tensor]) -> Optional[Tensor]:
+    """
+    Calculate the intersection point of two line segments given by their endpoints.
+    """
+    l1 = line_equation_coefficients(ls1[0], ls1[1])
+    l2 = line_equation_coefficients(ls2[0], ls2[1])
+    intersection = line_intersection(l1, l2)
+    if intersection is not None:
+        on_line1 = is_point_in_bounds(intersection, ls1)
+        on_line2 = is_point_in_bounds(intersection, ls2)
+        if not on_line1 or not on_line2:
+            return None
+    return intersection
+
+
+@torch.jit.script
+def line_face_intersection(face_vertices: Tensor, test_edge: List[Tensor]):
+    """Checks whether an edge crosses a face in 2d.
+
+    Args:
+        face_vertices: face given in 2d coordinates
+        edge: [xy1, xy2] two vertices given as a list
+    """
+    assert face_vertices.ndim == 2 and face_vertices.shape[
+        1] == 2, f'Invalid face vertices shape: {face_vertices.shape}'
+    assert len(test_edge) == 2, f'Invalid edge shape: {len(test_edge)}'
+    assert test_edge[0].shape == test_edge[1].shape == (2,), f'Invalid edge vertices shape: {test_edge[0].shape}'
+
+    n = face_vertices.shape[0]
+    intersection_points = []
+
+    # Check if the start or end point is inside the polygon
+    start_inside = is_point_in_polygon(face_vertices, test_edge[0])
+    end_inside = is_point_in_polygon(face_vertices, test_edge[1])
+
+    # Check for intersections with each polygon edge
+    for i in range(n):
+        v1 = face_vertices[i]
+        v2 = face_vertices[(i + 1) % n]
+
+        # Check if the start or end point is one of the polygon edge vertices
+        vertex_matched = False
+        for v in [v1, v2]:
+            if torch.allclose(v, test_edge[0]) or torch.allclose(v, test_edge[1]):
+                vertex_matched = True
+                if len(intersection_points) == 0 or not (torch.stack(intersection_points) == v).all(dim=1).any():
+                    intersection_points.append(v)
+
+        # If the start or end point is on the edge, skip the intersection check
+        if vertex_matched:
+            continue
+
+        # Check for intersection with the polygon edge
+        intersection = line_segment_intersection(test_edge, [v1, v2])
+        if (intersection is not None
+                and (len(intersection_points) == 0
+                     or not (torch.stack(intersection_points) == intersection).all(dim=1).any())):
+            intersection_points.append(intersection)
+
+    assert len(intersection_points) <= 2
+
+    return intersection_points, start_inside, end_inside
+
+
+@torch.jit.script
 def geodesic_distance(R1: Tensor, R2: Tensor, eps: float = 1e-4) -> Tensor:
     """
     Compute the geodesic distance between two rotation matrices.

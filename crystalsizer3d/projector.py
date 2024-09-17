@@ -12,7 +12,8 @@ from torch import Tensor
 from torch.nn.functional import interpolate
 
 from crystalsizer3d.crystal import Crystal
-from crystalsizer3d.util.geometry import is_point_in_bounds, line_equation_coefficients, line_intersection, normalise
+from crystalsizer3d.util.geometry import is_point_in_bounds, line_equation_coefficients, line_face_intersection, \
+    line_intersection, normalise, polygon_area
 from crystalsizer3d.util.utils import init_tensor
 
 # A vertex can appear in multiple faces due to refraction, so we need to store the face index (or 'facing') as well
@@ -74,6 +75,7 @@ class Projector:
     projected_vertices: Dict[int, Tensor]
     projected_vertex_keys: List[ProjectedVertexKey]
     projected_vertex_coords: Tensor
+    rear_facing_edges: Tensor
     image: Tensor
 
     def __init__(
@@ -108,7 +110,7 @@ class Projector:
         self.background_image = None
         self.set_background(background_image)
         self.transparent_background = transparent_background
-        
+
         # Drawing mode
         self.multi_line = multi_line
 
@@ -133,7 +135,6 @@ class Projector:
 
         # Do the projection
         self.image = self.project()
-        
 
     def _to_relative_coords(self, coords: Tensor) -> Tensor:
         """
@@ -192,6 +193,9 @@ class Projector:
 
         # Project the vertices including all refractions
         self._project_vertices()
+
+        # Extract the edges facing away from the camera - required for multi-line drawing
+        self.rear_facing_edges = self._extract_rear_facing_edges()
 
         # Generate the refracted wireframe image
         if generate_image:
@@ -265,23 +269,18 @@ class Projector:
             is_facing = normal @ self.view_axis < 0
             if len(face) < 3 or not is_facing:
                 continue
+            if face_idx not in self.projected_vertices:
+                continue
 
+            # Draw every line segment individually
             if self.multi_line:
-                # for each from face, i.e. non-refracted face, calculate refraction through that face.
-                image = self._calculate_refraction(face,normal,distance,image)
-            else:
-                # Refract the points and project them to 2d
-                refracted_points = self._refract_points(normal, distance)
-                vertices_2d = self._orthogonal_projection(refracted_points)
+                image = self._draw_edge_segments(face_idx, image)
 
-                # Check that the points on the face did not move
-                face_vertices_og = vertices_2d_og[face]
-                face_vertices = vertices_2d[face]
-                assert torch.allclose(face_vertices_og, face_vertices, atol=1e-5), 'Face vertices moved during refraction.'
+            # Refract all the lines through the face then cut out the visible parts
+            else:
                 # Draw all refracted edges on an empty image
-                rf_image = self._draw_edges(vertices_2d, facing_camera=False)
-                rf_image2 = self._draw_edges(vertices_2d_og, facing_camera=True)
-                rf_image  = rf_image + rf_image2
+                vertices_2d = self.projected_vertices[face_idx]
+                rf_image = self._draw_full_edges(vertices_2d, facing_camera=False)
 
                 # Fill the face with the refracted image
                 image = replace_convex_polygon(
@@ -290,30 +289,8 @@ class Projector:
                     replacement=rf_image[None, ...]
                 )[0]
 
-
-                # # -- DEBUG -- Draw the face on a separate image
-                # face_img = self.canvas_image.clone()
-                # face_img = replace_convex_polygon(
-                #     images=face_img[None, ...],
-                #     polygons=self.vertices_2d[face][None, ...],
-                #     replacement=torch.ones_like(rf_image)[None, ...]
-                # )[0]
-                # faces_img = replace_convex_polygon(
-                #     images=faces_img[None, ...],
-                #     polygons=self.vertices_2d[face][None, ...],
-                #     replacement=torch.ones_like(rf_image)[None, ...]
-                # )[0]
-                # fig, axes = plt.subplots(2,2, figsize=(20, 20))
-                # axes[0,0].imshow(to_numpy(rf_image).transpose(1, 2, 0))
-                # axes[0,1].imshow(to_numpy(image).transpose(1, 2, 0))
-                # axes[1,0].imshow(to_numpy(face_img).transpose(1, 2, 0))
-                # axes[1,1].imshow(to_numpy(faces_img).transpose(1, 2, 0))
-                # fig.tight_layout()
-                # plt.show()
-                # print(" ")
-
         # Draw top edges on the image
-        image = self._draw_edges(self.vertices_2d, image=image, facing_camera=True)
+        image = self._draw_full_edges(self.vertices_2d, image=image, facing_camera=True)
 
         # Apply the background image
         if self.background_image is not None:
@@ -331,208 +308,81 @@ class Projector:
 
         return image
 
-    def _calculate_refraction(self,front_face,front_normal,front_distance, image):
-        """Calculates refraction through a given face
-
-        Args:
-            front_face: List of indices for a given face
-            front_normal: Normal vector of given face
-            front_distance: distance value for given face
+    def _draw_edge_segments(self, face_idx: int, image: Tensor):
         """
-        refracted_points = self._refract_points(front_normal, front_distance)
-        # this just gives the corners of the refracted faces
-        
-        # now we filter the ones we want
-        refracted_2d = self._orthogonal_projection(refracted_points)
-        # refracted_2d = self.project_to_2d(refracted_points)
+        Draw all edge segments refracted through a given face onto the given image.
+        """
+        refracted_2d = self.projected_vertices[face_idx]
+        front_face_2d = self.vertices_2d[self.faces[face_idx]]
 
-        # we want to calculate if any of the lines between verties cross the front face
-        front_face_2d = self.vertices_2d[front_face]
-        
-        #if face has no area. i.e its being seen from 90 degrees on, don't bother calculating anything
-        if self._ploygon_area(front_face_2d) == 0:
+        # If face has no area, (i.e. it's being viewed from 90 degrees), there's nothing to draw
+        if polygon_area(front_face_2d) < 1e-3:
             return image
-        
-        # for refracted face, just get the refracted edges without repeats
-        # for each refracted face, facing away from the camera
+
+        # Consider the refracted projection of each rear-facing edge in the given face
+        for edge in self.rear_facing_edges:
+            start_vertex, end_vertex = refracted_2d[edge]
+            intersections, start_inside, end_inside = line_face_intersection(front_face_2d, [start_vertex, end_vertex])
+            visible_points = []
+
+            # No intersections, either both inside or no intersections with the face
+            if len(intersections) == 0:
+                # If both vertices are inside, keep both
+                if start_inside and end_inside:
+                    visible_points = [start_vertex, end_vertex]
+
+            # If there is a single intersections, we need to replace one of the points
+            elif len(intersections) == 1:
+                # End point needs to be replaced
+                if start_inside:
+                    visible_points = [start_vertex, intersections[0]]
+
+                # Start point needs to be replaced
+                elif end_inside:
+                    visible_points = [intersections[0], end_vertex]
+
+            # If there are two intersections, keep both
+            elif len(intersections) == 2:
+                visible_points = intersections
+
+            # Draw the line segment on the image
+            if len(visible_points) > 0:
+                image = draw_line(image, visible_points[0], visible_points[1], self.colour_facing_away)
+
+        return image
+
+    def _extract_rear_facing_edges(self):
+        """
+        Extracts unique edges from faces that are facing away from the camera.
+        """
+        # Create a list of faces that are facing away from the camera
         rear_faces = []
-        for face, face_normal, distance in zip(self.faces, self.face_normals, self.distances):
-            # want faces facing away from view axis
+        for face, face_normal in zip(self.faces, self.face_normals):
             if len(face) < 3 or face_normal @ self.view_axis < 0:
                 continue
             rear_faces.append(face)
-        unique_egdes = self._extract_unique_edges(rear_faces)
 
-        # for each refracted edge, facing away from the camera
-        for edge in unique_egdes:
-            ref_edge_2d = refracted_2d[edge]
-            # look at each edge of each refracted face
-            visable_points = []
-            start_vertex = ref_edge_2d[0]
-            end_vertex = ref_edge_2d[1]
-            
-            intersections, start_inside, end_inside = self._line_face_intersection(front_face_2d,[start_vertex,end_vertex]) 
-
-            # see if it crosses face edges at all
-            if len(intersections) == 0:
-                # if no intersections, and both outside do nothing, it doesn't cross the face
-                if start_inside and end_inside:
-                    # if both inside, then keep booth points
-                    visable_points.append(start_vertex)
-                    visable_points.append(end_vertex)
-            else:
-                if start_inside:
-                    #then end point needs to be replaced
-                    visable_points.append(start_vertex)
-                    visable_points.append(intersections[0])
-                elif end_inside:
-                    #then start point needs to be replaced
-                    visable_points.append(intersections[0])
-                    visable_points.append(end_vertex)
-                else:
-                    assert len(intersections) <= 2
-                    if len(intersections) == 2:
-                        #both outside need both intersection points
-                        visable_points.append(intersections[0])
-                        visable_points.append(intersections[1])
-            if len(visable_points) > 0:
-                # points, line_normal = self._edge_points(visable_points[0],visable_points[1])
-                # self.point_collection.add_points(points,line_normal,1)
-                colour = self.colour_facing_away
-                image = draw_line(image, visable_points[0], visable_points[1], colour)
-        return image
-
-    def _ploygon_area(self,vertices):
-        # Assuming vertices is an Nx2 tensor where N is the number of points
-        x = vertices[:, 0]
-        y = vertices[:, 1]
-        
-        # Calculate the area using the shoelace formula
-        area = 0.5 * torch.abs(torch.dot(x, torch.roll(y, -1)) - torch.dot(y, torch.roll(x, -1)))
-        
-        return area
-    
-    def _extract_unique_edges(self,faces):
-    # Initialize an empty set for edges
+        # Initialise an empty set for edges
         edges = set()
 
-        # Iterate over each face
-        for face in faces:
-            num_vertices = face.size(0)  # Get the number of vertices in the face
-            
+        # Iterate over the faces
+        for face in rear_faces:
+            num_vertices = len(face)
+
             for i in range(num_vertices):
                 # Create edge between vertex i and vertex i+1, wrapping around to the start
                 v1, v2 = face[i].item(), face[(i + 1) % num_vertices].item()
 
                 # Store edge in a consistent order
                 edge = tuple(sorted((v1, v2)))
-                
+
                 # Add edge to set
                 edges.add(edge)
-        
+
         # Convert set to a tensor of edges
         unique_edges = torch.tensor(list(edges))
+
         return unique_edges
-    
-    def _line_intersection(self,a, b):
-        # Unpack points
-        x1, y1 = a[0]
-        x2, y2 = a[1]
-        x3, y3 = b[0]
-        x4, y4 = b[1]
-        
-        # Calculate denominators
-        denom = (x1 - x2) * (y3 - y4) - (y1 - y2) * (x3 - x4)
-        
-        # Check if lines are parallel (denom == 0) or close enough
-        if torch.isclose(denom,torch.zeros(1,device=self.device),atol=1):
-            return None, False  # Lines are parallel and do not intersect
-        
-        # Calculate the intersection point
-        intersect_x = ((x1*y2 - y1*x2) * (x3 - x4) - (x1 - x2) * (x3*y4 - y3*x4)) / denom
-        intersect_y = ((x1*y2 - y1*x2) * (y3 - y4) - (y1 - y2) * (x3*y4 - y3*x4)) / denom
-        intersection = torch.tensor([intersect_x, intersect_y],device=self.device)
-        
-        # Check if the intersection point is within both line segments
-        def is_between(p, q, r):
-            return (min(p, q) <= r <= max(p, q))
-        
-        if (is_between(x1, x2, intersect_x) and is_between(y1, y2, intersect_y) and
-            is_between(x3, x4, intersect_x) and is_between(y3, y4, intersect_y)):
-            return intersection, True
-        
-        return None, False  # Intersection point is not within the segments
-    
-    def _line_face_intersection(self,vertices,test_edge):
-        """Checks whether an edge crosses a face in 2d
-
-        Args:
-            vertices: face given in 2d coordinates
-            edge: [xy1, xy2] two vertices given as a list
-        """
-        
-        n = vertices.shape[0]
-        intersections = 0
-        intersection_points = []
-        
-        # Check if the start or end point is inside the polygon
-        start_inside = self._is_point_in_polygon(vertices, test_edge[0])
-        end_inside = self._is_point_in_polygon(vertices, test_edge[1])
-        
-        # Check for intersections with each polygon edge
-        for i in range(n):
-            v1 = vertices[i]
-            v2 = vertices[(i + 1) % n]
-            
-            #check both edges on face vertices first
-            both_on_face = 0
-            # Check whether start or end point is on polygon
-            if torch.allclose(v1,test_edge[0]):
-                point_exist = False
-                for ip in intersection_points:
-                    if torch.allclose(ip,test_edge[0]):
-                        point_exist = True
-                if point_exist == False: 
-                    intersections += 1
-                    intersection_points.append(v1)
-                    both_on_face += 1
-            if torch.allclose(v1,test_edge[1]):
-                point_exist = False
-                for ip in intersection_points:
-                    if torch.allclose(ip,test_edge[1]):
-                        point_exist = True
-                if point_exist == False: 
-                    intersections += 1
-                    intersection_points.append(v1)
-                    both_on_face += 1
-            if both_on_face == 2:
-                continue             
-            intersection, intersect = self._line_intersection(test_edge,[v1,v2])
-            if intersect:
-                point_exist = False
-                for ip in intersection_points:
-                    if torch.allclose(ip,intersection):
-                        point_exist = True
-                if point_exist == False:   
-                    intersections += 1
-                    intersection_points.append(intersection)
-        assert len(intersection_points) <= 2
-        return intersection_points, start_inside, end_inside
-    
-    def _is_point_in_polygon(self, vertices, point):
-        n = vertices.shape[0]
-        intersections = 0
-
-        for i in range(n):
-            v1 = vertices[i]
-            v2 = vertices[(i + 1) % n]
-
-            if ((v1[1] > point[1]) != (v2[1] > point[1])):
-                intersection_x = (v2[0] - v1[0]) * (point[1] - v1[1]) / (v2[1] - v1[1]) + v1[0]
-                if point[0] < intersection_x:
-                    intersections += 1
-
-        return intersections % 2 == 1
 
     def _refract_points(self, normal: Tensor, distance: Tensor) -> Tensor:
         """
@@ -609,7 +459,7 @@ class Projector:
 
         return projected_vertices
 
-    def _draw_edges(
+    def _draw_full_edges(
             self,
             vertices: Tensor,
             image: Optional[Tensor] = None,
