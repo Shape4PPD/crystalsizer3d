@@ -22,6 +22,7 @@ class OptimiserArgs(BaseArgs):
             lr_generator_init: float = 0.1,
             lr_discriminator_init: float = 0.1,
             lr_denoiser_init: float = 0.1,
+            lr_vertex_detector_init: float = 0.1,
             lr_transcoder_init: float = 0.1,
             lr_scheduler: str = 'cosine',
             lr_min: float = 1e-6,
@@ -66,6 +67,10 @@ class OptimiserArgs(BaseArgs):
             w_com_X: float = 0.,
             w_com_Y: float = 0.,
 
+            w_vd_l1: float = 1.0,
+            w_vd_l2: float = 1.0,
+            w_vd_fl: float = 1.0,
+
             **kwargs
     ):
         # Optimisation algorithm
@@ -97,6 +102,7 @@ class OptimiserArgs(BaseArgs):
         self.lr_generator_init = lr_generator_init
         self.lr_discriminator_init = lr_discriminator_init
         self.lr_denoiser_init = lr_denoiser_init
+        self.lr_vertex_detector_init = lr_vertex_detector_init
         self.lr_transcoder_init = lr_transcoder_init
         self.lr_scheduler = lr_scheduler
         self.lr_min = lr_min
@@ -153,6 +159,11 @@ class OptimiserArgs(BaseArgs):
         self.w_com_X = w_com_X
         self.w_com_Y = w_com_Y
 
+        # Vertex detector loss weightings
+        self.w_vd_l1 = w_vd_l1
+        self.w_vd_l2 = w_vd_l2
+        self.w_vd_fl = w_vd_fl
+
     @classmethod
     def add_args(cls, parser: ArgumentParser) -> _ArgumentGroup:
         """
@@ -172,6 +183,8 @@ class OptimiserArgs(BaseArgs):
                            help='Learning rate for discriminator network.')
         group.add_argument('--lr-denoiser-init', type=float, default=0.1,
                            help='Learning rate for denoiser network.')
+        group.add_argument('--lr-vertex-detector-init', type=float, default=0.1,
+                           help='Learning rate for vertex detector network.')
         group.add_argument('--lr-transcoder-init', type=float, default=0.1,
                            help='Learning rate for transcoder network (if trained by self).')
         group.add_argument('--lr-scheduler', type=str, default='cosine',
@@ -255,5 +268,12 @@ class OptimiserArgs(BaseArgs):
                            help='Weight for combined X loss - used in train_combined mode.')
         group.add_argument('--w-com-Y', type=float, default=0.,
                            help='Weight for combined Y loss - used in train_combined mode.')
+
+        group.add_argument('--w-vd-l1', type=float, default=0,
+                           help='Weight for L1 loss in vertex detector.')
+        group.add_argument('--w-vd-l2', type=float, default=0,
+                           help='Weight for L2 loss in vertex detector.')
+        group.add_argument('--w-vd-fl', type=float, default=1.0,
+                           help='Weight for focal loss in vertex detector.')
 
         return group

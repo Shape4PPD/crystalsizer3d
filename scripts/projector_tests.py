@@ -12,6 +12,7 @@ from crystalsizer3d.projector import Projector
 from crystalsizer3d.scene_components.scene import Scene
 from crystalsizer3d.scene_components.utils import project_to_image
 from crystalsizer3d.util.utils import init_tensor, to_numpy
+from crystalsizer3d.util.vertex_heatmaps import generate_vertex_heatmap
 
 if USE_CUDA:
     device = torch.device('cuda')
@@ -117,11 +118,28 @@ TEST_CRYSTALS = {
                       0.6028826832771301, 0.5543457865715027, 0.6761952638626099, 0.5320407748222351,
                       0.8264796733856201, 0.7732805609703064, 0.7696529030799866, 0.7346971035003662,
                       0.7784842848777771, 0.8692794442176819, 0.8123345971107483],
-        'scale': 5.84,
-        'rotation': [-0.0004319465660955757, 0.0018085570773109794, 1.2971580028533936],
+        'scale': 7.84,
+        'rotation': [-0.8004319465660955757, 0.9018085570773109794, 1.2971580028533936],
         "origin": [0.1671956479549408, 0.11368720978498459, 0.4015026092529297],
         'material_ior': 1.63,
         'material_roughness': 0.16
+    },
+    'alpha7': {
+        'lattice_unit_cell': [7.068, 10.277, 8.755],
+        'lattice_angles': [np.pi / 2, np.pi / 2, np.pi / 2],
+        'miller_indices': [(0, 0, 1), (0, 1, 1), (1, 1, 1), (-1, -1, -1), (1, 0, 0), (1, 1, 0), (0, 0, -1), (0, -1, -1),
+                           (0, 1, -1), (0, -1, 1), (1, -1, -1), (-1, 1, -1), (-1, -1, 1), (-1, 1, 1), (1, -1, 1),
+                           (1, 1, -1), (-1, 0, 0), (1, -1, 0), (-1, 1, 0), (-1, -1, 0)],
+        'distances': [0.4180285632610321, 0.912309467792511, 0.5652278065681458, 0.7703648805618286, 0.5062384605407715,
+                      0.779175341129303, 0.5240940451622009, 0.8707500100135803, 1.0, 0.9103384613990784,
+                      0.49669593572616577, 0.6077476739883423, 0.5837719440460205, 0.7623077630996704,
+                      0.7793679237365723, 0.8473895788192749, 0.6140317916870117, 0.7662931680679321, 0.822736382484436,
+                      0.6973626613616943],
+        'scale': 4.84,
+        'rotation': [0.8882678747177124, 0.4394600987434387, 0.09270056337118149],
+        "origin": [1.147449254989624, 0.5360877513885498, 1.2139800786972046],
+        'material_ior': 1.63,
+        'material_roughness': 0.24
     },
     'beta': {
         'lattice_unit_cell': [7.068, 10.277, 8.755],
@@ -171,6 +189,57 @@ def show_projected_image(which='alpha'):
                           multi_line=True)
     projector.image[:, projector.image.sum(dim=0) == 0] = 1
     plt.imshow(tensor_to_image(projector.image))
+    plt.show()
+
+
+def show_vertices(which='alpha'):
+    """
+    Show the projected crystal wireframe along with locations of all the vertices and intersections.
+    """
+    image_size = (500, 500)
+    assert which in TEST_CRYSTALS
+    crystal = Crystal(**TEST_CRYSTALS[which])
+    if which == 'beta':
+        zoom = 0.001
+    else:
+        zoom = 0.2
+    crystal.to(device)
+    projector = Projector(crystal, external_ior=1., image_size=image_size, zoom=zoom, camera_axis=[0, 0, -1],
+                          multi_line=True)
+    projector.image[:, projector.image.sum(dim=0) == 0] = 1
+
+    plt.figure(figsize=(10, 10))
+    plt.imshow(tensor_to_image(projector.image))
+    plt.scatter(*to_numpy(projector.vertices_and_intersections).T, color='green', marker='o', s=200, alpha=0.4)
+    plt.tight_layout()
+    plt.show()
+
+
+def show_vertex_heatmap(which='alpha'):
+    """
+    Generate a heatmap of all the vertices and intersections.
+    """
+    image_size = (500, 500)
+    assert which in TEST_CRYSTALS
+    crystal = Crystal(**TEST_CRYSTALS[which])
+    zoom = 0.1
+    crystal.to(device)
+    projector = Projector(crystal, external_ior=1., image_size=image_size, zoom=zoom, camera_axis=[0, 0, -1],
+                          multi_line=True)
+    projector.image[:, projector.image.sum(dim=0) == 0] = 1
+
+    heatmap = generate_vertex_heatmap(
+        vertices=projector.vertices_and_intersections,
+        image_size=image_size[0],
+        blob_height=1.0,
+        blob_variance=20.0
+    )
+
+    heatmap = 1 - to_numpy(heatmap)
+    plt.figure(figsize=(10, 10))
+    plt.imshow(heatmap, cmap='hot')
+    plt.scatter(*to_numpy(projector.vertices_and_intersections).T, color='green', marker='x', s=400, alpha=0.9)
+    plt.tight_layout()
     plt.show()
 
 
@@ -414,6 +483,8 @@ if __name__ == '__main__':
     # show_projected_image('alpha4')
     # show_projected_image('alpha5')
     # show_projected_image('alpha6')
-    match_to_scene()
+    # show_vertices('alpha7')
+    show_vertex_heatmap('alpha6')
+    # match_to_scene()
     # make_rotation_video()
     # make_ior_video()

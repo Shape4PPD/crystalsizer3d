@@ -19,6 +19,7 @@ from crystalsizer3d.args.dataset_training_args import DatasetTrainingArgs
 from crystalsizer3d.crystal import Crystal, ROTATION_MODE_AXISANGLE, ROTATION_MODE_QUATERNION
 from crystalsizer3d.csd_proxy import CSDProxy
 from crystalsizer3d.util.utils import ArgsCompatibleJSONEncoder, hash_data, to_numpy
+from crystalsizer3d.util.vertex_heatmaps import generate_vertex_heatmap
 
 DATASET_TYPE_SYNTHETIC = 'synthetic'
 DATASET_TYPE_IMAGES = 'images'
@@ -150,6 +151,26 @@ class Dataset:
         # Cache the rotation matrices and symmetry groups
         self.rotation_matrices = self._calculate_rotation_matrices()
         self.symmetry_groups = {}
+
+        # The vertex detector requires a crystal and projector
+        if self.dst_args.train_vertex_detector:
+            from crystalsizer3d.crystal_renderer import CrystalRenderer
+            from crystalsizer3d.projector import Projector
+            from crystalsizer3d.scene_components.utils import orthographic_scale_factor
+            renderer = CrystalRenderer(
+                param_path=self.path / 'parameters.csv',
+                dataset_args=self.dataset_args,
+                quiet_render=True
+            )
+            r_params = self.data[0]['rendering_parameters']
+            _, scene = renderer.render_from_parameters(r_params, return_scene=True)
+            crystal = self.load_crystal(idx=0, use_bumpmap=False)
+            self.projector = Projector(
+                crystal,
+                image_size=(self.dataset_args.image_size, self.dataset_args.image_size),
+                zoom=orthographic_scale_factor(scene),
+                multi_line=True
+            )
 
     def _load_data(self):
         """
@@ -381,7 +402,7 @@ class Dataset:
             img = Image.open(item['image'])
 
         # Load the clean image too if training the generator
-        if self.dst_args.train_generator or self.dst_args.train_denoiser:
+        if self.dst_args.train_generator or self.dst_args.train_denoiser or self.dst_args.train_vertex_detector:
             img_clean = Image.open(item['image_clean'])
         else:
             img_clean = None
@@ -501,6 +522,23 @@ class Dataset:
                 z_transform(r_params['light_radiance'][i], f'e{rgb}')
                 for i, rgb in enumerate('rgb')
             ])
+
+        # Include the projected vertex positions for the vertex detector
+        if self.dst_args.train_vertex_detector:
+            self.projector.crystal.scale.data = torch.tensor(r_params['crystal']['scale'])
+            self.projector.crystal.distances.data = torch.tensor(r_params['crystal']['distances'])
+            self.projector.crystal.origin.data = torch.tensor(r_params['crystal']['origin'])
+            self.projector.crystal.rotation.data = torch.tensor(r_params['crystal']['rotation'])
+            self.projector.crystal.build_mesh(update_uv_map=False)
+            self.projector.project(generate_image=False)
+            heatmap = generate_vertex_heatmap(
+                vertices=self.projector.vertices_and_intersections,
+                image_size=self.dataset_args.image_size,
+                blob_height=self.dst_args.heatmap_blob_height,
+                blob_variance=self.dst_args.heatmap_blob_variance
+            )
+            params['vertices_and_intersections'] = to_numpy(self.projector.vertices_and_intersections)
+            params['vertex_heatmap'] = to_numpy(heatmap)
 
         return item, img, img_clean, params
 
@@ -929,7 +967,7 @@ def prep_distances(
         distances[:, pos] = distance_vals[:, i]
 
     # Add any distances that are not in the active set
-    if (dataset_args.asymmetry is None and labels_distances != labels_distances_active):
+    if dataset_args.asymmetry is None and labels_distances != labels_distances_active:
         for d_lbl in labels_distances:
             if d_lbl not in labels_distances_active:
                 d_pos = labels_distances.index(d_lbl)

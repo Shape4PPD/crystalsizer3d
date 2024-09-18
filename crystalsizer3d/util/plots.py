@@ -68,14 +68,14 @@ def plot_error(ax: Axes, err: str):
     ax.axis('off')
 
 
-def plot_image(ax: Axes, title: str, img: np.ndarray):
+def plot_image(ax: Axes, title: str, img: np.ndarray, cmap: str = 'gray'):
     """
     Plot an image on the axis.
     """
     ax.set_title(title)
     img = img.squeeze()
     if img.ndim == 2:
-        ax.imshow(img, cmap='gray', vmin=0, vmax=1)
+        ax.imshow(img, cmap=cmap, vmin=0, vmax=1)
     else:
         if img.shape[0] == 3:
             img = img.transpose(1, 2, 0)
@@ -946,6 +946,68 @@ def plot_denoiser_samples(
         img = to_numpy(X_dn[idx]).squeeze()
         ax = fig.add_subplot(gs[2, i])
         plot_image(ax, 'Denoised', img)
+
+    return fig
+
+
+def plot_vertex_detector_samples(
+        manager: Manager,
+        data: Tuple[dict, Tensor, Tensor, Tensor, Dict[str, Tensor]],
+        outputs: Dict[str, Any],
+        train_or_test: str,
+        idxs: List[int],
+) -> Figure:
+    """
+    Plot the image and vertex heatmaps output.
+    """
+    n_examples = len(idxs)
+    metas, images, images_aug, images_clean, Y_target = data
+    n_rows = 4
+    fig = plt.figure(figsize=(n_examples * 2.7, n_rows * 3))
+    gs = GridSpec(
+        nrows=n_rows,
+        ncols=n_examples,
+        wspace=0.06,
+        hspace=0.03,
+        top=0.95,
+        bottom=0.004,
+        left=0.01,
+        right=0.99
+    )
+
+    loss = getattr(manager.checkpoint, f'loss_{train_or_test}')
+    fig.suptitle(
+        f'epoch={manager.checkpoint.epoch}, '
+        f'step={manager.checkpoint.step + 1}, '
+        f'loss={loss:.4E}',
+        fontweight='bold',
+        y=0.995
+    )
+
+    for i, idx in enumerate(idxs):
+        meta = metas[idx]
+
+        # Plot the (possibly augmented) input image
+        img_aug = to_numpy(images_aug[idx]).squeeze()
+        ax = fig.add_subplot(gs[0, i])
+        plot_image(ax, meta['image'].name, img_aug)
+
+        # Plot the clean image with target heatmap overlay
+        img_clean = to_numpy(images_clean[idx]).squeeze()
+        V_target = 1 - to_numpy(Y_target['vertex_heatmap'][idx]).squeeze()
+        ax = fig.add_subplot(gs[1, i])
+        plot_image(ax, 'Target', img_clean)
+        ax.imshow(V_target, cmap='hot', alpha=0.5)
+
+        # Plot the clean image with predicted heatmap overlay
+        V_pred = 1 - to_numpy(outputs['V_heatmap'][idx]).squeeze()
+        ax = fig.add_subplot(gs[2, i])
+        plot_image(ax, 'Predicted', img_clean)
+        ax.imshow(V_pred, cmap='hot', alpha=0.5)
+
+        # Plot the predicted vertex heatmap
+        ax = fig.add_subplot(gs[3, i])
+        plot_image(ax, 'Predicted', V_pred, cmap='hot')
 
     return fig
 

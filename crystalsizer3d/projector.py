@@ -75,7 +75,9 @@ class Projector:
     projected_vertices: Dict[int, Tensor]
     projected_vertex_keys: List[ProjectedVertexKey]
     projected_vertex_coords: Tensor
-    rear_facing_edges: Tensor
+    rear_edges: Tensor
+    front_edges: Tensor
+    edge_segments: Dict[Union[str, int], Tensor]
     image: Tensor
 
     def __init__(
@@ -170,7 +172,7 @@ class Projector:
 
     def project(self, generate_image: bool = True) -> Optional[Tensor]:
         """
-        Project the crystal onto an image.
+        Project the crystal onto an image plane, optionally drawing the edges on to an image.
         """
         self.vertices = self.crystal.vertices.clone()
         self.vertex_ids = self.crystal.vertex_ids.clone()
@@ -194,14 +196,39 @@ class Projector:
         # Project the vertices including all refractions
         self._project_vertices()
 
-        # Extract the edges facing away from the camera - required for multi-line drawing
-        self.rear_facing_edges = self._extract_rear_facing_edges()
+        # Calculate the edge segments and intersections - required for multi-line drawing
+        if self.multi_line:
+            self._extract_edges()
+            self._calculate_edge_segments()
+            self._collate_vertices_and_intersections()
 
         # Generate the refracted wireframe image
         if generate_image:
             self.image = self._generate_image()
 
             return self.image
+
+    def _orthogonal_projection(self, vertices: Tensor) -> Tensor:
+        """
+        Orthogonally project 3D vertices with custom x and y ranges.
+
+        Args:
+            vertices (Tensor): Tensor of shape (N, 3) representing 3D coordinates of vertices.
+
+        Returns:
+            Tensor: Tensor of shape (N, 2) representing 2D coordinates of projected vertices.
+        """
+        x_min, x_max = self.x_range
+        y_max, y_min = self.y_range  # Flip the y-axis to match the image coordinates
+
+        x_scale = (x_max - x_min) / self.image_size[1]
+        y_scale = (y_max - y_min) / self.image_size[0]
+
+        projected_vertices = vertices[:, :2].clone()
+        projected_vertices[:, 0] = (projected_vertices[:, 0] - x_min) / x_scale
+        projected_vertices[:, 1] = (projected_vertices[:, 1] - y_min) / y_scale
+
+        return projected_vertices
 
     def _project_vertices(self):
         """
@@ -258,128 +285,6 @@ class Projector:
         self.projected_vertex_keys = pv_keys
         self.projected_vertex_coords = pv_coords
 
-    def _generate_image(self) -> Tensor:
-        """
-        Generate the projected wireframe image including all refractions.
-        """
-        image = self.canvas_image.clone()
-
-        # Draw hidden refracted edges first
-        for face_idx, (face, normal, distance) in enumerate(zip(self.faces, self.face_normals, self.distances)):
-            is_facing = normal @ self.view_axis < 0
-            if len(face) < 3 or not is_facing:
-                continue
-            if face_idx not in self.projected_vertices:
-                continue
-
-            # Draw every line segment individually
-            if self.multi_line:
-                image = self._draw_edge_segments(face_idx, image)
-
-            # Refract all the lines through the face then cut out the visible parts
-            else:
-                # Draw all refracted edges on an empty image
-                vertices_2d = self.projected_vertices[face_idx]
-                rf_image = self._draw_full_edges(vertices_2d, facing_camera=False)
-
-                # Fill the face with the refracted image
-                image = replace_convex_polygon(
-                    images=image[None, ...],
-                    polygons=self.vertices_2d[face][None, ...],
-                    replacement=rf_image[None, ...]
-                )[0]
-
-        # Draw top edges on the image
-        image = self._draw_full_edges(self.vertices_2d, image=image, facing_camera=True)
-
-        # Apply the background image
-        if self.background_image is not None:
-            bg = image.sum(dim=0) == 0
-            composite = self.background_image.clone()
-            composite[:, ~bg] = image[:, ~bg]
-            image = composite
-
-        # Add transparency to the image
-        if self.transparent_background:
-            alpha = torch.zeros((1, *self.image_size), dtype=torch.uint8, device=image.device)
-            alpha[0, image.sum(dim=0) == 0] = 0
-            alpha[0, image.sum(dim=0) != 0] = 1
-            image = torch.cat([image, alpha], dim=0)
-
-        return image
-
-    def _draw_edge_segments(self, face_idx: int, image: Tensor):
-        """
-        Draw all edge segments refracted through a given face onto the given image.
-        """
-        refracted_2d = self.projected_vertices[face_idx]
-        front_face_2d = self.vertices_2d[self.faces[face_idx]]
-
-        # If face has no area, (i.e. it's being viewed from 90 degrees), there's nothing to draw
-        if polygon_area(front_face_2d) < 1e-3:
-            return image
-
-        # Consider the refracted projection of each rear-facing edge in the given face
-        for edge in self.rear_facing_edges:
-            start_vertex, end_vertex = refracted_2d[edge]
-            intersections, start_inside, end_inside = line_face_intersection(front_face_2d, [start_vertex, end_vertex])
-            visible_points = []
-
-            # If the end points are inside the face then add them to the visible points
-            if start_inside:
-                visible_points.append(start_vertex)
-            if end_inside:
-                visible_points.append(end_vertex)
-
-            # If there are intersections, add them to the visible points
-            if len(visible_points) == 0 and len(intersections) == 2:
-                visible_points = intersections
-            elif len(visible_points) == 1:
-                assert len(intersections) == 1, 'Expected a single intersection point.'
-                visible_points.append(intersections[0])
-
-            # Draw the line segment on the image
-            if len(visible_points) > 0:
-                visible_points = torch.stack(visible_points)
-                visible_points[:, 0] = torch.clamp(visible_points[:, 0], 0, self.image_size[1] - 1)
-                visible_points[:, 1] = torch.clamp(visible_points[:, 1], 0, self.image_size[0] - 1)
-                image = draw_line(image, visible_points[0], visible_points[1], self.colour_facing_away)
-
-        return image
-
-    def _extract_rear_facing_edges(self):
-        """
-        Extracts unique edges from faces that are facing away from the camera.
-        """
-        # Create a list of faces that are facing away from the camera
-        rear_faces = []
-        for face, face_normal in zip(self.faces, self.face_normals):
-            if len(face) < 3 or face_normal @ self.view_axis < 0:
-                continue
-            rear_faces.append(face)
-
-        # Initialise an empty set for edges
-        edges = set()
-
-        # Iterate over the faces
-        for face in rear_faces:
-            num_vertices = len(face)
-
-            for i in range(num_vertices):
-                # Create edge between vertex i and vertex i+1, wrapping around to the start
-                v1, v2 = face[i].item(), face[(i + 1) % num_vertices].item()
-
-                # Store edge in a consistent order
-                edge = tuple(sorted((v1, v2)))
-
-                # Add edge to set
-                edges.add(edge)
-
-        # Convert set to a tensor of edges
-        unique_edges = torch.tensor(list(edges))
-
-        return unique_edges
-
     def _refract_points(self, normal: Tensor, distance: Tensor) -> Tensor:
         """
         Refract the crystal vertices in the plane given by the normal and the distance.
@@ -433,27 +338,173 @@ class Projector:
 
         return points
 
-    def _orthogonal_projection(self, vertices: Tensor) -> Tensor:
+    def _extract_edges(self):
         """
-        Orthogonally project 3D vertices with custom x and y ranges.
-
-        Args:
-            vertices (Tensor): Tensor of shape (N, 3) representing 3D coordinates of vertices.
-
-        Returns:
-            Tensor: Tensor of shape (N, 2) representing 2D coordinates of projected vertices.
+        Extracts unique edges facing towards or away from the camera.
         """
-        x_min, x_max = self.x_range
-        y_max, y_min = self.y_range  # Flip the y-axis to match the image coordinates
+        front_edges = set()
+        rear_edges = set()
 
-        x_scale = (x_max - x_min) / self.image_size[1]
-        y_scale = (y_max - y_min) / self.image_size[0]
+        # Create a list of faces that are facing away from the camera
+        for face, face_normal in zip(self.faces, self.face_normals):
+            if len(face) < 3:
+                continue
+            is_facing = face_normal @ self.view_axis < 0
+            num_vertices = len(face)
+            for i in range(num_vertices):
+                idx0, idx1 = face[i].item(), face[(i + 1) % num_vertices].item()
+                edge = tuple(sorted((idx0, idx1)))
 
-        projected_vertices = vertices[:, :2].clone()
-        projected_vertices[:, 0] = (projected_vertices[:, 0] - x_min) / x_scale
-        projected_vertices[:, 1] = (projected_vertices[:, 1] - y_min) / y_scale
+                # Add edge to the appropriate set
+                if is_facing:
+                    front_edges.add(edge)
+                elif edge not in front_edges:
+                    rear_edges.add(edge)
 
-        return projected_vertices
+        # Convert sets to tensors
+        self.front_edges = torch.tensor(list(front_edges))
+        self.rear_edges = torch.tensor(list(rear_edges))
+
+    def _calculate_edge_segments(self):
+        """
+        Calculate the edge segments for each face.
+        """
+        segments = {}
+
+        # Calculate refracted edge segments
+        for face_idx, (face, normal) in enumerate(zip(self.faces, self.face_normals)):
+            is_facing = normal @ self.view_axis < 0
+            if len(face) < 3 or not is_facing:
+                continue
+            if face_idx not in self.projected_vertices:
+                continue
+            refracted_segments = self._calculate_refracted_edge_segments(face_idx)
+            if len(refracted_segments) > 0:
+                segments[face_idx] = torch.stack(refracted_segments)
+
+        # Collect the facing edges
+        facing_edges = []
+        for idx0, idx1 in self.front_edges:
+            v0, v1 = self.vertices_2d[idx0], self.vertices_2d[idx1]
+            facing_edges.append(torch.stack([v0, v1]))
+        if len(facing_edges) > 0:
+            segments['facing'] = torch.stack(facing_edges)
+
+        self.edge_segments = segments
+
+    def _calculate_refracted_edge_segments(self, face_idx: int) -> List[Tensor]:
+        """
+        Calculate all edge segments refracted through a given face.
+        """
+        segments = []
+        front_face_2d = self.vertices_2d[self.faces[face_idx]]
+
+        # If face has no area, (i.e. it's being viewed from 90 degrees), there's nothing to draw
+        if polygon_area(front_face_2d) < 1e-3:
+            return segments
+
+        # Consider the refracted projection of each rear-facing edge in the given face
+        refracted_2d = self.projected_vertices[face_idx]
+        for edge in self.rear_edges:
+            start_vertex, end_vertex = refracted_2d[edge]
+            intersections, start_inside, end_inside = line_face_intersection(front_face_2d, [start_vertex, end_vertex])
+            segment = []
+
+            # If the end points are inside the face then add them to the visible points
+            if start_inside:
+                segment.append(start_vertex)
+            if end_inside:
+                segment.append(end_vertex)
+
+            # If there are intersections, add them to the visible points
+            if len(segment) == 0 and len(intersections) == 2:
+                segment = intersections
+            elif len(segment) == 1:
+                assert len(intersections) == 1, 'Expected a single intersection point.'
+                segment.append(intersections[0])
+
+            # Add the line segment
+            if len(segment) == 2:
+                segments.append(torch.stack(segment))
+
+        return segments
+
+    def _collate_vertices_and_intersections(self):
+        """
+        Collate the vertices and intersections into a single tensor.
+        """
+        vertices = []
+        for refracted_face_idx, edge_segments in self.edge_segments.items():
+            if len(edge_segments) == 0:
+                continue
+            for segment in edge_segments:
+                for vertex in segment:
+                    vertices.append(vertex)
+
+        # De-duplicate
+        vertices = torch.stack(vertices)
+        vertices = torch.unique(vertices, dim=0)
+        self.vertices_and_intersections = vertices
+
+    def _generate_image(self) -> Tensor:
+        """
+        Generate the projected wireframe image including all refractions.
+        """
+        image = self.canvas_image.clone()
+
+        # Draw every line segment individually
+        if self.multi_line:
+            for ref_face_idx, face_segments in self.edge_segments.items():
+                if len(face_segments) == 0:
+                    continue
+                colour = self.colour_facing_towards if ref_face_idx == 'facing' else self.colour_facing_away
+                for segment in face_segments:
+                    segment_clamped = segment.clone()
+                    segment_clamped[:, 0] = torch.clamp(segment_clamped[:, 0], 0, self.image_size[1] - 1)
+                    segment_clamped[:, 1] = torch.clamp(segment_clamped[:, 1], 0, self.image_size[0] - 1)
+                    image = draw_line(image, segment_clamped[0], segment_clamped[1], colour)
+
+        # Refract all the lines through the face then cut out the visible parts
+        else:
+            # Draw hidden refracted edges first
+            for face_idx, (face, normal, distance) in enumerate(zip(self.faces, self.face_normals, self.distances)):
+                is_facing = normal @ self.view_axis < 0
+                if len(face) < 3 or not is_facing:
+                    continue
+                if face_idx not in self.projected_vertices:
+                    continue
+
+                # Refract all the lines through the face then cut out the visible parts
+                else:
+                    # Draw all refracted edges on an empty image
+                    vertices_2d = self.projected_vertices[face_idx]
+                    rf_image = self._draw_full_edges(vertices_2d, facing_camera=False)
+
+                    # Fill the face with the refracted image
+                    image = replace_convex_polygon(
+                        images=image[None, ...],
+                        polygons=self.vertices_2d[face][None, ...],
+                        replacement=rf_image[None, ...]
+                    )[0]
+
+            # Draw top edges on the image
+            image = self._draw_full_edges(self.vertices_2d, image=image, facing_camera=True)
+
+        # Apply the background image
+        if self.background_image is not None:
+            bg = image.sum(dim=0) == 0
+            composite = self.background_image.clone()
+            composite[:, ~bg] = image[:, ~bg]
+            image = composite
+
+        # Add transparency to the image
+        if self.transparent_background:
+            alpha = torch.zeros((1, *self.image_size), dtype=torch.uint8, device=image.device)
+            alpha[0, image.sum(dim=0) == 0] = 0
+            alpha[0, image.sum(dim=0) != 0] = 1
+            image = torch.cat([image, alpha], dim=0)
+
+        return image
 
     def _draw_full_edges(
             self,

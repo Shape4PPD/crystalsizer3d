@@ -8,6 +8,7 @@ from crystalsizer3d.args.network_args import NetworkArgs
 from crystalsizer3d.args.optimiser_args import OptimiserArgs
 from crystalsizer3d.args.runtime_args import RuntimeArgs
 from crystalsizer3d.args.transcoder_args import TranscoderArgs
+from crystalsizer3d.args.vertex_detector_args import VertexDetectorArgs
 from crystalsizer3d.nn.manager import Manager
 from crystalsizer3d.util.utils import print_args
 
@@ -17,6 +18,7 @@ def parse_arguments(printout: bool = True) -> Tuple[
     NetworkArgs,
     GeneratorArgs,
     DenoiserArgs,
+    VertexDetectorArgs,
     TranscoderArgs,
     OptimiserArgs,
     RuntimeArgs
@@ -30,6 +32,7 @@ def parse_arguments(printout: bool = True) -> Tuple[
     NetworkArgs.add_args(parser)
     GeneratorArgs.add_args(parser)
     DenoiserArgs.add_args(parser)
+    VertexDetectorArgs.add_args(parser)
     TranscoderArgs.add_args(parser)
     OptimiserArgs.add_args(parser)
     RuntimeArgs.add_args(parser)
@@ -44,18 +47,19 @@ def parse_arguments(printout: bool = True) -> Tuple[
     net_args = NetworkArgs.from_args(args)
     generator_args = GeneratorArgs.from_args(args)
     denoiser_args = DenoiserArgs.from_args(args)
+    vertex_detector_args = VertexDetectorArgs.from_args(args)
     transcoder_args = TranscoderArgs.from_args(args)
     optimiser_args = OptimiserArgs.from_args(args)
     runtime_args = RuntimeArgs.from_args(args)
 
-    return dataset_args, net_args, generator_args, denoiser_args, transcoder_args, optimiser_args, runtime_args
+    return dataset_args, net_args, generator_args, denoiser_args, vertex_detector_args, transcoder_args, optimiser_args, runtime_args
 
 
 def train():
     """
     Trains a network to estimate crystal growth parameters from images.
     """
-    dataset_args, net_args, generator_args, denoiser_args, transcoder_args, optimiser_args, runtime_args = parse_arguments()
+    dataset_args, net_args, generator_args, denoiser_args, vertex_detector_args, transcoder_args, optimiser_args, runtime_args = parse_arguments()
 
     # Construct manager
     manager = Manager(
@@ -63,6 +67,7 @@ def train():
         net_args=net_args,
         generator_args=generator_args,
         denoiser_args=denoiser_args,
+        vertex_detector_args=vertex_detector_args,
         transcoder_args=transcoder_args,
         optimiser_args=optimiser_args,
         runtime_args=runtime_args

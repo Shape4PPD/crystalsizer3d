@@ -144,7 +144,7 @@ def calculate_model_norm(
     if isinstance(model, torch.nn.DataParallel):  # Check if the model is a DataParallel object
         model = model.module
     with torch.no_grad():
-        norm = Tensor(0., dtype=torch.float32, device=device)
+        norm = torch.tensor(0., dtype=torch.float32, device=device)
         for name, m in model.named_modules():
             if hasattr(m, 'parameters'):
                 p_norm = 0
