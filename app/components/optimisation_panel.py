@@ -10,9 +10,8 @@ from app.components.app_panel import AppPanel
 from app.components.parallelism import start_thread, stop_event
 from app.components.refiner_settings_dialog import RefinerSettingsDialog
 from app.components.utils import CrystalChangedEvent, DenoisedImageChangedEvent, EVT_ANCHORS_CHANGED, \
-    EVT_IMAGE_PATH_CHANGED, EVT_REFINING_STARTED, ImagePathChangedEvent, RefinerArgsChangedEvent, RefinerChangedEvent, \
-    RefiningEndedEvent, \
-    RefiningStartedEvent, SceneImageChangedEvent
+    EVT_REFINING_STARTED, RefinerArgsChangedEvent, RefiningEndedEvent, RefiningStartedEvent, SceneChangedEvent, \
+    SceneImageChangedEvent
 from crystalsizer3d import logger
 
 
@@ -268,6 +267,12 @@ class OptimisationPanel(AppPanel):
         event.Skip()
         sleep_time = int(self.config.Read('refining_update_ui_every_n_seconds', '2'))
 
+        def trigger_updates():
+            self.app_frame.crystal = self.refiner.crystal  # Update the crystal
+            wx.PostEvent(self.app_frame, CrystalChangedEvent(build_mesh=False))
+            wx.PostEvent(self.app_frame, SceneImageChangedEvent(update_images=False))
+            wx.PostEvent(self.app_frame, SceneChangedEvent())
+
         def update_ui_thread(stop_event: threading.Event):
             last_updated_at_step = -1
             while self.refiner.is_training() and not stop_event.is_set():
@@ -275,10 +280,9 @@ class OptimisationPanel(AppPanel):
                     time.sleep(2)
                     continue
                 last_updated_at_step = self.step
-                self.app_frame.crystal = self.refiner.crystal  # Update the crystal
-                wx.PostEvent(self.app_frame, CrystalChangedEvent(build_mesh=False))
-                wx.PostEvent(self.app_frame, SceneImageChangedEvent(update_images=False))
+                trigger_updates()
                 time.sleep(sleep_time)
+            trigger_updates()
 
         thread = threading.Thread(target=update_ui_thread, args=(stop_event,))
         start_thread(thread)
