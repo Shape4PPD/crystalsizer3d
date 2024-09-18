@@ -13,12 +13,10 @@ from crystalsizer3d.scene_components.scene import Scene
 from crystalsizer3d.scene_components.utils import project_to_image
 from crystalsizer3d.util.utils import init_tensor, to_numpy
 
-
 if USE_CUDA:
     device = torch.device('cuda')
 else:
     device = torch.device('cpu')
-
 
 TEST_CRYSTALS = {
     'cube': {
@@ -108,6 +106,23 @@ TEST_CRYSTALS = {
         'material_ior': 1.7000342640124446,
         'material_roughness': 0.13993626928782799
     },
+    'alpha6': {
+        'lattice_unit_cell': [7.068, 10.277, 8.755],
+        'lattice_angles': [np.pi / 2, np.pi / 2, np.pi / 2],
+        'miller_indices': [(0, 0, 1), (0, 1, 1), (1, 1, 1), (-1, -1, -1), (1, 0, 0), (1, 1, 0), (0, 0, -1), (0, -1, -1),
+                           (0, 1, -1), (0, -1, 1), (1, -1, -1), (-1, 1, -1), (-1, -1, 1), (-1, 1, 1), (1, -1, 1),
+                           (1, 1, -1), (-1, 0, 0), (1, -1, 0), (-1, 1, 0), (-1, -1, 0)],
+        'distances': [0.19666633009910583, 0.6398002505302429, 0.4684765636920929, 0.8366933465003967,
+                      0.741870641708374, 0.7422857880592346, 0.320103257894516, 0.5582546591758728, 0.5005581378936768,
+                      0.6028826832771301, 0.5543457865715027, 0.6761952638626099, 0.5320407748222351,
+                      0.8264796733856201, 0.7732805609703064, 0.7696529030799866, 0.7346971035003662,
+                      0.7784842848777771, 0.8692794442176819, 0.8123345971107483],
+        'scale': 5.84,
+        'rotation': [-0.0004319465660955757, 0.0018085570773109794, 1.2971580028533936],
+        "origin": [0.1671956479549408, 0.11368720978498459, 0.4015026092529297],
+        'material_ior': 1.63,
+        'material_roughness': 0.16
+    },
     'beta': {
         'lattice_unit_cell': [7.068, 10.277, 8.755],
         'lattice_angles': [np.pi / 2, np.pi / 2, np.pi / 2],
@@ -151,7 +166,9 @@ def show_projected_image(which='alpha'):
     # v, f = crystal.build_mesh()
     # m = Trimesh(vertices=to_numpy(v), faces=to_numpy(f))
     # m.show()
-    projector = Projector(crystal, external_ior=1., image_size=image_size, zoom=zoom, camera_axis=[0, 0, -1])
+
+    projector = Projector(crystal, external_ior=1., image_size=image_size, zoom=zoom, camera_axis=[0, 0, -1],
+                          multi_line=True)
     projector.image[:, projector.image.sum(dim=0) == 0] = 1
     plt.imshow(tensor_to_image(projector.image))
     plt.show()
@@ -221,8 +238,8 @@ def check_bounds():
 
 def match_to_scene():
     res = 400
-    crystal = Crystal(**TEST_CRYSTALS['alpha2'])
-    crystal.scale.data= init_tensor(1.2, device=crystal.scale.device)
+    crystal = Crystal(**TEST_CRYSTALS['alpha6'])
+    crystal.scale.data = init_tensor(1.2, device=crystal.scale.device)
     crystal.origin.data[:2] = torch.tensor([0, 0], device=crystal.origin.device)
     crystal.origin.data[2] -= crystal.vertices[:, 2].min()
     v, f = crystal.build_mesh()
@@ -268,6 +285,7 @@ def match_to_scene():
         image_size=(res, res),
         zoom=zoom,
         transparent_background=True,
+        multi_line=True
     )
     img_overlay = to_numpy(projector.image * 255).astype(np.uint8).squeeze().transpose(1, 2, 0)
     img_overlay[:, :, 3] = (img_overlay[:, :, 3] * 0.5).astype(np.uint8)
@@ -281,7 +299,6 @@ def match_to_scene():
 
     # uv_vertices = to_numpy(projector.vertices_2d)
     # ax.scatter(uv_vertices[:, 0], uv_vertices[:, 1], marker='o', c='g', s=70)
-
 
     fig.tight_layout()
     plt.show()
@@ -396,6 +413,7 @@ if __name__ == '__main__':
     # show_projected_image('alpha3')
     # show_projected_image('alpha4')
     # show_projected_image('alpha5')
+    # show_projected_image('alpha6')
     match_to_scene()
     # make_rotation_video()
     # make_ior_video()

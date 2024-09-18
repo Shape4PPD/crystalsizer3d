@@ -12,7 +12,8 @@ from torch import Tensor
 from torch.nn.functional import interpolate
 
 from crystalsizer3d.crystal import Crystal
-from crystalsizer3d.util.geometry import is_point_in_bounds, line_equation_coefficients, line_intersection, normalise
+from crystalsizer3d.util.geometry import is_point_in_bounds, line_equation_coefficients, line_face_intersection, \
+    line_intersection, normalise, polygon_area
 from crystalsizer3d.util.utils import init_tensor
 
 # A vertex can appear in multiple faces due to refraction, so we need to store the face index (or 'facing') as well
@@ -74,6 +75,7 @@ class Projector:
     projected_vertices: Dict[int, Tensor]
     projected_vertex_keys: List[ProjectedVertexKey]
     projected_vertex_coords: Tensor
+    rear_facing_edges: Tensor
     image: Tensor
 
     def __init__(
@@ -86,7 +88,8 @@ class Projector:
             transparent_background: bool = False,
             external_ior: float = 1.333,  # water
             colour_facing_towards: List[float] = [1, 0, 0],
-            colour_facing_away: List[float] = [0, 0, 1]
+            colour_facing_away: List[float] = [0, 0, 1],
+            multi_line: bool = True,
     ):
         """
         Project a crystal onto an image.
@@ -107,6 +110,9 @@ class Projector:
         self.background_image = None
         self.set_background(background_image)
         self.transparent_background = transparent_background
+
+        # Drawing mode
+        self.multi_line = multi_line
 
         # Colours
         self.colour_facing_towards = init_tensor(colour_facing_towards, device=self.device)
@@ -188,6 +194,9 @@ class Projector:
         # Project the vertices including all refractions
         self._project_vertices()
 
+        # Extract the edges facing away from the camera - required for multi-line drawing
+        self.rear_facing_edges = self._extract_rear_facing_edges()
+
         # Generate the refracted wireframe image
         if generate_image:
             self.image = self._generate_image()
@@ -262,20 +271,26 @@ class Projector:
                 continue
             if face_idx not in self.projected_vertices:
                 continue
-            vertices_2d = self.projected_vertices[face_idx]
 
-            # Draw all refracted edges on an empty image
-            rf_image = self._draw_edges(vertices_2d, facing_camera=False)
+            # Draw every line segment individually
+            if self.multi_line:
+                image = self._draw_edge_segments(face_idx, image)
 
-            # Fill the face with the refracted image
-            image = replace_convex_polygon(
-                images=image[None, ...],
-                polygons=self.vertices_2d[face][None, ...],
-                replacement=rf_image[None, ...]
-            )[0]
+            # Refract all the lines through the face then cut out the visible parts
+            else:
+                # Draw all refracted edges on an empty image
+                vertices_2d = self.projected_vertices[face_idx]
+                rf_image = self._draw_full_edges(vertices_2d, facing_camera=False)
+
+                # Fill the face with the refracted image
+                image = replace_convex_polygon(
+                    images=image[None, ...],
+                    polygons=self.vertices_2d[face][None, ...],
+                    replacement=rf_image[None, ...]
+                )[0]
 
         # Draw top edges on the image
-        image = self._draw_edges(self.vertices_2d, image=image, facing_camera=True)
+        image = self._draw_full_edges(self.vertices_2d, image=image, facing_camera=True)
 
         # Apply the background image
         if self.background_image is not None:
@@ -292,6 +307,78 @@ class Projector:
             image = torch.cat([image, alpha], dim=0)
 
         return image
+
+    def _draw_edge_segments(self, face_idx: int, image: Tensor):
+        """
+        Draw all edge segments refracted through a given face onto the given image.
+        """
+        refracted_2d = self.projected_vertices[face_idx]
+        front_face_2d = self.vertices_2d[self.faces[face_idx]]
+
+        # If face has no area, (i.e. it's being viewed from 90 degrees), there's nothing to draw
+        if polygon_area(front_face_2d) < 1e-3:
+            return image
+
+        # Consider the refracted projection of each rear-facing edge in the given face
+        for edge in self.rear_facing_edges:
+            start_vertex, end_vertex = refracted_2d[edge]
+            intersections, start_inside, end_inside = line_face_intersection(front_face_2d, [start_vertex, end_vertex])
+            visible_points = []
+
+            # If the end points are inside the face then add them to the visible points
+            if start_inside:
+                visible_points.append(start_vertex)
+            if end_inside:
+                visible_points.append(end_vertex)
+
+            # If there are intersections, add them to the visible points
+            if len(visible_points) == 0 and len(intersections) == 2:
+                visible_points = intersections
+            elif len(visible_points) == 1:
+                assert len(intersections) == 1, 'Expected a single intersection point.'
+                visible_points.append(intersections[0])
+
+            # Draw the line segment on the image
+            if len(visible_points) > 0:
+                visible_points = torch.stack(visible_points)
+                visible_points[:, 0] = torch.clamp(visible_points[:, 0], 0, self.image_size[1] - 1)
+                visible_points[:, 1] = torch.clamp(visible_points[:, 1], 0, self.image_size[0] - 1)
+                image = draw_line(image, visible_points[0], visible_points[1], self.colour_facing_away)
+
+        return image
+
+    def _extract_rear_facing_edges(self):
+        """
+        Extracts unique edges from faces that are facing away from the camera.
+        """
+        # Create a list of faces that are facing away from the camera
+        rear_faces = []
+        for face, face_normal in zip(self.faces, self.face_normals):
+            if len(face) < 3 or face_normal @ self.view_axis < 0:
+                continue
+            rear_faces.append(face)
+
+        # Initialise an empty set for edges
+        edges = set()
+
+        # Iterate over the faces
+        for face in rear_faces:
+            num_vertices = len(face)
+
+            for i in range(num_vertices):
+                # Create edge between vertex i and vertex i+1, wrapping around to the start
+                v1, v2 = face[i].item(), face[(i + 1) % num_vertices].item()
+
+                # Store edge in a consistent order
+                edge = tuple(sorted((v1, v2)))
+
+                # Add edge to set
+                edges.add(edge)
+
+        # Convert set to a tensor of edges
+        unique_edges = torch.tensor(list(edges))
+
+        return unique_edges
 
     def _refract_points(self, normal: Tensor, distance: Tensor) -> Tensor:
         """
@@ -368,7 +455,7 @@ class Projector:
 
         return projected_vertices
 
-    def _draw_edges(
+    def _draw_full_edges(
             self,
             vertices: Tensor,
             image: Optional[Tensor] = None,
@@ -391,6 +478,7 @@ class Projector:
         h, w = image.shape[-2:]
         if image.ndim == 4:
             image = image[0]  # Remove batch dimension
+        edges = []
 
         def in_frame(p):
             return 1 <= p[0] < w - 1 and 1 <= p[1] < h - 1
@@ -438,6 +526,13 @@ class Projector:
                             v0 = intersections[((v0 - vc) @ (intersections - ic)).argmax()]
                         if not in_frame(v1):
                             v1 = intersections[((v1 - vc) @ (intersections - ic)).argmax()]
+
+                # Check if the edge has already been drawn
+                edge = torch.stack([v0, v1])
+                if len(edges) != 0 and (edge == torch.stack(edges)).all(dim=(1, 2)).any():
+                    continue
+                edges.append(edge)
+                edges.append(edge.flip(dims=(0,)))  # Add the reverse edge to the list
 
                 # Check if the edge is facing the camera or passing through another face
                 if facing_camera:
