@@ -340,6 +340,9 @@ class Projector:
 
             # Draw the line segment on the image
             if len(visible_points) > 0:
+                visible_points = torch.stack(visible_points)
+                visible_points[:, 0] = torch.clamp(visible_points[:, 0], 0, self.image_size[1] - 1)
+                visible_points[:, 1] = torch.clamp(visible_points[:, 1], 0, self.image_size[0] - 1)
                 image = draw_line(image, visible_points[0], visible_points[1], self.colour_facing_away)
 
         return image
