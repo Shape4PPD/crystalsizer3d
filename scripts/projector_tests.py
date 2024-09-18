@@ -112,16 +112,16 @@ TEST_CRYSTALS = {
         'miller_indices': [(0, 0, 1), (0, 1, 1), (1, 1, 1), (-1, -1, -1), (1, 0, 0), (1, 1, 0), (0, 0, -1), (0, -1, -1),
                            (0, 1, -1), (0, -1, 1), (1, -1, -1), (-1, 1, -1), (-1, -1, 1), (-1, 1, 1), (1, -1, 1),
                            (1, 1, -1), (-1, 0, 0), (1, -1, 0), (-1, 1, 0), (-1, -1, 0)],
-        'distances': [0.3830717206001282, 0.8166847825050354, 0.8026739358901978, 0.9758344292640686,
-                      0.9103631377220154, 1.0181487798690796, 0.3933243453502655, 0.7772741913795471,
-                      0.8740742802619934, 0.7110176682472229, 0.6107826828956604, 0.9051218032836914,
-                      0.908871591091156, 1.1111396551132202, 0.9634890556335449, 0.9997269511222839,
-                      1.1894351243972778, 0.9173557758331299, 1.2018373012542725, 1.1176774501800537],
-        'origin': [-0.3571832776069641, -0.19568444788455963, 0.6160652711987495],
-        'scale': 5.1607864066598905,
-        'rotation': [-0.1091805174946785,-0.001362028531730175,1.4652847051620483],
-        'material_ior': 1.7000342640124446,
-        'material_roughness': 0.13993626928782799
+        'distances': [0.19666633009910583, 0.6398002505302429, 0.4684765636920929, 0.8366933465003967,
+                      0.741870641708374, 0.7422857880592346, 0.320103257894516, 0.5582546591758728, 0.5005581378936768,
+                      0.6028826832771301, 0.5543457865715027, 0.6761952638626099, 0.5320407748222351,
+                      0.8264796733856201, 0.7732805609703064, 0.7696529030799866, 0.7346971035003662,
+                      0.7784842848777771, 0.8692794442176819, 0.8123345971107483],
+        'scale': 5.84,
+        'rotation': [-0.0004319465660955757, 0.0018085570773109794, 1.2971580028533936],
+        "origin": [0.1671956479549408, 0.11368720978498459, 0.4015026092529297],
+        'material_ior': 1.63,
+        'material_roughness': 0.16
     },
     'beta': {
         'lattice_unit_cell': [7.068, 10.277, 8.755],
@@ -166,7 +166,9 @@ def show_projected_image(which='alpha'):
     # v, f = crystal.build_mesh()
     # m = Trimesh(vertices=to_numpy(v), faces=to_numpy(f))
     # m.show()
-    projector = Projector(crystal, external_ior=1., image_size=image_size, zoom=zoom, camera_axis=[0, 0, -1], multi_line=True)
+
+    projector = Projector(crystal, external_ior=1., image_size=image_size, zoom=zoom, camera_axis=[0, 0, -1],
+                          multi_line=True)
     projector.image[:, projector.image.sum(dim=0) == 0] = 1
     plt.imshow(tensor_to_image(projector.image))
     plt.show()
@@ -236,7 +238,7 @@ def check_bounds():
 
 def match_to_scene():
     res = 400
-    crystal = Crystal(**TEST_CRYSTALS['alpha2'])
+    crystal = Crystal(**TEST_CRYSTALS['alpha6'])
     crystal.scale.data = init_tensor(1.2, device=crystal.scale.device)
     crystal.origin.data[:2] = torch.tensor([0, 0], device=crystal.origin.device)
     crystal.origin.data[2] -= crystal.vertices[:, 2].min()
@@ -411,7 +413,7 @@ if __name__ == '__main__':
     # show_projected_image('alpha3')
     # show_projected_image('alpha4')
     # show_projected_image('alpha5')
-    show_projected_image('alpha6')
-    # match_to_scene()
+    # show_projected_image('alpha6')
+    match_to_scene()
     # make_rotation_video()
     # make_ior_video()
