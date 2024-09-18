@@ -463,6 +463,7 @@ class OptimiserSettings(SettingsPanel):
             'max_steps',
             'Maximum steps',
             'int',
+            max_value=1000000,
         )
         self.add_field(
             'multiscale',

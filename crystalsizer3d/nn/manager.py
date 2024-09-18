@@ -608,7 +608,7 @@ class Manager:
         self.dn_config = config
         denoiser = VQModel(**config.model.init_args)
         sd = torch.load(self.denoiser_args.dn_mv2_checkpoint_path, map_location='cpu')['state_dict']
-        missing, unexpected = denoiser.load_state_dict(sd, strict=False)
+        denoiser.load_state_dict(sd, strict=False)
         denoiser.eval()
 
         # Instantiate the network

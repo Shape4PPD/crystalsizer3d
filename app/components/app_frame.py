@@ -317,12 +317,17 @@ class AppFrame(wx.Frame):
         """
         Ensure that the scene is consistent with the refiner args
         """
-        yaml = YAML()
-        yaml.preserve_quotes = True
 
-        # Load the scene args from file
-        with open(SCENE_PATH, 'r') as f:
-            args = yaml.load(f)
+        def load_scene_parameters():
+            with open(SCENE_PATH, 'r') as f:
+                return yaml.load(f, Loader=yaml.FullLoader)
+
+        args = None
+        if SCENE_PATH.exists():
+            args = load_scene_parameters()
+        if args is None:
+            shutil.copy(APP_ASSETS_PATH / 'default_scene.yml', SCENE_PATH)
+            args = load_scene_parameters()
 
         # Check that the scene args are consistent with the refiner args
         args_hash = hash_data(args)
@@ -341,20 +346,15 @@ class AppFrame(wx.Frame):
         if self.scene is not None:
             return
         self._log('Initialising scene...')
-        yaml = YAML()
-        yaml.preserve_quotes = True
-
-        # Copy over default scene if they don't exist
-        if not SCENE_PATH.exists():
-            shutil.copy(APP_ASSETS_PATH / 'default_scene.yml', SCENE_PATH)
 
         # Ensure that the scene parameters are consistent with the refiner args
         self._ensure_scene_parameters_consistency()
 
         # Load the scene args from file
         with open(SCENE_PATH, 'r') as f:
-            args = yaml.load(f)
-        del args['crystal']
+            args = yaml.load(f, Loader=yaml.FullLoader)
+        if 'crystal' in args:
+            del args['crystal']
 
         # Instantiate the scene
         try:
