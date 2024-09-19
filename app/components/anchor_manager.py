@@ -10,6 +10,8 @@ from torch import Tensor
 from app.components.utils import AnchorsChangedEvent, EVT_REFINING_ENDED, EVT_REFINING_STARTED
 from crystalsizer3d.projector import ProjectedVertexKey
 
+from crystalsizer3d import logger
+
 if TYPE_CHECKING:
     from app.components.image_panel import ImagePanel
 
@@ -102,16 +104,6 @@ class AnchorManager:
         x -= offset_x
         y -= offset_y
 
-        # # Adjust for DPI scaling if necessary (assuming 96 PPI as the baseline)
-        # # This line returns 1,1 somehow
-        # sf_x, sf_y = wx.GetDisplayPPI()/ 96
-        # self._log(f'sfx={sf_x}, sfy={sf_y}')
-        # x /= sf_x
-        # y /= sf_y
-        # img_width /= sf_x
-        # img_height /= sf_y
-        # self._log(f'Scaled x={x}, y={y}')
-
         # Normalise coordinates relative to the centre of the image
         rel_x = (x - img_width / 2) / (img_width / 2)
         rel_y = (y - img_height / 2) / (img_height / 2)
@@ -121,7 +113,6 @@ class AnchorManager:
         # Adjust DPI scaling based on system scaling
         if sys.platform == 'win32':
             sf = self.GetDPIScaleFactor()
-            self._log(f'Adjusting DPI scaling from: {sf}x')
             if sf in [1, 1.25, 1.5]:
                 sf = 1
             elif sf in [1.75, 2.0, 2.25]:
@@ -129,9 +120,6 @@ class AnchorManager:
             elif sf in [2.5]:
                 sf = 3
             pos /= sf
-
-        self._log(f'Mouse rel pos: {pos}')
-        self._log(f'DPI scale factor: {self.GetDPIScaleFactor()}')
         return pos
 
     def _relative_to_image_coords(self, rel_coords: Tensor) -> Tuple[float, float]:
@@ -387,7 +375,7 @@ class AnchorManager:
 
             # Draw a line from the vertex to the anchor point
             gc.SetPen(wx.Pen((*self.ACTIVE_LINE_COLOUR, 150), 2, wx.PENSTYLE_SHORT_DASH))
-            gc.StrokeLine(int(vx), int(vy), int(ax), int(ay))
+            gc.StrokeLine(round(vx), round(vy), round(ax), round(ay))
 
             # Draw a circle at the location of the vertex
             colour = self.ACTIVE_COLOUR_FACING if vertex_key[1] == 'facing' else self.ACTIVE_COLOUR_BACK
@@ -399,8 +387,8 @@ class AnchorManager:
             # Draw a cross at the location of the anchor point
             d = self.ANCHOR_CROSS_SIZE / math.sqrt(2)
             gc.SetPen(wx.Pen((*self.ACTIVE_CROSS_COLOUR, 150), 1))
-            gc.StrokeLine(int(ax - d), int(ay - d), int(ax + d), int(ay + d))
-            gc.StrokeLine(int(ax + d), int(ay - d), int(ax - d), int(ay + d))
+            gc.StrokeLine(round(ax - d), round(ay - d), round(ax + d), round(ay + d))
+            gc.StrokeLine(round(ax + d), round(ay - d), round(ax - d), round(ay + d))
 
         # Draw a cross at the selected anchor position with a connecting line from the selected vertex
         if self.selected_anchor is not None or self.selected_vertex is not None and self.anchor_point is not None:
@@ -418,13 +406,13 @@ class AnchorManager:
                 if draw_line:
                     # Connecting line
                     gc.SetPen(wx.Pen((*self.ANCHOR_LINE_COLOUR, 255), 2, wx.PENSTYLE_SHORT_DASH))
-                    gc.StrokeLine(int(vx), int(vy), int(ax), int(ay))
+                    gc.StrokeLine(round(vx), round(vy), round(ax), round(ay))
 
                     # Cross at the anchor point
                     d = self.ANCHOR_CROSS_SIZE / math.sqrt(2)
                     gc.SetPen(wx.Pen((*self.ANCHOR_CROSS_COLOUR, 255), 2))
-                    gc.StrokeLine(int(ax - d), int(ay - d), int(ax + d), int(ay + d))
-                    gc.StrokeLine(int(ax + d), int(ay - d), int(ax - d), int(ay + d))
+                    gc.StrokeLine(round(ax - d), round(ay - d), round(ax + d), round(ay + d))
+                    gc.StrokeLine(round(ax + d), round(ay - d), round(ax - d), round(ay + d))
 
             # If the vertex is not found, reset to highlight mode unless we were trying to show a saved anchor
             except VertexNotFoundInImageError:

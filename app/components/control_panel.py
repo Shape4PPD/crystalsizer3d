@@ -12,8 +12,8 @@ from crystalsizer3d.util.utils import to_numpy
 
 
 class ControlPanel(AppPanel):
-    STEP_ROTATION = 0.1
-    STEP_TRANSLATION = 0.1
+    STEP_ROTATION = 0.02
+    STEP_TRANSLATION = 0.02
     STEP_DISTANCE = 0.02
     STEP_SCALE = 0.05
     STEP_IOR = 0.1
@@ -38,12 +38,11 @@ class ControlPanel(AppPanel):
 
         # Face list - with single selection only
         self.face_list = wx.ListCtrl(self, style=wx.LC_REPORT | wx.LC_SINGLE_SEL)
-        # self.face_list.SetMinSize(wx.Size(256, 256))
         self.face_list.InsertColumn(0, 'Miller Index')
         self.face_list.SetColumnWidth(col=0, width=int(self.face_list.GetSize()[0] / 2))
         self.face_list.InsertColumn(1, 'Distance')
         self.face_list.SetColumnWidth(col=1, width=int(self.face_list.GetSize()[0] / 2))
-        self.face_list.Bind(wx.EVT_LIST_ITEM_SELECTED, self.on_faceList_select)
+        self.face_list.Bind(wx.EVT_LIST_ITEM_SELECTED, self.on_face_list_select)
 
         # Panel for adjusting face normal distances
         self.txtctrl_dis = wx.TextCtrl(self, value='-')
@@ -68,7 +67,7 @@ class ControlPanel(AppPanel):
         self.btn_scale_up.Bind(wx.EVT_BUTTON, self.on_scale_change)
         self.btn_scale_down = wx.Button(self, label='Scl. -')
         self.btn_scale_down.Bind(wx.EVT_BUTTON, self.on_scale_change)
-        self.btn_normalise = wx.Button(self, label='Normalise Scale')
+        self.btn_normalise = wx.Button(self, label='Normalise Dis & Scl')
         self.btn_normalise.Bind(wx.EVT_BUTTON, self.on_scale_change)
 
         s_sizer_btn = wx.BoxSizer(wx.HORIZONTAL)
@@ -183,7 +182,7 @@ class ControlPanel(AppPanel):
         wx.PostEvent(self.app_frame, CrystalChangedEvent(build_mesh=False))
         self._log('Crystal loaded.')
 
-    def on_faceList_select(self, event):
+    def on_face_list_select(self, event):
         idx = self.face_list.GetFirstSelected()
         dis = self.face_list.GetItem(idx, 1).GetText()
         self.txtctrl_dis.SetValue(dis)
@@ -281,7 +280,6 @@ class ControlPanel(AppPanel):
         button = event.GetEventObject()
         label = button.GetLabel()
         assert label in ['Dis. +', 'Dis. -', 'Update']
-        # increment = self.STEP_DISTANCE if label == 'Dis. +' else -self.STEP_DISTANCE
         if label == 'Dis. +':
             increment = self.STEP_DISTANCE
         elif label == 'Dis. -':
@@ -289,6 +287,8 @@ class ControlPanel(AppPanel):
         else:
             entry = self.txtctrl_dis.GetValue()
             increment = float(entry) - float(dis)
+            # TODO: entry sanitization to avoid crashing.
+            # How to determine whether the entry is a valid distance or not?
         with torch.no_grad():
             self.crystal.distances.data[idx] += increment
         wx.PostEvent(self.app_frame, CrystalChangedEvent())
@@ -303,7 +303,8 @@ class ControlPanel(AppPanel):
             return
         button = event.GetEventObject()
         label = button.GetLabel()
-        assert label in ['Scl. +', 'Scl. -', 'Normalise Scale']
+        assert label in ['Scl. +', 'Scl. -', 'Normalise Dis & Scl']
+        # TODO: replace strings with constants at top of class (all btn labels & their evt)
         if label == 'Scl. +':
             sf = self.STEP_SCALE
         elif label == 'Scl. -':
@@ -311,9 +312,8 @@ class ControlPanel(AppPanel):
         else:
             # Update distance here and adjusting scale
             sd = 1 / np.max(self.crystal.distances.data.tolist())
-            print('Normalise Scale')
         with torch.no_grad():
-            if label == 'Normalise Scale':
+            if label == 'Normalise Dis & Scl':
                 self.crystal.distances.data *= sd
                 self.crystal.scale /= sd
             else:

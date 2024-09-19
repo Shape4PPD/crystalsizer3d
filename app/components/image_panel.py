@@ -276,7 +276,7 @@ class ImagePanel(AppPanel):
         self.bitmaps[self.active_window] = bitmap
 
         # Draw the wireframe and anchors overlays on the image
-        if self.images['wireframe'] is not None and self.ckbx_wireframe.IsChecked() == True:
+        if self.images['wireframe'] is not None and self.ckbx_wireframe.IsChecked():
             image_width, image_height = bitmap.GetSize()
             wireframe_x = (image_width - scaled_wireframe_width) // 2
             wireframe_y = (image_height - scaled_wireframe_height) // 2
@@ -464,6 +464,9 @@ class ImagePanel(AppPanel):
         wx.CallLater(100, after_zoom_finished)
 
     def on_wireframe_ckbx(self, event):
+        """
+        Update image after changing status of checkbox 'show wireframe'
+        """
         self.update_images()
 
     def on_click_image_L(self, event):

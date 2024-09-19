@@ -44,7 +44,6 @@ class OptimisationPanel(AppPanel):
 
         # Anchors list
         self.anchors_list = wx.ListCtrl(self, style=wx.LC_REPORT | wx.LC_SINGLE_SEL)
-        # self.anchors_list.SetMinSize(wx.Size(256, 256))
         self.anchors_list.InsertColumn(0, 'Vertex')
         self.anchors_list.SetColumnWidth(col=0, width=int(self.anchors_list.GetSize()[0] / 3))
         self.anchors_list.InsertColumn(1, 'In face')
