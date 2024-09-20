@@ -12,8 +12,8 @@ from torch import Tensor
 from torch.nn.functional import interpolate
 
 from crystalsizer3d.crystal import Crystal
-from crystalsizer3d.util.geometry import is_point_in_bounds, line_equation_coefficients, line_face_intersection, \
-    line_intersection, normalise, polygon_area
+from crystalsizer3d.util.geometry import is_point_in_bounds, line_equation_coefficients, line_intersection, \
+    line_segments_in_polygon, normalise, polygon_area
 from crystalsizer3d.util.utils import init_tensor
 
 # A vertex can appear in multiple faces due to refraction, so we need to store the face index (or 'facing') as well
@@ -370,6 +370,7 @@ class Projector:
         Calculate the edge segments for each face.
         """
         segments = {}
+        tol = 1e-2 * (self.vertices_2d - self.vertices_2d.mean(dim=0)).norm(dim=-1).max().item()
 
         # Calculate refracted edge segments
         for face_idx, (face, normal) in enumerate(zip(self.faces, self.face_normals)):
@@ -378,9 +379,17 @@ class Projector:
                 continue
             if face_idx not in self.projected_vertices:
                 continue
-            refracted_segments = self._calculate_refracted_edge_segments(face_idx)
+            front_face_2d = self.vertices_2d[self.faces[face_idx]]
+
+            # If face has no area, (i.e. it's being viewed from 90 degrees), there's nothing to draw
+            if polygon_area(front_face_2d) < tol:
+                continue
+
+            # Consider the refracted projection of each rear-facing edge in the given face
+            rear_edges = self.projected_vertices[face_idx][self.rear_edges]
+            refracted_segments = line_segments_in_polygon(rear_edges, front_face_2d, tol=tol)
             if len(refracted_segments) > 0:
-                segments[face_idx] = torch.stack(refracted_segments)
+                segments[face_idx] = refracted_segments
 
         # Collect the facing edges
         facing_edges = []
@@ -391,43 +400,6 @@ class Projector:
             segments['facing'] = torch.stack(facing_edges)
 
         self.edge_segments = segments
-
-    def _calculate_refracted_edge_segments(self, face_idx: int) -> List[Tensor]:
-        """
-        Calculate all edge segments refracted through a given face.
-        """
-        segments = []
-        front_face_2d = self.vertices_2d[self.faces[face_idx]]
-
-        # If face has no area, (i.e. it's being viewed from 90 degrees), there's nothing to draw
-        if polygon_area(front_face_2d) < 1e-3:
-            return segments
-
-        # Consider the refracted projection of each rear-facing edge in the given face
-        refracted_2d = self.projected_vertices[face_idx]
-        for edge in self.rear_edges:
-            start_vertex, end_vertex = refracted_2d[edge]
-            intersections, start_inside, end_inside = line_face_intersection(front_face_2d, [start_vertex, end_vertex])
-            segment = []
-
-            # If the end points are inside the face then add them to the visible points
-            if start_inside:
-                segment.append(start_vertex)
-            if end_inside:
-                segment.append(end_vertex)
-
-            # If there are intersections, add them to the visible points
-            if len(segment) == 0 and len(intersections) == 2:
-                segment = intersections
-            elif len(segment) == 1:
-                assert len(intersections) == 1, 'Expected a single intersection point.'
-                segment.append(intersections[0])
-
-            # Add the line segment
-            if len(segment) == 2:
-                segments.append(torch.stack(segment))
-
-        return segments
 
     def _collate_vertices_and_intersections(self):
         """

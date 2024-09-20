@@ -113,125 +113,136 @@ def polygon_area(vertices: Tensor) -> Tensor:
 
 
 @torch.jit.script
-def is_point_in_polygon(vertices: Tensor, point: Tensor, eps: float = 1e-4) -> bool:
+def point_in_polygon(points: Tensor, polygon: Tensor, eps: float = 1e-6):
     """
-    Check if a point is inside a 2D polygon.
-    """
-    n = vertices.shape[0]
-    intersections = 0
-    for i in range(n):
-        v1 = vertices[i]
-        v2 = vertices[(i + 1) % n]
-        if (v1[1] > point[1] + eps) != (v2[1] > point[1] + eps):
-            intersection_x = (v2[0] - v1[0]) * (point[1] - v1[1]) / (v2[1] - v1[1]) + v1[0]
-            if point[0] < intersection_x + eps:
-                intersections += 1
+    Check if points are inside a convex polygon using a vectorised ray-casting algorithm.
+    Args:
+        points: Tensor of shape (N, 2) representing N points.
+        polygon: Tensor of shape (M, 2) representing the polygon vertices.
+        eps: Small tolerance for floating-point comparisons.
 
-    return intersections % 2 == 1
+    Returns:
+        Tensor of shape (N,) where each entry is True if the point is inside the polygon.
+    """
+    edges_poly = torch.stack([polygon, torch.roll(polygon, -1, dims=0)], dim=1)
+
+    # Check the ray intersection count for each point
+    p = points.unsqueeze(1)  # (N, 1, 2)
+    v1 = edges_poly[:, 0]  # (M, 2)
+    v2 = edges_poly[:, 1]  # (M, 2)
+
+    # Vectorised ray-casting logic
+    cond1 = (v1[:, 1] > p[:, :, 1]) != (v2[:, 1] > p[:, :, 1])
+    slope = (v2[:, 0] - v1[:, 0]) / (v2[:, 1] - v1[:, 1] + eps)
+    cond2 = p[:, :, 0] < (v1[:, 0] + slope * (p[:, :, 1] - v1[:, 1]))
+
+    intersect_count = (cond1 & cond2).sum(dim=1)
+    return intersect_count % 2 == 1  # True if odd number of intersections
 
 
 @torch.jit.script
-def line_segment_intersection(ls1: List[Tensor], ls2: List[Tensor], eps: float = 1e-4) -> Optional[Tensor]:
+def line_segment_intersections(edges1: Tensor, edges2: Tensor, eps: float = 1e-6):
     """
-    Calculate the intersection point of two line segments given by their endpoints.
+    Compute the intersection points of multiple line segments in batch.
+    Args:
+        edges1: Tensor of edges with shape (N, 2, 2).
+        edges2: Tensor of edges with shape (M, 2, 2).
+        eps: Small tolerance for floating-point comparisons.
+
+    Returns:
+        Tensor of shape (N, M, 2) with intersection points or NaNs if no intersection.
     """
-    l1 = line_equation_coefficients(ls1[0], ls1[1])
-    l2 = line_equation_coefficients(ls2[0], ls2[1])
-    intersection = line_intersection(l1, l2)
-    if intersection is not None:
-        on_line1 = is_point_in_bounds(intersection, ls1, eps)
-        on_line2 = is_point_in_bounds(intersection, ls2, eps)
-        if not on_line1 or not on_line2:
-            return None
-    return intersection
+    p = edges1[:, 0][:, None]  # (N, 1, 2)
+    r = (edges1[:, 1] - edges1[:, 0])[:, None]  # (N, 1, 2)
+    q = edges2[:, 0][None, ...]  # (1, M, 2)
+    s = (edges2[:, 1] - edges2[:, 0])[None, ...]  # (1, M, 2)
+
+    r_cross_s = r[..., 0] * s[..., 1] - r[..., 1] * s[..., 0]  # (N, M)
+    pq = q - p  # (N, M, 2)
+
+    t = (pq[..., 0] * s[..., 1] - pq[..., 1] * s[..., 0]) / (r_cross_s + eps)  # (N, M)
+    u = (pq[..., 0] * r[..., 1] - pq[..., 1] * r[..., 0]) / (r_cross_s + eps)  # (N, M)
+
+    intersect_mask = (t >= 0) & (t <= 1) & (u >= 0) & (u <= 1) & (r_cross_s.abs() > eps)
+    intersections = p + t[..., None] * r  # (N, M, 2)
+    intersections[~intersect_mask] = torch.nan  # NaN for no intersections
+
+    return intersections
 
 
 @torch.jit.script
-def line_face_intersection(
-        face_vertices: Tensor,
-        test_edge: List[Tensor],
-        rtol: float = 1e-2
-) -> Tuple[List[Tensor], bool, bool]:
-    """Checks whether an edge crosses a face in 2d and return the intersections.
+def line_segments_in_polygon(
+        edges: Tensor,
+        polygon: Tensor,
+        tol: float = 1e-2,
+        eps: float = 1e-6
+) -> Tensor:
+    """
+    Return the line segments from the input edges that are contained within or intersect the polygon.
 
     Args:
-        face_vertices: face given in 2d coordinates
-        test_edge: [xy1, xy2] two vertices given as a list
-        rtol: relative tolerance for numerical comparisons
+        edges: Tensor of shape (N, 2, 2) representing N line segments.
+        polygon: Tensor of shape (M, 2) representing the vertices of the convex polygon.
+        tol: Tolerance for considering nearby points as duplicates.
+        eps: Small tolerance for floating-point comparisons.
+
+    Returns:
+        A tensor containing line segments that are inside or intersect the polygon.
     """
-    assert face_vertices.ndim == 2 and face_vertices.shape[1] == 2, \
-        f'Invalid face vertices shape: {face_vertices.shape}'
-    assert len(test_edge) == 2, f'Invalid edge shape: {len(test_edge)}'
-    assert test_edge[0].shape == test_edge[1].shape == (2,), f'Invalid edge vertices shape: {test_edge[0].shape}'
-    centroid = face_vertices.mean(dim=0)
-    face_vertices = face_vertices - centroid
-    test_edge = [test_edge[0] - centroid, test_edge[1] - centroid]
-    eps = rtol * float(face_vertices.norm(dim=-1, p=2).max())
 
-    # Check if the start or end point is inside the polygon
-    start_at_vertex = (torch.norm(test_edge[0] - face_vertices, dim=-1) < eps).any()
-    end_at_vertex = (torch.norm(test_edge[1] - face_vertices, dim=-1) < eps).any()
-    start_inside = start_at_vertex or is_point_in_polygon(face_vertices, test_edge[0], eps=eps)
-    end_inside = end_at_vertex or is_point_in_polygon(face_vertices, test_edge[1], eps=eps)
+    # Check if edge endpoints are inside the polygon
+    endpoints_inside = point_in_polygon(edges.view(-1, 2), polygon)  # (N * 2,)
+    edge_start_in = endpoints_inside[::2]
+    edge_end_in = endpoints_inside[1::2]
 
-    # Calculate intersection points with each polygon edge
-    intersection_points = []
-    if not (start_inside and end_inside):
-        # Calculate all intersection points with each polygon edge
-        edges = torch.stack([face_vertices, torch.roll(face_vertices, -1, dims=0)], dim=1)
-        for edge in edges:
-            intersection = line_segment_intersection(test_edge, list(edge), eps=eps)
-            if intersection is not None:
-                if start_at_vertex and torch.allclose(intersection, test_edge[0], atol=eps):
-                    continue
-                if end_at_vertex and torch.allclose(intersection, test_edge[1], atol=eps):
-                    continue
-                intersection_points.append(intersection)
+    # Get polygon edges
+    polygon_edges = torch.stack([polygon, torch.roll(polygon, -1, dims=0)], dim=1)  # (M, 2, 2)
 
-        # If there are no intersections, set both as outside
-        if len(intersection_points) == 0:
-            start_inside = False
-            end_inside = False
+    # Calculate intersections of edges with polygon edges, filtering out the invalid ones
+    intersections = line_segment_intersections(edges, polygon_edges, eps=eps)  # (N, M, 2)
+    valid_intersections = ~torch.isnan(intersections[..., 0])  # (N, M)
 
-        # Need a single intersection point if the test edge starts inside and ends outside or vice-versa
-        if start_inside != end_inside:
-            assert len(intersection_points) > 0
+    # Assemble the valid segments for each edge
+    segments_list = []
+    for i in range(edges.shape[0]):
+        segment_points = []
 
-            # If there are multiple intersection points, choose the furthest from the start point
-            if len(intersection_points) > 1:
-                p = test_edge[0] if start_inside else test_edge[1]
-                distances = torch.norm(torch.stack(intersection_points) - p, p=2, dim=-1)
-                intersection_points = [intersection_points[int(torch.argmax(distances))]]
+        # If the start point is inside the polygon, add it
+        if edge_start_in[i]:
+            segment_points.append(edges[i, 0])
 
-        # Start and end are outside, so either two intersection points or none are needed
-        else:
-            # A single intersection point likely just touches the polygon, so remove it
-            if len(intersection_points) == 1:
-                intersection_points = []
+        # Add valid intersection points
+        valid_points = intersections[i][valid_intersections[i]]
+        segment_points.extend([p for p in valid_points])
 
-            # If we have more than two intersection points, reduce to two
-            elif len(intersection_points) > 2:
-                distances0 = torch.norm(torch.stack(intersection_points) - test_edge[0], p=2, dim=-1)
-                farthest_idx0 = int(torch.argmax(distances0))
-                intersection_points_remaining = []
-                for i, p in enumerate(intersection_points):
-                    if i != farthest_idx0:
-                        intersection_points_remaining.append(p)
-                distances1 = torch.norm(torch.stack(intersection_points_remaining) - test_edge[1], p=2, dim=-1)
-                farthest_idx1 = int(torch.argmax(distances1))
-                intersection_points = [
-                    intersection_points[farthest_idx0],
-                    intersection_points_remaining[farthest_idx1]
-                ]
+        # If the end point is inside the polygon, add it
+        if edge_end_in[i]:
+            segment_points.append(edges[i, 1])
 
-    # Check that we've got the correct output
-    if len(intersection_points) > 0:
-        assert len(intersection_points) + int(start_inside) + int(end_inside) == 2
-        intersection_points = [p + centroid for p in intersection_points]
+        # Remove duplicates considering point tolerance
+        if len(segment_points) > 0:
+            segment = torch.stack(segment_points)
+            is_close = torch.isclose(segment[None, :], segment[:, None], atol=tol).all(dim=-1)
+            unique_mask = ~is_close.triu(1).any(dim=1)
+            segment = segment[unique_mask]
+
+            # Store the segment if it has two distinct points
+            if len(segment) == 2:
+                segments_list.append(segment)
+
+    # Stack the segments into a single tensor
+    if len(segments_list) > 0:
+        segments = torch.stack(segments_list)
     else:
-        assert not start_inside and not end_inside or start_inside and end_inside
+        segments = torch.empty((0, 2, 2), device=edges.device)
 
-    return intersection_points, start_inside, end_inside
+    # Remove duplicate segments (both endpoints match to within tolerance)
+    if len(segments) > 1:
+        rounded_segments = torch.round(segments / tol) * tol
+        _, unique_indices = torch.unique(rounded_segments.view(-1, 4), dim=0, return_inverse=True)
+        segments = segments[torch.unique(unique_indices)]
+
+    return segments
 
 
 @torch.jit.script

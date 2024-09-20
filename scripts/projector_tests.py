@@ -64,7 +64,7 @@ TEST_CRYSTALS = {
                            [0, -1, 1], [0, -1, -1]],
         'distances': [1.0, 1.0, 1.8, 1.8, 1.8, 1.8, 1.8, 1.8, 1.8, 1.8, 2.0, 2.0, 2.0, 2.0, 1.8, 1.8],
         'point_group_symbol': '1',
-        'scale': 0.5,
+        'scale': 2.5,
         'material_ior': 1.5,
         'material_roughness': 0.001
         # 'origin': [-2.2178, -0.9920,  5.7441],
@@ -118,7 +118,7 @@ TEST_CRYSTALS = {
                       0.6028826832771301, 0.5543457865715027, 0.6761952638626099, 0.5320407748222351,
                       0.8264796733856201, 0.7732805609703064, 0.7696529030799866, 0.7346971035003662,
                       0.7784842848777771, 0.8692794442176819, 0.8123345971107483],
-        'scale': 7.84,
+        'scale': 4,
         'rotation': [-0.8004319465660955757, 0.9018085570773109794, 1.2971580028533936],
         "origin": [0.1671956479549408, 0.11368720978498459, 0.4015026092529297],
         'material_ior': 1.63,
@@ -204,13 +204,25 @@ def show_vertices(which='alpha'):
     else:
         zoom = 0.2
     crystal.to(device)
+
+    # Original method
+    projector = Projector(crystal, external_ior=1., image_size=image_size, zoom=zoom, camera_axis=[0, 0, -1],
+                          multi_line=False)
+    projector.image[:, projector.image.sum(dim=0) == 0] = 1
+    img_og = tensor_to_image(projector.image)
+
+    # Multi-line method
     projector = Projector(crystal, external_ior=1., image_size=image_size, zoom=zoom, camera_axis=[0, 0, -1],
                           multi_line=True)
     projector.image[:, projector.image.sum(dim=0) == 0] = 1
+    img_ml = tensor_to_image(projector.image)
 
-    plt.figure(figsize=(10, 10))
-    plt.imshow(tensor_to_image(projector.image))
-    plt.scatter(*to_numpy(projector.vertices_and_intersections).T, color='green', marker='o', s=200, alpha=0.4)
+    fig, axes = plt.subplots(1, 2, figsize=(12, 6))
+    axes[0].imshow(img_og)
+    axes[0].set_title('Original method')
+    axes[1].imshow(img_ml)
+    axes[1].set_title('Multi-line method')
+    axes[1].scatter(*to_numpy(projector.vertices_and_intersections).T, color='green', marker='o', s=100, alpha=0.3)
     plt.tight_layout()
     plt.show()
 
@@ -483,8 +495,8 @@ if __name__ == '__main__':
     # show_projected_image('alpha4')
     # show_projected_image('alpha5')
     # show_projected_image('alpha6')
-    # show_vertices('alpha7')
-    show_vertex_heatmap('alpha6')
+    show_vertices('alpha6')
+    # show_vertex_heatmap('alpha6')
     # match_to_scene()
     # make_rotation_video()
     # make_ior_video()
