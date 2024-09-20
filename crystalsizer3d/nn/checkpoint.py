@@ -9,11 +9,11 @@ from crystalsizer3d import logger
 from crystalsizer3d.args.dataset_training_args import DatasetTrainingArgs
 from crystalsizer3d.args.denoiser_args import DenoiserArgs
 from crystalsizer3d.args.generator_args import GeneratorArgs
+from crystalsizer3d.args.keypoint_detector_args import KeypointDetectorArgs
 from crystalsizer3d.args.network_args import NetworkArgs
 from crystalsizer3d.args.optimiser_args import OptimiserArgs
 from crystalsizer3d.args.runtime_args import RuntimeArgs
 from crystalsizer3d.args.transcoder_args import TranscoderArgs
-from crystalsizer3d.args.vertex_detector_args import VertexDetectorArgs
 from crystalsizer3d.nn.dataset import DatasetProxy
 from crystalsizer3d.util.utils import hash_data
 
@@ -26,7 +26,7 @@ class Checkpoint:
             network_args: NetworkArgs,
             generator_args: GeneratorArgs,
             denoiser_args: DenoiserArgs,
-            vertex_detector_args: VertexDetectorArgs,
+            keypoint_detector_args: KeypointDetectorArgs,
             transcoder_args: TranscoderArgs,
             optimiser_args: OptimiserArgs,
             runtime_args: RuntimeArgs,
@@ -37,7 +37,7 @@ class Checkpoint:
         self.network_args = network_args
         self.generator_args = generator_args
         self.denoiser_args = denoiser_args
-        self.vertex_detector_args = vertex_detector_args
+        self.keypoint_detector_args = keypoint_detector_args
         self.transcoder_args = transcoder_args
         self.optimiser_args = optimiser_args
         self.runtime_args = runtime_args
@@ -51,7 +51,7 @@ class Checkpoint:
             'network_args': self.network_args.hash(),
             'generator_args': self.generator_args.hash(),
             'denoiser_args': self.denoiser_args.hash(),
-            'vertex_detector_args': self.vertex_detector_args.hash(),
+            'keypoint_detector_args': self.keypoint_detector_args.hash(),
             'transcoder_args': self.transcoder_args.hash(),
             'optimiser_args': self.optimiser_args.hash(),
         })
@@ -128,9 +128,9 @@ class Checkpoint:
                             elif k == 'denoiser_args':
                                 old_args_k = DenoiserArgs.from_args(v)
                                 new_args_k = self.denoiser_args
-                            elif k == 'vertex_detector_args':
-                                old_args_k = VertexDetectorArgs.from_args(v)
-                                new_args_k = self.vertex_detector_args
+                            elif k == 'keypoint_detector_args':
+                                old_args_k = KeypointDetectorArgs.from_args(v)
+                                new_args_k = self.keypoint_detector_args
                             elif k == 'transcoder_args':
                                 old_args_k = TranscoderArgs.from_args(v)
                                 new_args_k = self.transcoder_args
@@ -164,8 +164,8 @@ class Checkpoint:
             optimiser_d: Optional[torch.optim.Optimizer] = None,
             net_dn: Optional[torch.nn.Module] = None,
             optimiser_dn: Optional[torch.optim.Optimizer] = None,
-            net_vd: Optional[torch.nn.Module] = None,
-            optimiser_vd: Optional[torch.optim.Optimizer] = None,
+            net_kd: Optional[torch.nn.Module] = None,
+            optimiser_kd: Optional[torch.optim.Optimizer] = None,
             net_t: Optional[torch.nn.Module] = None,
             optimiser_t: Optional[torch.optim.Optimizer] = None,
     ):
@@ -174,7 +174,7 @@ class Checkpoint:
         """
         meta = {'created': self.created, 'id': self.id}
         for args_key in ['dataset_args', 'network_args', 'generator_args', 'denoiser_args',
-                         'vertex_detector_args', 'transcoder_args', 'optimiser_args', 'runtime_args']:
+                         'keypoint_detector_args', 'transcoder_args', 'optimiser_args', 'runtime_args']:
             args = getattr(self, args_key)
             args_dict = args.to_dict()
             args_dict['hash'] = args.hash()
@@ -208,9 +208,9 @@ class Checkpoint:
             if self.dataset_args.train_denoiser:
                 assert net_dn is not None, 'Must provide the denoiser network to create a snapshot.'
                 assert optimiser_dn is not None, 'Must provide the denoiser network optimiser to create a snapshot.'
-            if self.dataset_args.train_vertex_detector:
-                assert net_vd is not None, 'Must provide the vertex detector network to create a snapshot.'
-                assert optimiser_vd is not None, 'Must provide the vertex detector network optimiser to create a snapshot.'
+            if self.dataset_args.train_keypoint_detector:
+                assert net_kd is not None, 'Must provide the keypoint detector network to create a snapshot.'
+                assert optimiser_kd is not None, 'Must provide the keypoint detector network optimiser to create a snapshot.'
             if self.transcoder_args.use_transcoder:
                 assert net_t is not None, 'Must provide the transcoder network to create a snapshot.'
 
@@ -241,9 +241,9 @@ class Checkpoint:
             if self.dataset_args.train_denoiser:
                 data['net_dn_state_dict'] = net_dn.state_dict()
                 data['optimiser_dn_state_dict'] = optimiser_dn.state_dict()
-            if self.dataset_args.train_vertex_detector:
-                data['net_vd_state_dict'] = net_vd.state_dict()
-                data['optimiser_vd_state_dict'] = optimiser_vd.state_dict()
+            if self.dataset_args.train_keypoint_detector:
+                data['net_kd_state_dict'] = net_kd.state_dict()
+                data['optimiser_kd_state_dict'] = optimiser_kd.state_dict()
             if self.transcoder_args.use_transcoder:
                 data['net_t_state_dict'] = net_t.state_dict()
                 if optimiser_t is not None:

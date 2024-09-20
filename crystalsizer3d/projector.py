@@ -200,7 +200,7 @@ class Projector:
         if self.multi_line:
             self._extract_edges()
             self._calculate_edge_segments()
-            self._collate_vertices_and_intersections()
+            self._collate_keypoints()
 
         # Generate the refracted wireframe image
         if generate_image:
@@ -401,22 +401,22 @@ class Projector:
 
         self.edge_segments = segments
 
-    def _collate_vertices_and_intersections(self):
+    def _collate_keypoints(self):
         """
-        Collate the vertices and intersections into a single tensor.
+        Collate the vertices and intersections into a single keypoints tensor.
         """
-        vertices = []
+        keypoints = []
         for refracted_face_idx, edge_segments in self.edge_segments.items():
             if len(edge_segments) == 0:
                 continue
             for segment in edge_segments:
                 for vertex in segment:
-                    vertices.append(vertex)
+                    keypoints.append(vertex)
 
         # De-duplicate
-        vertices = torch.stack(vertices)
-        vertices = torch.unique(vertices, dim=0)
-        self.vertices_and_intersections = vertices
+        keypoints = torch.stack(keypoints)
+        keypoints = torch.unique(keypoints, dim=0)
+        self.keypoints = keypoints
 
     def _generate_image(self) -> Tensor:
         """

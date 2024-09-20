@@ -950,7 +950,7 @@ def plot_denoiser_samples(
     return fig
 
 
-def plot_vertex_detector_samples(
+def plot_keypoint_detector_samples(
         manager: Manager,
         data: Tuple[dict, Tensor, Tensor, Tensor, Dict[str, Tensor]],
         outputs: Dict[str, Any],
@@ -958,7 +958,7 @@ def plot_vertex_detector_samples(
         idxs: List[int],
 ) -> Figure:
     """
-    Plot the image and vertex heatmaps output.
+    Plot the image and keypoint heatmaps output.
     """
     n_examples = len(idxs)
     metas, images, images_aug, images_clean, Y_target = data
@@ -994,20 +994,20 @@ def plot_vertex_detector_samples(
 
         # Plot the clean image with target heatmap overlay
         img_clean = to_numpy(images_clean[idx]).squeeze()
-        V_target = 1 - to_numpy(Y_target['vertex_heatmap'][idx]).squeeze()
+        kp_target = 1 - to_numpy(Y_target['keypoint_heatmap'][idx]).squeeze()
         ax = fig.add_subplot(gs[1, i])
         plot_image(ax, 'Target', img_clean)
-        ax.imshow(V_target, cmap='hot', alpha=0.5)
+        ax.imshow(kp_target, cmap='hot', alpha=0.5)
 
         # Plot the clean image with predicted heatmap overlay
-        V_pred = 1 - to_numpy(outputs['V_heatmap'][idx]).squeeze()
+        kp_pred = 1 - to_numpy(outputs['kp_heatmap'][idx]).squeeze()
         ax = fig.add_subplot(gs[2, i])
-        plot_image(ax, 'Predicted', img_clean)
-        ax.imshow(V_pred, cmap='hot', alpha=0.5)
+        plot_image(ax, 'Predicted (overlaid)', img_clean)
+        ax.imshow(kp_pred, cmap='hot', alpha=0.5)
 
-        # Plot the predicted vertex heatmap
+        # Plot the predicted keypoints heatmap
         ax = fig.add_subplot(gs[3, i])
-        plot_image(ax, 'Predicted', V_pred, cmap='hot')
+        plot_image(ax, 'Predicted', kp_pred, cmap='hot')
 
     return fig
 

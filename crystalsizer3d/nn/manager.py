@@ -31,11 +31,11 @@ from crystalsizer3d import DATA_PATH, LOGS_PATH, START_TIMESTAMP, logger
 from crystalsizer3d.args.dataset_training_args import DatasetTrainingArgs
 from crystalsizer3d.args.denoiser_args import DenoiserArgs
 from crystalsizer3d.args.generator_args import GeneratorArgs
+from crystalsizer3d.args.keypoint_detector_args import KeypointDetectorArgs
 from crystalsizer3d.args.network_args import NetworkArgs
 from crystalsizer3d.args.optimiser_args import OptimiserArgs
 from crystalsizer3d.args.runtime_args import RuntimeArgs
 from crystalsizer3d.args.transcoder_args import TranscoderArgs
-from crystalsizer3d.args.vertex_detector_args import VertexDetectorArgs
 from crystalsizer3d.crystal import Crystal, ROTATION_MODE_AXISANGLE, ROTATION_MODE_QUATERNION
 from crystalsizer3d.crystal_generator import CrystalGenerator
 from crystalsizer3d.crystal_renderer import CrystalRenderer
@@ -61,8 +61,8 @@ from crystalsizer3d.nn.models.vit_pretrained import ViTPretrainedNet
 from crystalsizer3d.nn.models.vitvae import ViTVAE
 from crystalsizer3d.util.ema import EMA
 from crystalsizer3d.util.geometry import geodesic_distance
-from crystalsizer3d.util.plots import plot_denoiser_samples, plot_generator_samples, plot_training_samples, \
-    plot_vertex_detector_samples
+from crystalsizer3d.util.plots import plot_denoiser_samples, plot_generator_samples, plot_keypoint_detector_samples, \
+    plot_training_samples
 from crystalsizer3d.util.polyhedron import calculate_polyhedral_vertices
 from crystalsizer3d.util.utils import calculate_model_norm, is_bad, set_seed
 
@@ -81,7 +81,7 @@ class Manager:
     discriminator: Optional[Discriminator]
     transcoder: Optional[Transcoder]
     denoiser: Optional[VQModel]
-    vertex_detector: Optional[VQModel]
+    keypoint_detector: Optional[VQModel]
     optimiser_p: Optimizer
     lr_scheduler_p: Scheduler
     optimiser_g: Optional[Optimizer]
@@ -102,7 +102,7 @@ class Manager:
             net_args: NetworkArgs,
             generator_args: GeneratorArgs,
             denoiser_args: DenoiserArgs,
-            vertex_detector_args: VertexDetectorArgs,
+            keypoint_detector_args: KeypointDetectorArgs,
             transcoder_args: TranscoderArgs,
             optimiser_args: OptimiserArgs,
             save_dir: Optional[Path] = None,
@@ -114,7 +114,7 @@ class Manager:
         self.net_args = net_args
         self.generator_args = generator_args
         self.denoiser_args = denoiser_args
-        self.vertex_detector_args = vertex_detector_args
+        self.keypoint_detector_args = keypoint_detector_args
         self.transcoder_args = transcoder_args
         self.optimiser_args = optimiser_args
 
@@ -172,9 +172,9 @@ class Manager:
         elif name == 'denoiser':
             self._init_denoiser()
             return self.denoiser
-        elif name == 'vertex_detector':
-            self._init_vertex_detector()
-            return self.vertex_detector
+        elif name == 'keypoint_detector':
+            self._init_keypoint_detector()
+            return self.keypoint_detector
         elif name == 'discriminator':
             self._init_discriminator()
             return self.discriminator
@@ -188,14 +188,14 @@ class Manager:
                       'optimiser_g', 'lr_scheduler_g',
                       'optimiser_d', 'lr_scheduler_d',
                       'optimiser_dn', 'lr_scheduler_dn',
-                      'optimiser_vd', 'lr_scheduler_vd',
+                      'optimiser_kd', 'lr_scheduler_kd',
                       'optimiser_t', 'lr_scheduler_t']:
             options = {
                 'p': 'predictor',
                 'g': 'generator',
                 'd': 'discriminator',
                 'dn': 'denoiser',
-                'vd': 'vertexdetector',
+                'kd': 'keypointdetector',
                 't': 'transcoder'
             }
             key = name.split('_')[-1]
@@ -646,14 +646,14 @@ class Manager:
             if not loaded and self.runtime_args.resume_only:
                 raise ValueError('Denoiser network parameters not found in the checkpoint.')
 
-    def _init_vertex_detector(self, load_from_checkpoint: bool = True):
+    def _init_keypoint_detector(self, load_from_checkpoint: bool = True):
         """
-        Initialise the vertex detector network.
+        Initialise the keypoint detector network.
         """
-        if not self.dataset_args.train_vertex_detector:
-            self.vertex_detector = None
+        if not self.dataset_args.train_keypoint_detector:
+            self.keypoint_detector = None
             return
-        assert self.vertex_detector_args.vd_model_name == 'MAGVIT2', 'Only MAGVIT2 denoiser is supported.'
+        assert self.keypoint_detector_args.kd_model_name == 'MAGVIT2', 'Only MAGVIT2 denoiser is supported.'
 
         # Monkey-patch the LPIPS class so it loads from a sensible place
         from taming.modules.losses.lpips import LPIPS
@@ -666,21 +666,21 @@ class Manager:
         LPIPS.load_from_pretrained = load_pips
 
         # Load the model checkpoint
-        config = OmegaConf.load(self.vertex_detector_args.vd_mv2_config_path)
-        self.vd_config = config
-        vertex_detector = VQModel(**config.model.init_args)
-        sd = torch.load(self.vertex_detector_args.vd_mv2_checkpoint_path, map_location='cpu')['state_dict']
-        vertex_detector.load_state_dict(sd, strict=False)
-        vertex_detector.eval()
+        config = OmegaConf.load(self.keypoint_detector_args.kd_mv2_config_path)
+        self.kd_config = config
+        keypoint_detector = VQModel(**config.model.init_args)
+        sd = torch.load(self.keypoint_detector_args.kd_mv2_checkpoint_path, map_location='cpu')['state_dict']
+        keypoint_detector.load_state_dict(sd, strict=False)
+        keypoint_detector.eval()
 
         # Instantiate the network
-        n_params = sum([p.data.nelement() for p in vertex_detector.parameters()])
-        logger.info(f'Instantiated vertex detector network with {n_params / 1e6:.4f}M parameters.')
+        n_params = sum([p.data.nelement() for p in keypoint_detector.parameters()])
+        logger.info(f'Instantiated keypoint detector network with {n_params / 1e6:.4f}M parameters.')
         if self.print_networks:
-            logger.debug(f'----------- Vertex Detector Network --------------\n\n{vertex_detector}\n\n')
+            logger.debug(f'----------- Keypoint Detector Network --------------\n\n{keypoint_detector}\n\n')
         if self.device.type == 'cuda' and torch.cuda.device_count() > 1:
-            vertex_detector = nn.DataParallel(vertex_detector)
-        self.vertex_detector = vertex_detector.to(self.device)
+            keypoint_detector = nn.DataParallel(keypoint_detector)
+        self.keypoint_detector = keypoint_detector.to(self.device)
 
         # Load the network parameters
         if load_from_checkpoint:
@@ -688,13 +688,13 @@ class Manager:
             if self.runtime_args.resume and len(self.checkpoint.snapshots) > 0:
                 state_path = self.checkpoint.get_state_path()
                 state = torch.load(state_path, map_location=self.device)
-                if 'net_vd_state_dict' in state:
-                    logger.info(f'Loading vertex detector network parameters from {state_path}.')
-                    self.vertex_detector.load_state_dict(self._fix_state(state['net_vd_state_dict']), strict=False)
-                    self.optimiser_vd.load_state_dict(state['optimiser_vd_state_dict'])
+                if 'net_kd_state_dict' in state:
+                    logger.info(f'Loading keypoint detector network parameters from {state_path}.')
+                    self.keypoint_detector.load_state_dict(self._fix_state(state['net_kd_state_dict']), strict=False)
+                    self.optimiser_kd.load_state_dict(state['optimiser_kd_state_dict'])
                     loaded = True
             if not loaded and self.runtime_args.resume_only:
-                raise ValueError('Vertex detector network parameters not found in the checkpoint.')
+                raise ValueError('Keypoint detector network parameters not found in the checkpoint.')
 
     def _init_transcoder(self):
         """
@@ -872,12 +872,12 @@ class Manager:
             optimiser = create_optimizer_v2(model_or_params=params, betas=(0.5, 0.9), **shared_opt_args)
             lr_scheduler, n_epochs = create_scheduler_v2(optimizer=optimiser, **shared_lrs_args)
 
-        # Vertex detector network
-        elif which == 'vertexdetector' and self.dataset_args.train_vertex_detector:
+        # Keypoint detector network
+        elif which == 'keypointdetector' and self.dataset_args.train_keypoint_detector:
             params = [
-                {'params': self.vertex_detector.encoder.parameters(), 'lr': oa.lr_vertex_detector_init},
-                {'params': self.vertex_detector.decoder.parameters(), 'lr': oa.lr_vertex_detector_init},
-                {'params': self.vertex_detector.quantize.parameters(), 'lr': oa.lr_vertex_detector_init},
+                {'params': self.keypoint_detector.encoder.parameters(), 'lr': oa.lr_keypoint_detector_init},
+                {'params': self.keypoint_detector.decoder.parameters(), 'lr': oa.lr_keypoint_detector_init},
+                {'params': self.keypoint_detector.quantize.parameters(), 'lr': oa.lr_keypoint_detector_init},
             ]
             optimiser = create_optimizer_v2(model_or_params=params, betas=(0.5, 0.9), **shared_opt_args)
             lr_scheduler, n_epochs = create_scheduler_v2(optimizer=optimiser, **shared_lrs_args)
@@ -920,8 +920,8 @@ class Manager:
                 metric_keys.append('losses/gan_gen')
         if self.dataset_args.train_denoiser:
             metric_keys.append('losses/denoiser')
-        if self.dataset_args.train_vertex_detector:
-            metric_keys.append('losses/vertex_detector')
+        if self.dataset_args.train_keypoint_detector:
+            metric_keys.append('losses/keypoint_detector')
         if self.transcoder_args.use_transcoder:
             metric_keys.append('losses/transcoder')
 
@@ -969,7 +969,7 @@ class Manager:
             network_args=self.net_args,
             generator_args=self.generator_args,
             denoiser_args=self.denoiser_args,
-            vertex_detector_args=self.vertex_detector_args,
+            keypoint_detector_args=self.keypoint_detector_args,
             optimiser_args=self.optimiser_args,
             transcoder_args=self.transcoder_args,
             runtime_args=self.runtime_args,
@@ -1034,7 +1034,7 @@ class Manager:
         """
         Put the networks in evaluation mode.
         """
-        for net_name in ['predictor', 'generator', 'discriminator', 'denoiser', 'vertex_detector', 'transcoder']:
+        for net_name in ['predictor', 'generator', 'discriminator', 'denoiser', 'keypoint_detector', 'transcoder']:
             if net_name in self.__dict__:
                 net = getattr(self, net_name)
                 if net is not None:
@@ -1052,8 +1052,8 @@ class Manager:
                 self.discriminator.train()
         if self.dataset_args.train_denoiser:
             self.denoiser.train()
-        if self.dataset_args.train_vertex_detector:
-            self.vertex_detector.train()
+        if self.dataset_args.train_keypoint_detector:
+            self.keypoint_detector.train()
         if self.transcoder_args.use_transcoder:
             self.transcoder.train()
 
@@ -1076,8 +1076,8 @@ class Manager:
             self.lr_scheduler_d.step(starting_epoch - 1)
         if self.lr_scheduler_dn is not None:
             self.lr_scheduler_dn.step(starting_epoch - 1)
-        if self.lr_scheduler_vd is not None:
-            self.lr_scheduler_vd.step(starting_epoch - 1)
+        if self.lr_scheduler_kd is not None:
+            self.lr_scheduler_kd.step(starting_epoch - 1)
         if self.lr_scheduler_t is not None:
             self.lr_scheduler_t.step(starting_epoch - 1)
 
@@ -1093,8 +1093,8 @@ class Manager:
                 self.tb_logger.add_scalar('lr/d', self.optimiser_d.param_groups[0]['lr'], epoch)
             if self.optimiser_dn is not None:
                 self.tb_logger.add_scalar('lr/dn', self.optimiser_dn.param_groups[0]['lr'], epoch)
-            if self.optimiser_vd is not None:
-                self.tb_logger.add_scalar('lr/vd', self.optimiser_vd.param_groups[0]['lr'], epoch)
+            if self.optimiser_kd is not None:
+                self.tb_logger.add_scalar('lr/kd', self.optimiser_kd.param_groups[0]['lr'], epoch)
             if self.optimiser_t is not None:
                 self.tb_logger.add_scalar('lr/t', self.optimiser_t.param_groups[0]['lr'], epoch)
 
@@ -1113,8 +1113,8 @@ class Manager:
                 self.lr_scheduler_d.step(epoch, self.checkpoint.loss_train)
             if self.lr_scheduler_dn is not None:
                 self.lr_scheduler_dn.step(epoch, self.checkpoint.loss_train)
-            if self.lr_scheduler_vd is not None:
-                self.lr_scheduler_vd.step(epoch, self.checkpoint.loss_train)
+            if self.lr_scheduler_kd is not None:
+                self.lr_scheduler_kd.step(epoch, self.checkpoint.loss_train)
             if self.lr_scheduler_t is not None:
                 self.lr_scheduler_t.step(epoch, self.checkpoint.loss_train)
 
@@ -1138,8 +1138,8 @@ class Manager:
                 optimiser_d=self.optimiser_d,
                 net_dn=self.denoiser,
                 optimiser_dn=self.optimiser_dn,
-                net_vd=self.vertex_detector,
-                optimiser_vd=self.optimiser_vd,
+                net_kd=self.keypoint_detector,
+                optimiser_kd=self.optimiser_kd,
                 net_t=self.transcoder,
                 optimiser_t=self.optimiser_t,
             )
@@ -1194,8 +1194,8 @@ class Manager:
                     optimiser_d=self.optimiser_d,
                     net_dn=self.denoiser,
                     optimiser_dn=self.optimiser_dn,
-                    net_vd=self.vertex_detector,
-                    optimiser_vd=self.optimiser_vd,
+                    net_kd=self.keypoint_detector,
+                    optimiser_kd=self.optimiser_kd,
                     net_t=self.transcoder,
                     optimiser_t=self.optimiser_t,
                 )
@@ -1259,9 +1259,9 @@ class Manager:
         if self.dataset_args.train_denoiser:
             train_net(self.denoiser, self.optimiser_dn, self._process_batch_denoiser, 'dn')
 
-        # Train the vertex detector
-        if self.dataset_args.train_vertex_detector:
-            train_net(self.vertex_detector, self.optimiser_vd, self._process_batch_vertex_detector, 'vd')
+        # Train the keypoint detector
+        if self.dataset_args.train_keypoint_detector:
+            train_net(self.keypoint_detector, self.optimiser_kd, self._process_batch_keypoint_detector, 'kd')
 
         # Train the transcoder
         if self.transcoder_args.use_transcoder and self.transcoder_args.tc_trained_by == 'self':
@@ -1297,11 +1297,11 @@ class Manager:
             assert not is_bad(weights_cumulative_norm), 'Bad parameters! (Denoiser network)'
             self.tb_logger.add_scalar('batch/train/w_norm_dn', weights_cumulative_norm.item(), self.checkpoint.step)
 
-        # Calculate L2 loss for vertex detector network
-        if self.dataset_args.train_vertex_detector:
-            weights_cumulative_norm = calculate_model_norm(self.vertex_detector, device=self.device)
-            assert not is_bad(weights_cumulative_norm), 'Bad parameters! (Vertex detector network)'
-            self.tb_logger.add_scalar('batch/train/w_norm_vd', weights_cumulative_norm.item(), self.checkpoint.step)
+        # Calculate L2 loss for keypoint detector network
+        if self.dataset_args.train_keypoint_detector:
+            weights_cumulative_norm = calculate_model_norm(self.keypoint_detector, device=self.device)
+            assert not is_bad(weights_cumulative_norm), 'Bad parameters! (Keypoint detector network)'
+            self.tb_logger.add_scalar('batch/train/w_norm_kd', weights_cumulative_norm.item(), self.checkpoint.step)
 
         # Calculate L2 loss for transcoder network
         if self.transcoder_args.use_transcoder:
@@ -1359,11 +1359,11 @@ class Manager:
                     stats.update(stats_dn)
                     loss_total += loss_dn.item()
 
-                if self.dataset_args.train_vertex_detector:
-                    outputs_vd, loss_vd, stats_vd = self._process_batch_vertex_detector(data)
-                    outputs.update(outputs_vd)
-                    stats.update(stats_vd)
-                    loss_total += loss_vd.item()
+                if self.dataset_args.train_keypoint_detector:
+                    outputs_kd, loss_kd, stats_kd = self._process_batch_keypoint_detector(data)
+                    outputs.update(outputs_kd)
+                    stats.update(stats_kd)
+                    loss_total += loss_kd.item()
 
                 if self.transcoder_args.use_transcoder and self.transcoder_args.tc_trained_by == 'self':
                     outputs_t, loss_t, stats_t = self._process_batch_transcoder(
@@ -1551,7 +1551,7 @@ class Manager:
 
         return outputs, loss, metrics
 
-    def _process_batch_vertex_detector(
+    def _process_batch_keypoint_detector(
             self,
             data: Tuple[dict, Tensor, Tensor, Tensor, Dict[str, Tensor]]
     ) -> Tuple[Dict[str, Any], Tensor, Dict]:
@@ -1561,54 +1561,54 @@ class Manager:
         _, _, X_target_aug, X_target_clean, Y_target = data
         X_target_aug = X_target_aug.to(self.device)
         X_target_clean = X_target_clean.to(self.device)
-        V_target = Y_target['vertex_heatmap'].unsqueeze(1).to(self.device)
+        kp_target = Y_target['keypoint_heatmap'].unsqueeze(1).to(self.device)
 
-        # Generate a heatmap of the vertex positions
-        V_pred, l_codebook, l_breakdown = self.detect_vertices(X_target_aug, restore_size=False, return_losses=True)
-        V_pred = V_pred.unsqueeze(1)
+        # Generate a heatmap of the keypoint positions
+        kp_pred, l_codebook, l_breakdown = self.detect_keypoints(X_target_clean, restore_size=False, return_losses=True)
+        kp_pred = kp_pred.unsqueeze(1)
 
         # Resize target heatmap to match generated heatmap size
-        if V_target.shape[-2:] != V_pred.shape[-2:]:
-            V_target = F.interpolate(V_target, size=V_pred.shape[-2:], mode='bilinear', align_corners=False)
+        if kp_target.shape[-2:] != kp_pred.shape[-2:]:
+            kp_target = F.interpolate(kp_target, size=kp_pred.shape[-2:], mode='bilinear', align_corners=False)
 
         # Calculate losses
-        vd_loss: VQLPIPSWithDiscriminator = self.vertex_detector.loss
+        kd_loss: VQLPIPSWithDiscriminator = self.keypoint_detector.loss
 
         # Heatmap losses
-        l_l1 = (V_target - V_pred).abs().mean()
-        l_l2 = ((V_target - V_pred)**2).mean()
+        l_l1 = (kp_target - kp_pred).abs().mean()
+        l_l2 = ((kp_target - kp_pred)**2).mean()
         focal_loss = FocalLoss(
-            alpha=self.vertex_detector_args.vd_focal_loss_alpha,
-            gamma=self.vertex_detector_args.vd_focal_loss_gamma
+            alpha=self.keypoint_detector_args.kd_focal_loss_alpha,
+            gamma=self.keypoint_detector_args.kd_focal_loss_gamma
         )
-        l_fl = focal_loss(V_pred, V_target)
+        l_fl = focal_loss(kp_pred, kp_target)
 
         # Perceptual loss
-        if vd_loss.perceptual_weight > 0:
-            l_percept = vd_loss.perceptual_loss(V_target.contiguous(), V_pred.contiguous()).mean()
+        if kd_loss.perceptual_weight > 0:
+            l_percept = kd_loss.perceptual_loss(kp_target.contiguous(), kp_pred.contiguous()).mean()
         else:
             l_percept = torch.tensor(0., device=self.device)
 
         # Combine losses
-        loss = self.optimiser_args.w_vd_l1 * l_l1 \
-               + self.optimiser_args.w_vd_l2 * l_l2 \
-               + self.optimiser_args.w_vd_fl * l_fl \
-               + vd_loss.perceptual_weight * l_percept \
-               + vd_loss.codebook_weight * l_codebook \
-               + vd_loss.commit_weight * l_breakdown.commitment
+        loss = self.optimiser_args.w_kd_l1 * l_l1 \
+               + self.optimiser_args.w_kd_l2 * l_l2 \
+               + self.optimiser_args.w_kd_fl * l_fl \
+               + kd_loss.perceptual_weight * l_percept \
+               + kd_loss.codebook_weight * l_codebook \
+               + kd_loss.commit_weight * l_breakdown.commitment
 
         outputs = {
-            'V_heatmap': V_pred.detach().cpu(),
+            'kp_heatmap': kp_pred.detach().cpu(),
         }
 
         metrics = {
-            'losses/vertex_detector': loss.item(),
-            'vd/l1': l_l1.item(),
-            'vd/l2': l_l2.item(),
-            'vd/fl': l_fl.item(),
-            'vd/perceptual': l_percept.item(),
-            'vd/codebook': l_codebook.item(),
-            'vd/commitment': l_breakdown.commitment.item(),
+            'losses/keypoint_detector': loss.item(),
+            'kd/l1': l_l1.item(),
+            'kd/l2': l_l2.item(),
+            'kd/fl': l_fl.item(),
+            'kd/perceptual': l_percept.item(),
+            'kd/codebook': l_codebook.item(),
+            'kd/commitment': l_breakdown.commitment.item(),
         }
 
         return outputs, loss, metrics
@@ -1869,34 +1869,34 @@ class Manager:
 
         return X_denoised
 
-    def detect_vertices(
+    def detect_keypoints(
             self,
             X: Tensor,
             restore_size: bool = True,
             return_losses: bool = False
     ) -> Union[Tensor, Tuple[Tensor, Tensor, Any]]:
         """
-        Take a batch of images and detect the crystal vertices.
+        Take a batch of images and detect the keypoints.
         """
         X = X.to(self.device)
 
         # Resize images for input
-        vd_size = self.vd_config.data.init_args.train.params.config.size
-        if self.image_shape[-1] != vd_size:
-            X = F.interpolate(X, size=(vd_size, vd_size), mode='bilinear', align_corners=False)
+        kd_size = self.kd_config.data.init_args.train.params.config.size
+        if self.image_shape[-1] != kd_size:
+            X = F.interpolate(X, size=(kd_size, kd_size), mode='bilinear', align_corners=False)
 
         # Generate the vertex heatmaps
-        V_heatmap, l_codebook, l_breakdown = self.vertex_detector(X)
-        V_heatmap = torch.sigmoid(V_heatmap.mean(dim=1))
+        kp_heatmap, l_codebook, l_breakdown = self.keypoint_detector(X)
+        kp_heatmap = torch.sigmoid(kp_heatmap.mean(dim=1))
 
         # Resize for output
         if restore_size:
-            V_heatmap = F.interpolate(V_heatmap, size=self.image_shape[-2:], mode='bilinear', align_corners=False)
+            kp_heatmap = F.interpolate(kp_heatmap, size=self.image_shape[-2:], mode='bilinear', align_corners=False)
 
         if return_losses:
-            return V_heatmap, l_codebook, l_breakdown
+            return kp_heatmap, l_codebook, l_breakdown
 
-        return V_heatmap
+        return kp_heatmap
 
     def calculate_predictor_losses(
             self,
@@ -2791,9 +2791,9 @@ class Manager:
             if self.dataset_args.train_denoiser:
                 fig = plot_denoiser_samples(self, data, outputs, train_or_test, idxs)
                 self._save_plot(fig, 'denoiser', train_or_test)
-            if self.dataset_args.train_vertex_detector:
-                fig = plot_vertex_detector_samples(self, data, outputs, train_or_test, idxs)
-                self._save_plot(fig, 'vertex_detector', train_or_test)
+            if self.dataset_args.train_keypoint_detector:
+                fig = plot_keypoint_detector_samples(self, data, outputs, train_or_test, idxs)
+                self._save_plot(fig, 'keypoint_detector', train_or_test)
             # if self.transcoder_args.use_transcoder: todo - fix
             #     fig = plot_vaetc_examples(data, outputs, train_or_test, idxs)
             #     self._save_plot(fig, 'vaetc_examples', train_or_test)

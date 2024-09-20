@@ -33,11 +33,10 @@ class DatasetTrainingArgs(BaseArgs):
             train_generator: bool = True,
             train_combined: bool = False,
             train_denoiser: bool = False,
-            train_vertex_detector: bool = False,
+            train_keypoint_detector: bool = False,
 
             rotation_mode: str = 'axisangle',
 
-            heatmap_blob_height: float = 1.0,
             heatmap_blob_variance: float = 10.0,
 
             use_distance_switches: bool = True,
@@ -77,14 +76,13 @@ class DatasetTrainingArgs(BaseArgs):
                 'train_predictor and train_generator must be True when train_combined is True.'
         self.train_combined = train_combined
         self.train_denoiser = train_denoiser
-        self.train_vertex_detector = train_vertex_detector
+        self.train_keypoint_detector = train_keypoint_detector
 
         # Rotation mode
         assert rotation_mode in ROTATION_MODES, f'Invalid rotation mode {rotation_mode}, must be one of {ROTATION_MODES}'
         self.rotation_mode = rotation_mode
 
-        # Heatmap parameters
-        self.heatmap_blob_height = heatmap_blob_height
+        # Keypoint parameters
         self.heatmap_blob_variance = heatmap_blob_variance
 
         # Old arguments, now not recommended
@@ -146,18 +144,16 @@ class DatasetTrainingArgs(BaseArgs):
                            help='Train the full predictor and generator networks together as a visual autoencoder.')
         group.add_argument('--train-denoiser', type=str2bool, default=False,
                            help='Train the denoiser network.')
-        group.add_argument('--train-vertex-detector', type=str2bool, default=False,
-                           help='Train the vertex detector network.')
+        group.add_argument('--train-keypoint-detector', type=str2bool, default=False,
+                           help='Train the keypoint detector network.')
 
         # Rotation mode
         group.add_argument('--rotation-mode', type=str, default=ROTATION_MODE_AXISANGLE, choices=ROTATION_MODES,
                            help='Rotation mode (axisangle or quaternion).')
 
-        # Heatmap parameters
-        group.add_argument('--heatmap-blob-height', type=float, default=1.0,
-                           help='The maximum height of the Gaussian blob in the vertex heatmap.')
+        # Keypoint parameters
         group.add_argument('--heatmap-blob-variance', type=float, default=10.0,
-                           help='Variance of the Gaussian blobs in the vertex heatmap.')
+                           help='Variance of the Gaussian blobs in the keypoint heatmap.')
 
         # Old arguments, now not recommended
         group.add_argument('--use-distance-switches', type=str2bool, default=False,

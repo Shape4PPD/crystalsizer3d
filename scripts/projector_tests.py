@@ -11,8 +11,8 @@ from crystalsizer3d.crystal import Crystal
 from crystalsizer3d.projector import Projector
 from crystalsizer3d.scene_components.scene import Scene
 from crystalsizer3d.scene_components.utils import project_to_image
+from crystalsizer3d.util.keypoints import generate_keypoints_heatmap
 from crystalsizer3d.util.utils import init_tensor, to_numpy
-from crystalsizer3d.util.vertex_heatmaps import generate_vertex_heatmap
 
 if USE_CUDA:
     device = torch.device('cuda')
@@ -222,7 +222,7 @@ def show_vertices(which='alpha'):
     axes[0].set_title('Original method')
     axes[1].imshow(img_ml)
     axes[1].set_title('Multi-line method')
-    axes[1].scatter(*to_numpy(projector.vertices_and_intersections).T, color='green', marker='o', s=100, alpha=0.3)
+    axes[1].scatter(*to_numpy(projector.keypoints).T, color='green', marker='o', s=100, alpha=0.3)
     plt.tight_layout()
     plt.show()
 
@@ -240,8 +240,8 @@ def show_vertex_heatmap(which='alpha'):
                           multi_line=True)
     projector.image[:, projector.image.sum(dim=0) == 0] = 1
 
-    heatmap = generate_vertex_heatmap(
-        vertices=projector.vertices_and_intersections,
+    heatmap = generate_keypoints_heatmap(
+        keypoints=projector.keypoints,
         image_size=image_size[0],
         blob_height=1.0,
         blob_variance=20.0
@@ -250,7 +250,7 @@ def show_vertex_heatmap(which='alpha'):
     heatmap = 1 - to_numpy(heatmap)
     plt.figure(figsize=(10, 10))
     plt.imshow(heatmap, cmap='hot')
-    plt.scatter(*to_numpy(projector.vertices_and_intersections).T, color='green', marker='x', s=400, alpha=0.9)
+    plt.scatter(*to_numpy(projector.keypoints).T, color='green', marker='x', s=400, alpha=0.9)
     plt.tight_layout()
     plt.show()
 
