@@ -67,9 +67,12 @@ class OptimiserArgs(BaseArgs):
             w_com_X: float = 0.,
             w_com_Y: float = 0.,
 
-            w_kd_l1: float = 1.0,
-            w_kd_l2: float = 1.0,
-            w_kd_fl: float = 1.0,
+            w_kp_l1: float = 1.0,
+            w_kp_l2: float = 1.0,
+            w_kp_fl: float = 1.0,
+            w_wf_l1: float = 1.0,
+            w_wf_l2: float = 1.0,
+            w_wf_fl: float = 1.0,
 
             **kwargs
     ):
@@ -160,9 +163,12 @@ class OptimiserArgs(BaseArgs):
         self.w_com_Y = w_com_Y
 
         # Keypoint detector loss weightings
-        self.w_kd_l1 = w_kd_l1
-        self.w_kd_l2 = w_kd_l2
-        self.w_kd_fl = w_kd_fl
+        self.w_kp_l1 = w_kp_l1
+        self.w_kp_l2 = w_kp_l2
+        self.w_kp_fl = w_kp_fl
+        self.w_wf_l1 = w_wf_l1
+        self.w_wf_l2 = w_wf_l2
+        self.w_wf_fl = w_wf_fl
 
     @classmethod
     def add_args(cls, parser: ArgumentParser) -> _ArgumentGroup:
@@ -269,11 +275,17 @@ class OptimiserArgs(BaseArgs):
         group.add_argument('--w-com-Y', type=float, default=0.,
                            help='Weight for combined Y loss - used in train_combined mode.')
 
-        group.add_argument('--w-kd-l1', type=float, default=0,
-                           help='Weight for L1 loss in keypoint detector.')
-        group.add_argument('--w-kd-l2', type=float, default=0,
-                           help='Weight for L2 loss in keypoint detector.')
-        group.add_argument('--w-kd-fl', type=float, default=1.0,
-                           help='Weight for focal loss in keypoint detector.')
+        group.add_argument('--w-kp-l1', type=float, default=0,
+                           help='Weight for L1 loss in keypoint heatmaps.')
+        group.add_argument('--w-kp-l2', type=float, default=0,
+                           help='Weight for L2 loss in keypoint heatmaps.')
+        group.add_argument('--w-kp-fl', type=float, default=1.0,
+                           help='Weight for focal loss in keypoint heatmaps.')
+        group.add_argument('--w-wf-l1', type=float, default=0,
+                           help='Weight for L1 loss in wireframe images.')
+        group.add_argument('--w-wf-l2', type=float, default=0,
+                           help='Weight for L2 loss in wireframe images.')
+        group.add_argument('--w-wf-fl', type=float, default=1.0,
+                           help='Weight for focal loss in wireframe images.')
 
         return group

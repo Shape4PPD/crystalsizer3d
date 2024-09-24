@@ -34,6 +34,7 @@ class DatasetTrainingArgs(BaseArgs):
             train_combined: bool = False,
             train_denoiser: bool = False,
             train_keypoint_detector: bool = False,
+            train_edge_detector: bool = False,
 
             rotation_mode: str = 'axisangle',
 
@@ -78,6 +79,7 @@ class DatasetTrainingArgs(BaseArgs):
         self.train_combined = train_combined
         self.train_denoiser = train_denoiser
         self.train_keypoint_detector = train_keypoint_detector
+        self.train_edge_detector = train_edge_detector
 
         # Rotation mode
         assert rotation_mode in ROTATION_MODES, f'Invalid rotation mode {rotation_mode}, must be one of {ROTATION_MODES}'
@@ -148,6 +150,8 @@ class DatasetTrainingArgs(BaseArgs):
                            help='Train the denoiser network.')
         group.add_argument('--train-keypoint-detector', type=str2bool, default=False,
                            help='Train the keypoint detector network.')
+        group.add_argument('--train-edge-detector', type=str2bool, default=False,
+                            help='Train the edge detector network.')
 
         # Rotation mode
         group.add_argument('--rotation-mode', type=str, default=ROTATION_MODE_AXISANGLE, choices=ROTATION_MODES,

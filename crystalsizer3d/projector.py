@@ -145,6 +145,14 @@ class Projector:
         # Do the projection
         self.image = self.project()
 
+    def update_zoom(self, zoom: float):
+        """
+        Update the zoom level of the projector.
+        """
+        self.zoom = zoom
+        self.x_range = init_tensor([-self.aspect_ratio, self.aspect_ratio], device=self.device) / self.zoom
+        self.y_range = init_tensor([-1, 1], device=self.device) / self.zoom
+
     def _to_relative_coords(self, coords: Tensor) -> Tensor:
         """
         Convert absolute coordinates to relative coordinates.

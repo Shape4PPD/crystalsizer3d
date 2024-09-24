@@ -1553,60 +1553,108 @@ class Manager:
             data: Tuple[dict, Tensor, Tensor, Tensor, Dict[str, Tensor]]
     ) -> Tuple[Dict[str, Any], Tensor, Dict]:
         """
-        Take a batch of noisy images and try to identify the crystal vertex positions.
+        Take a batch of noisy images and try to identify the crystal vertex positions and/or wireframe edges.
         """
         _, _, X_target_aug, X_target_clean, Y_target = data
-        X_target_aug = X_target_aug.to(self.device)
-        X_target_clean = X_target_clean.to(self.device)
-        kp_target = Y_target['kp_heatmap'].unsqueeze(1).to(self.device)
+        if self.keypoint_detector_args.kd_use_clean_images:
+            X_target = X_target_clean.to(self.device)
+        else:
+            X_target = X_target_aug.to(self.device)
+        outputs = {}
+        metrics = {}
+        loss = 0.
 
-        # Generate a heatmap of the keypoint positions
-        kp_pred, l_codebook, l_breakdown = self.detect_keypoints(X_target_clean, restore_size=False, return_losses=True)
-        kp_pred = kp_pred.unsqueeze(1)
-
-        # Resize target heatmap to match generated heatmap size
-        if kp_target.shape[-2:] != kp_pred.shape[-2:]:
-            kp_target = F.interpolate(kp_target, size=kp_pred.shape[-2:], mode='bilinear', align_corners=False)
+        # Generate a heatmap of the keypoint positions and/or wireframe
+        kp_pred, wf_pred, l_codebook, l_breakdown = self.detect_keypoints(
+            X_target,
+            restore_size=True,
+            return_losses=True
+        )
 
         # Calculate losses
         kd_loss: VQLPIPSWithDiscriminator = self.keypoint_detector.loss
-
-        # Heatmap losses
-        l_l1 = (kp_target - kp_pred).abs().mean()
-        l_l2 = ((kp_target - kp_pred)**2).mean()
         focal_loss = FocalLoss(
             alpha=self.keypoint_detector_args.kd_focal_loss_alpha,
             gamma=self.keypoint_detector_args.kd_focal_loss_gamma
         )
-        l_fl = focal_loss(kp_pred, kp_target)
 
-        # Perceptual loss
-        if kd_loss.perceptual_weight > 0:
-            l_percept = kd_loss.perceptual_loss(kp_target.contiguous(), kp_pred.contiguous()).mean()
-        else:
-            l_percept = torch.tensor(0., device=self.device)
+        # Keypoint heatmap losses
+        if self.keypoint_detector_args.kd_train_keypoints:
+            outputs['kp_pred'] = kp_pred.detach().cpu()
+            kp_pred = kp_pred.unsqueeze(1)
+            kp_target = Y_target['kp_heatmap'].unsqueeze(1).to(self.device)
+
+            # Calculate losses
+            l_kp_l1 = (kp_target - kp_pred).abs().mean()
+            l_kp_l2 = ((kp_target - kp_pred)**2).mean()
+            l_kp_fl = focal_loss(kp_pred, kp_target)
+            if kd_loss.perceptual_weight > 0:
+                l_kp_percept = kd_loss.perceptual_loss(
+                    kp_target.contiguous(),
+                    kp_pred.contiguous()
+                ).mean()
+            else:
+                l_kp_percept = torch.tensor(0., device=self.device)
+
+            # Combine losses
+            loss_kp = self.optimiser_args.w_kp_l1 * l_kp_l1 \
+                      + self.optimiser_args.w_kp_l2 * l_kp_l2 \
+                      + self.optimiser_args.w_kp_fl * l_kp_fl \
+                      + kd_loss.perceptual_weight * l_kp_percept
+            loss = loss + loss_kp
+
+            # Track loss terms
+            metrics = {**metrics, **{
+                'kd/kp': loss_kp.item(),
+                'kd/kp/l1': l_kp_l1.item(),
+                'kd/kp/l2': l_kp_l2.item(),
+                'kd/kp/fl': l_kp_fl.item(),
+                'kd/kp/perceptual': l_kp_percept.item(),
+            }}
+
+        # Wireframe losses
+        if self.keypoint_detector_args.kd_train_wireframe:
+            outputs['wf_pred'] = wf_pred.detach().cpu()
+            wf_target = Y_target['wireframe'].to(self.device)
+
+            # Calculate losses
+            l_wf_l1 = (wf_target - wf_pred).abs().mean()
+            l_wf_l2 = ((wf_target - wf_pred)**2).mean()
+            l_wf_fl = focal_loss(wf_pred, wf_target)
+            if kd_loss.perceptual_weight > 0:
+                l_wf_percept = kd_loss.perceptual_loss(
+                    wf_target.contiguous().mean(dim=1).unsqueeze(1),
+                    wf_pred.contiguous().mean(dim=1).unsqueeze(1)
+                ).mean()
+            else:
+                l_wf_percept = torch.tensor(0., device=self.device)
+
+            # Combine losses
+            loss_wf = self.optimiser_args.w_wf_l1 * l_wf_l1 \
+                      + self.optimiser_args.w_wf_l2 * l_wf_l2 \
+                      + self.optimiser_args.w_wf_fl * l_wf_fl \
+                      + kd_loss.perceptual_weight * l_wf_percept
+            loss = loss + loss_wf
+
+            # Track loss terms
+            metrics = {**metrics, **{
+                'kd/wf': loss_wf.item(),
+                'kd/wf/l1': l_wf_l1.item(),
+                'kd/wf/l2': l_wf_l2.item(),
+                'kd/wf/fl': l_wf_fl.item(),
+                'kd/wf/perceptual': l_wf_percept.item(),
+            }}
 
         # Combine losses
-        loss = self.optimiser_args.w_kd_l1 * l_l1 \
-               + self.optimiser_args.w_kd_l2 * l_l2 \
-               + self.optimiser_args.w_kd_fl * l_fl \
-               + kd_loss.perceptual_weight * l_percept \
+        loss = loss \
                + kd_loss.codebook_weight * l_codebook \
                + kd_loss.commit_weight * l_breakdown.commitment
 
-        outputs = {
-            'kp_heatmap': kp_pred.detach().cpu(),
-        }
-
-        metrics = {
+        metrics = {**metrics, **{
             'losses/keypoint_detector': loss.item(),
-            'kd/l1': l_l1.item(),
-            'kd/l2': l_l2.item(),
-            'kd/fl': l_fl.item(),
-            'kd/perceptual': l_percept.item(),
             'kd/codebook': l_codebook.item(),
             'kd/commitment': l_breakdown.commitment.item(),
-        }
+        }}
 
         return outputs, loss, metrics
 
@@ -1871,7 +1919,7 @@ class Manager:
             X: Tensor,
             restore_size: bool = True,
             return_losses: bool = False
-    ) -> Union[Tensor, Tuple[Tensor, Tensor, Any]]:
+    ) -> Union[Tuple[Optional[Tensor], Optional[Tensor]], Tuple[Optional[Tensor], Optional[Tensor], Tensor, Any]]:
         """
         Take a batch of images and detect the keypoints.
         """
@@ -1882,18 +1930,32 @@ class Manager:
         if self.image_shape[-1] != kd_size:
             X = F.interpolate(X, size=(kd_size, kd_size), mode='bilinear', align_corners=False)
 
-        # Generate the vertex heatmaps
-        kp_heatmap, l_codebook, l_breakdown = self.keypoint_detector(X)
-        kp_heatmap = torch.sigmoid(kp_heatmap.mean(dim=1))
+        # Generate the vertex heatmaps and wireframes
+        keypoints, l_codebook, l_breakdown = self.keypoint_detector(X)
+        keypoints = torch.sigmoid(keypoints)
 
         # Resize for output
         if restore_size:
-            kp_heatmap = F.interpolate(kp_heatmap, size=self.image_shape[-2:], mode='bilinear', align_corners=False)
+            keypoints = F.interpolate(keypoints, size=self.image_shape[-2:], mode='bilinear', align_corners=False)
+
+        # Split into keypoints heatmaps and wireframe
+        kp_heatmap = None
+        wireframe = None
+        if self.keypoint_detector_args.kd_train_keypoints:
+            if self.keypoint_detector_args.kd_train_wireframe:
+                kp_heatmap = keypoints[:, 0]
+            else:
+                kp_heatmap = keypoints.mean(dim=1)
+        if self.keypoint_detector_args.kd_train_wireframe:
+            if self.keypoint_detector_args.kd_train_keypoints:
+                wireframe = keypoints[:, 1:]
+            else:
+                wireframe = keypoints[:, :2]  # Need two channels for the wireframe so just discard the third channel
 
         if return_losses:
-            return kp_heatmap, l_codebook, l_breakdown
+            return kp_heatmap, wireframe, l_codebook, l_breakdown
 
-        return kp_heatmap
+        return kp_heatmap, wireframe
 
     def calculate_predictor_losses(
             self,

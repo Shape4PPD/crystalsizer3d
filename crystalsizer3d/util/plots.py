@@ -962,7 +962,11 @@ def plot_keypoint_detector_samples(
     """
     n_examples = len(idxs)
     metas, images, images_aug, images_clean, Y_target = data
-    n_rows = 4
+    n_rows = 1
+    if manager.keypoint_detector_args.kd_train_keypoints:
+        n_rows += 2
+    if manager.keypoint_detector_args.kd_train_wireframe:
+        n_rows += 2
     fig = plt.figure(figsize=(n_examples * 2.7, n_rows * 3))
     gs = GridSpec(
         nrows=n_rows,
@@ -984,30 +988,57 @@ def plot_keypoint_detector_samples(
         y=0.995
     )
 
-    for i, idx in enumerate(idxs):
+    def add_plot(title, img, overlay=None, cmap='hot', alpha_max=0.9):
+        nonlocal row_idx
+        ax = fig.add_subplot(gs[row_idx, col_idx])
+        row_idx += 1
+        plot_image(ax, title, img, cmap)
+        if overlay is not None:
+            if overlay.ndim == 3:
+                alpha = overlay.max(axis=0)
+                if overlay.shape[0] == 2:
+                    overlay = np.concatenate([overlay, np.zeros_like(overlay[0:1])])
+                if overlay.shape[0] == 3:
+                    overlay = overlay.transpose(1, 2, 0)
+            else:
+                alpha = overlay
+            alpha = alpha**2
+            alpha = alpha / alpha.max() * alpha_max
+            if overlay.ndim == 3:
+                overlay = np.concatenate([overlay, alpha[..., None]], axis=-1)
+                ax.imshow(overlay)
+            else:
+                ax.imshow(overlay, cmap='hot', alpha=alpha)
+
+    for col_idx, idx in enumerate(idxs):
+        row_idx = 0
         meta = metas[idx]
+        img_clean = to_numpy(images_clean[idx]).squeeze()
 
         # Plot the (possibly augmented) input image
-        img_aug = to_numpy(images_aug[idx]).squeeze()
-        ax = fig.add_subplot(gs[0, i])
-        plot_image(ax, meta['image'].name, img_aug)
+        if manager.keypoint_detector_args.kd_use_clean_images:
+            img_input = img_clean
+        else:
+            img_input = to_numpy(images_aug[idx]).squeeze()
+        add_plot(meta['image'].name, img_input)
 
-        # Plot the clean image with target heatmap overlay
-        img_clean = to_numpy(images_clean[idx]).squeeze()
-        kp_target = 1 - to_numpy(Y_target['keypoint_heatmap'][idx]).squeeze()
-        ax = fig.add_subplot(gs[1, i])
-        plot_image(ax, 'Target', img_clean)
-        ax.imshow(kp_target, cmap='hot', alpha=0.5)
+        if manager.keypoint_detector_args.kd_train_keypoints:
+            # Plot the clean image with target heatmap overlay
+            kp_target = to_numpy(Y_target['kp_heatmap'][idx]).squeeze()
+            add_plot('Target keypoints', img_clean, kp_target)
 
-        # Plot the clean image with predicted heatmap overlay
-        kp_pred = 1 - to_numpy(outputs['kp_heatmap'][idx]).squeeze()
-        ax = fig.add_subplot(gs[2, i])
-        plot_image(ax, 'Predicted (overlaid)', img_clean)
-        ax.imshow(kp_pred, cmap='hot', alpha=0.5)
+            # Plot the clean image with predicted heatmap overlay
+            kp_pred = to_numpy(outputs['kp_pred'][idx]).squeeze()
+            add_plot('Predicted keypoints', img_clean, kp_pred)
 
-        # Plot the predicted keypoints heatmap
-        ax = fig.add_subplot(gs[3, i])
-        plot_image(ax, 'Predicted', kp_pred, cmap='hot')
+        if manager.keypoint_detector_args.kd_train_wireframe:
+            # Plot the clean image with target heatmap overlay
+            wf_target = to_numpy(Y_target['wireframe'][idx])
+            add_plot('Target wireframe', img_clean, wf_target)
+
+            # Plot the clean image with predicted heatmap overlay
+            wf_pred = to_numpy(outputs['wf_pred'][idx])
+            add_plot('Predicted wireframe', img_clean, wf_pred)
 
     return fig
 
