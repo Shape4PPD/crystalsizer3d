@@ -141,6 +141,42 @@ def point_in_polygon(points: Tensor, polygon: Tensor, eps: float = 1e-6):
 
 
 @torch.jit.script
+def merge_vertices(vertices: Tensor, epsilon: float = 1e-3) -> Tuple[Tensor, Tensor]:
+    """
+    Cluster a set of vertices based on spatial quantisation.
+    """
+    device = vertices.device
+
+    # Subtract the mean
+    vertices_og = vertices
+    vertices = vertices - vertices.mean(dim=0)
+
+    # Compute hash key for each point based on spatial quantisation
+    hash_keys = torch.round(vertices / epsilon)
+
+    # Use hash_keys to create a unique identifier for each cluster
+    unique_clusters, cluster_indices = torch.unique(hash_keys, dim=0, return_inverse=True)
+    if len(unique_clusters) == len(vertices):
+        return vertices_og, torch.arange(len(vertices), device=device)
+
+    # Calculate mean of points within each cluster
+    clustered_vertices = torch.zeros_like(unique_clusters, dtype=vertices.dtype)
+    counts = torch.zeros(len(unique_clusters), dtype=torch.int64, device=device)
+
+    # Accumulate points and counts for each cluster
+    clustered_vertices.scatter_add_(0, cluster_indices.unsqueeze(1).expand_as(vertices), vertices_og)
+    counts.scatter_add_(0, cluster_indices, torch.ones_like(cluster_indices))
+
+    # Avoid division by zero
+    counts[counts == 0] = 1
+
+    # Calculate mean for each cluster
+    cluster_centroids = clustered_vertices / counts.unsqueeze(1).expand_as(clustered_vertices)
+
+    return cluster_centroids, cluster_indices
+
+
+@torch.jit.script
 def line_segment_intersections(edges1: Tensor, edges2: Tensor, eps: float = 1e-6):
     """
     Compute the intersection points of multiple line segments in batch.
@@ -189,6 +225,11 @@ def line_segments_in_polygon(
     Returns:
         A tensor containing line segments that are inside or intersect the polygon.
     """
+    polygon = merge_vertices(polygon, epsilon=tol)[0]  # (M, 2)
+    p2 = polygon - polygon.mean(dim=0)
+    angles = torch.atan2(p2[:, 1], p2[:, 0])
+    sorted_idxs = torch.argsort(angles)
+    polygon = polygon[sorted_idxs]
 
     # Check if edge endpoints are inside the polygon
     endpoints_inside = point_in_polygon(edges.view(-1, 2), polygon)  # (N * 2,)
@@ -471,34 +512,36 @@ def calculate_relative_angles(vertices: Tensor, centroid: Tensor, tol: float = 1
 
 
 @torch.jit.script
-def merge_vertices(vertices: Tensor, epsilon: float = 1e-3) -> Tuple[Tensor, Tensor]:
+def sort_face_vertices(vertices: Tensor) -> Tensor:
     """
-    Cluster a set of vertices based on spatial quantisation.
+    Sort the vertices of a face in clockwise order.
     """
-    # Subtract the mean
-    vertices_og = vertices
-    vertices = vertices - vertices.mean(dim=0)
+    device = vertices.device
 
-    # Compute hash key for each point based on spatial quantisation
-    hash_keys = torch.round(vertices / epsilon)
+    # Calculate the angles of each vertex relative to the centroid
+    centroid = torch.mean(vertices, dim=0)
+    angles = calculate_relative_angles(vertices, centroid)
 
-    # Use hash_keys to create a unique identifier for each cluster
-    unique_clusters, cluster_indices = torch.unique(hash_keys, dim=0, return_inverse=True)
-    if len(unique_clusters) == len(vertices):
-        return vertices_og, torch.arange(len(vertices))
+    # Sort the vertices based on the angles
+    sorted_idxs = torch.argsort(angles)
+    sorted_vertices = vertices[sorted_idxs]
 
-    # Calculate mean of points within each cluster
-    clustered_vertices = torch.zeros_like(unique_clusters, dtype=vertices.dtype)
-    counts = torch.zeros(len(unique_clusters), dtype=torch.int64, device=vertices.device)
+    # Flip the order if the normal is pointing inwards
+    normal = torch.zeros(3, device=device)
+    normal_norm = normal.norm()
+    largest_normal = normal
+    largest_normal_norm = normal_norm
+    i = 0
+    while normal_norm < 1e-3 and i < len(sorted_vertices) - 1:
+        normal = torch.cross(sorted_vertices[i] - centroid, sorted_vertices[i + 1] - centroid, dim=0)
+        normal_norm = normal.norm()
+        if normal_norm > largest_normal_norm:
+            largest_normal = normal
+            largest_normal_norm = normal_norm
+        i += 1
+    if normal_norm < 1e-3:
+        normal = largest_normal
+    if torch.dot(normal, centroid) < 0:
+        sorted_idxs = sorted_idxs.flip(0)
 
-    # Accumulate points and counts for each cluster
-    clustered_vertices.scatter_add_(0, cluster_indices.unsqueeze(1).expand_as(vertices), vertices_og)
-    counts.scatter_add_(0, cluster_indices, torch.ones_like(cluster_indices))
-
-    # Avoid division by zero
-    counts[counts == 0] = 1
-
-    # Calculate mean for each cluster
-    cluster_centroids = clustered_vertices / counts.unsqueeze(1).expand_as(clustered_vertices)
-
-    return cluster_centroids, cluster_indices
+    return sorted_idxs

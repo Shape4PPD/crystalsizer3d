@@ -38,6 +38,7 @@ class DatasetTrainingArgs(BaseArgs):
             rotation_mode: str = 'axisangle',
 
             heatmap_blob_variance: float = 10.0,
+            wireframe_blur_variance: float = 1.0,
 
             use_distance_switches: bool = True,
             add_coord_grid: bool = False,
@@ -84,6 +85,7 @@ class DatasetTrainingArgs(BaseArgs):
 
         # Keypoint parameters
         self.heatmap_blob_variance = heatmap_blob_variance
+        self.wireframe_blur_variance = wireframe_blur_variance
 
         # Old arguments, now not recommended
         assert not use_distance_switches, 'Distance switches are now disabled.'
@@ -154,6 +156,8 @@ class DatasetTrainingArgs(BaseArgs):
         # Keypoint parameters
         group.add_argument('--heatmap-blob-variance', type=float, default=10.0,
                            help='Variance of the Gaussian blobs in the keypoint heatmap.')
+        group.add_argument('--wireframe-blur-variance', type=float, default=1.0,
+                           help='Variance of the Gaussian blur applied to the wireframe images.')
 
         # Old arguments, now not recommended
         group.add_argument('--use-distance-switches', type=str2bool, default=False,

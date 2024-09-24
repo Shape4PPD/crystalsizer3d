@@ -6,14 +6,12 @@ from kornia.core.check import KORNIA_CHECK, KORNIA_CHECK_SHAPE
 from kornia.geometry import axis_angle_to_rotation_matrix, center_crop, quaternion_to_rotation_matrix
 from kornia.utils import draw_line
 from kornia.utils.draw import _batch_polygons, _get_convex_edges
-from shapely.geometry import Point
-from shapely.geometry.polygon import Polygon
 from torch import Tensor
 from torch.nn.functional import interpolate
 
 from crystalsizer3d.crystal import Crystal
 from crystalsizer3d.util.geometry import is_point_in_bounds, line_equation_coefficients, line_intersection, \
-    line_segments_in_polygon, normalise, polygon_area
+    line_segments_in_polygon, merge_vertices, normalise, point_in_polygon, polygon_area, sort_face_vertices
 from crystalsizer3d.util.utils import init_tensor
 
 # A vertex can appear in multiple faces due to refraction, so we need to store the face index (or 'facing') as well
@@ -66,15 +64,20 @@ def replace_convex_polygon(
 
 
 class Projector:
-    vertices: Tensor
+    tol_2d: float
+    tol_2d_rel: float
     vertex_ids: Tensor
+    vertices: Tensor
+    cluster_idxs: Tensor
     faces: List[Tensor]
     face_normals: Tensor
+    faces_facing: List[bool]
     distances: Tensor
     vertices_2d: Tensor
+    vertices_2d_rel: Tensor
     projected_vertices: Dict[int, Tensor]
     projected_vertex_keys: List[ProjectedVertexKey]
-    projected_vertex_coords: Tensor
+    projected_vertices_rel: Tensor
     rear_edges: Tensor
     front_edges: Tensor
     edge_segments: Dict[Union[str, int], Tensor]
@@ -92,6 +95,7 @@ class Projector:
             colour_facing_towards: List[float] = [1, 0, 0],
             colour_facing_away: List[float] = [0, 0, 1],
             multi_line: bool = True,
+            rtol: float = 1e-3
     ):
         """
         Project a crystal onto an image.
@@ -101,7 +105,7 @@ class Projector:
         self.external_ior = external_ior
 
         # Set image size and aspect ratio
-        self.image_size = image_size
+        self.image_size = init_tensor(image_size, dtype=torch.int, device=self.device)
         self.aspect_ratio = image_size[0] / image_size[1]
         self.view_axis = normalise(init_tensor(camera_axis, device=self.device))
         self.zoom = zoom
@@ -115,6 +119,9 @@ class Projector:
 
         # Drawing mode
         self.multi_line = multi_line
+
+        # Sensitivity (tolerance), scaled by spread of points in 3D and 2D
+        self.rtol = rtol
 
         # Colours
         self.colour_facing_towards = init_tensor(colour_facing_towards, device=self.device)
@@ -142,11 +149,10 @@ class Projector:
         """
         Convert absolute coordinates to relative coordinates.
         """
-        image_size = torch.tensor(self.image_size, device=self.device)
         return torch.stack([
-            (coords[0] / image_size[1] - 0.5) * 2,
-            (0.5 - coords[1] / image_size[0]) * 2
-        ])
+            (coords[:, 0] / self.image_size[1] - 0.5) * 2,
+            (0.5 - coords[:, 1] / self.image_size[0]) * 2
+        ], dim=1)
 
     def set_background(self, background_image: Optional[Union[Tensor, np.ndarray]] = None):
         """
@@ -164,7 +170,7 @@ class Projector:
                 background_image = center_crop(background_image[None, ...], (min_size, min_size))
                 background_image = interpolate(
                     background_image,
-                    size=self.image_size,
+                    size=self.image_size.tolist(),
                     mode='bilinear',
                     align_corners=False
                 )[0]
@@ -174,24 +180,48 @@ class Projector:
         """
         Project the crystal onto an image plane, optionally drawing the edges on to an image.
         """
-        self.vertices = self.crystal.vertices.clone()
+        vertices_all = self.crystal.vertices.clone()
         self.vertex_ids = self.crystal.vertex_ids.clone()
-        self.faces = [
-            self.crystal.faces[tuple(hkl)].clone()
-            if tuple(hkl) in self.crystal.faces else torch.tensor([], device=self.device)
-            for hkl in self.crystal.all_miller_indices.tolist()
-        ]
-        self.distances = self.crystal.all_distances.clone()
+
+        def calc_atol(points: Tensor) -> float:
+            return self.rtol * (points - points.mean(dim=0)).norm(dim=-1).max().item()
+
+        # Merged vertices in 3D before projection
+        tol_3d = calc_atol(vertices_all)
+        self.vertices, self.cluster_idxs = merge_vertices(vertices_all, epsilon=tol_3d)
+
+        # Extract the faces and face normals
+        self.faces = []
+        self.face_normals = []
+        self.distances = []
+        for face_idx, hkl in enumerate(self.crystal.all_miller_indices.tolist()):
+            if tuple(hkl) not in self.crystal.faces:
+                continue
+            face_vertex_idxs = self.crystal.faces[tuple(hkl)]
+            face_c_idxs = self.cluster_idxs[face_vertex_idxs].unique()
+            if len(face_c_idxs) < 3 or self.crystal.areas[tuple(hkl)] < tol_3d**2:
+                continue
+            face_clusters = self.vertices[face_c_idxs]
+            sorted_idxs = sort_face_vertices(face_clusters)
+            sorted_face_cluster_idxs = face_c_idxs[sorted_idxs]
+            self.faces.append(sorted_face_cluster_idxs)
+            self.face_normals.append(self.crystal.N[face_idx])
+            self.distances.append(self.crystal.all_distances[face_idx])
+        self.face_normals = torch.stack(self.face_normals)
 
         # Apply crystal rotation to the face normals
         if self.crystal.rotation.shape == (3,):
             R = axis_angle_to_rotation_matrix(self.crystal.rotation[None, ...])[0]
         else:
             R = quaternion_to_rotation_matrix(self.crystal.rotation[None, ...])[0]
-        self.face_normals = self.crystal.N @ R.T
+        self.face_normals = self.face_normals @ R.T
+        self.faces_facing = self.face_normals @ self.view_axis < 0
 
         # Orthogonally project original vertices
         self.vertices_2d = self._orthogonal_projection(self.vertices)
+        self.vertices_2d_rel = self._to_relative_coords(self.vertices_2d)
+        self.tol_2d = calc_atol(self.vertices_2d)
+        self.tol_2d_rel = calc_atol(self.vertices_2d_rel)
 
         # Project the vertices including all refractions
         self._project_vertices()
@@ -236,54 +266,51 @@ class Projector:
         """
         pv = {}
         pv_keys = []
-        pv_coords = []
+        pv_rel = []
 
-        for face_idx, (face, normal, distance) in enumerate(zip(self.faces, self.face_normals, self.distances)):
+        for face_idx, (face, is_facing, normal, distance) in \
+                enumerate(zip(self.faces, self.faces_facing, self.face_normals, self.distances)):
             # Only consider the faces that are facing the camera
-            is_facing = normal @ self.view_axis < 0
             if len(face) < 3 or not is_facing:
                 continue
+            fv2d_rel = self.vertices_2d_rel[face]
 
             # As this face is facing the camera, all the vertices are directly visible
-            for idx in face:
-                vertex_id = int(self.vertex_ids[idx])
-                key = (vertex_id, 'facing')
+            for i, cluster_idx in enumerate(face):
+                key = (int(cluster_idx), 'facing')
                 if key in pv_keys:
                     continue
                 pv_keys.append(key)
-                pv_coords.append(self._to_relative_coords(self.vertices_2d[idx]))
+                pv_rel.append(fv2d_rel[i])
 
             # Refract the points and project them to 2d
             try:
                 refracted_points = self._refract_points(normal, distance)
             except TotalInternalReflectionError:
                 continue
-            vertices_2d = self._orthogonal_projection(refracted_points)
-            pv[face_idx] = vertices_2d
+            v2d = self._orthogonal_projection(refracted_points)
+            pv[face_idx] = v2d
 
             # Check that the points on the face did not move
-            face_vertices_og = self.vertices_2d[face]
-            face_vertices = vertices_2d[face]
-            # assert torch.allclose(face_vertices_og, face_vertices, rtol=1e-2), 'Face vertices moved during refraction.'
+            # face_vertices_refracted = vertices_2d[face]
+            # assert torch.allclose(face_vertices, face_vertices_refracted, rtol=1e-2), 'Face vertices moved during refraction.'
 
             # Filter the refracted vertices to the ones visible through this face
-            polygon = Polygon(self.vertices_2d[face].tolist())
-            for v_idx, v_ref in enumerate(vertices_2d):
-                vertex_id = int(self.vertex_ids[v_idx])
-                if vertex_id in face:  # Skip vertices that are already visible
-                    continue
-                point = Point(v_ref.tolist())
-                if polygon.contains(point):
-                    key = (vertex_id, face_idx)
-                    pv_keys.append(key)
-                    pv_coords.append(self._to_relative_coords(vertices_2d[v_idx]))
-        if len(pv_coords) > 0:
-            pv_coords = torch.stack(pv_coords)
+            v2d_rel = self._to_relative_coords(v2d)
+            visible_idxs = point_in_polygon(v2d_rel, fv2d_rel, self.tol_2d).nonzero().squeeze()
+            visible_idxs = visible_idxs[~torch.isin(visible_idxs, face)]
+            for v_idx in visible_idxs:
+                key = (int(v_idx), face_idx)
+                pv_keys.append(key)
+                pv_rel.append(v2d_rel[v_idx])
 
-        # Store the projected 2D vertices
+        if len(pv_rel) > 0:
+            pv_rel = torch.stack(pv_rel)
+
+        # Store the projected 2D (clustered) vertices
         self.projected_vertices = pv
         self.projected_vertex_keys = pv_keys
-        self.projected_vertex_coords = pv_coords
+        self.projected_vertices_rel = pv_rel
 
     def _refract_points(self, normal: Tensor, distance: Tensor) -> Tensor:
         """
@@ -297,7 +324,7 @@ class Projector:
 
         # Normalise the normal vector
         n_norm = normal.norm()
-        normal = normal / normal.norm()
+        normal = normal / n_norm
 
         # Calculate cosines and sine^2 for the incident and transmitted angles
         cos_theta_inc = incident @ normal
@@ -344,22 +371,18 @@ class Projector:
         """
         front_edges = set()
         rear_edges = set()
-
-        # Create a list of faces that are facing away from the camera
-        for face, face_normal in zip(self.faces, self.face_normals):
+        for face, is_facing in zip(self.faces, self.faces_facing):
             if len(face) < 3:
                 continue
-            is_facing = face_normal @ self.view_axis < 0
-            num_vertices = len(face)
-            for i in range(num_vertices):
-                idx0, idx1 = face[i].item(), face[(i + 1) % num_vertices].item()
-                edge = tuple(sorted((idx0, idx1)))
-
-                # Add edge to the appropriate set
-                if is_facing:
-                    front_edges.add(edge)
-                elif edge not in front_edges:
-                    rear_edges.add(edge)
+            edges = torch.stack([
+                face,
+                torch.roll(face, shifts=-1)
+            ], dim=1).sort(dim=1).values
+            edges = map(tuple, edges.tolist())
+            if is_facing:
+                front_edges.update(edges)
+            else:
+                rear_edges.update(edge for edge in edges if edge not in front_edges)
 
         # Convert sets to tensors
         self.front_edges = torch.tensor(list(front_edges))
@@ -370,24 +393,22 @@ class Projector:
         Calculate the edge segments for each face.
         """
         segments = {}
-        tol = 1e-2 * (self.vertices_2d - self.vertices_2d.mean(dim=0)).norm(dim=-1).max().item()
 
         # Calculate refracted edge segments
-        for face_idx, (face, normal) in enumerate(zip(self.faces, self.face_normals)):
-            is_facing = normal @ self.view_axis < 0
+        for face_idx, (face, is_facing) in enumerate(zip(self.faces, self.faces_facing)):
             if len(face) < 3 or not is_facing:
                 continue
             if face_idx not in self.projected_vertices:
                 continue
-            front_face_2d = self.vertices_2d[self.faces[face_idx]]
+            fv2d = self.vertices_2d[face]
 
             # If face has no area, (i.e. it's being viewed from 90 degrees), there's nothing to draw
-            if polygon_area(front_face_2d) < tol:
+            if polygon_area(fv2d) < self.tol_2d**2:
                 continue
 
             # Consider the refracted projection of each rear-facing edge in the given face
             rear_edges = self.projected_vertices[face_idx][self.rear_edges]
-            refracted_segments = line_segments_in_polygon(rear_edges, front_face_2d, tol=tol)
+            refracted_segments = line_segments_in_polygon(rear_edges, fv2d, tol=self.tol_2d)
             if len(refracted_segments) > 0:
                 segments[face_idx] = refracted_segments
 
@@ -439,25 +460,22 @@ class Projector:
         # Refract all the lines through the face then cut out the visible parts
         else:
             # Draw hidden refracted edges first
-            for face_idx, (face, normal, distance) in enumerate(zip(self.faces, self.face_normals, self.distances)):
-                is_facing = normal @ self.view_axis < 0
+            for face_idx, (face, is_facing, distance) in enumerate(zip(self.faces, self.faces_facing, self.distances)):
                 if len(face) < 3 or not is_facing:
                     continue
                 if face_idx not in self.projected_vertices:
                     continue
 
                 # Refract all the lines through the face then cut out the visible parts
-                else:
-                    # Draw all refracted edges on an empty image
-                    vertices_2d = self.projected_vertices[face_idx]
-                    rf_image = self._draw_full_edges(vertices_2d, facing_camera=False)
+                vertices_2d = self.projected_vertices[face_idx]
+                rf_image = self._draw_full_edges(vertices_2d, facing_camera=False)
 
-                    # Fill the face with the refracted image
-                    image = replace_convex_polygon(
-                        images=image[None, ...],
-                        polygons=self.vertices_2d[face][None, ...],
-                        replacement=rf_image[None, ...]
-                    )[0]
+                # Fill the face with the refracted image
+                image = replace_convex_polygon(
+                    images=image[None, ...],
+                    polygons=self.vertices_2d[face][None, ...],
+                    replacement=rf_image[None, ...]
+                )[0]
 
             # Draw top edges on the image
             image = self._draw_full_edges(self.vertices_2d, image=image, facing_camera=True)
@@ -471,7 +489,7 @@ class Projector:
 
         # Add transparency to the image
         if self.transparent_background:
-            alpha = torch.zeros((1, *self.image_size), dtype=torch.uint8, device=image.device)
+            alpha = torch.zeros((1, *self.image_size.tolist()), dtype=torch.uint8, device=image.device)
             alpha[0, image.sum(dim=0) == 0] = 0
             alpha[0, image.sum(dim=0) != 0] = 1
             image = torch.cat([image, alpha], dim=0)
@@ -507,9 +525,8 @@ class Projector:
             return 1 <= p[0] < w - 1 and 1 <= p[1] < h - 1
 
         # Refract the vertices in every face
-        for face, normal in zip(self.faces, self.face_normals):
-            is_facing = normal @ self.view_axis > 0
-            if len(face) < 3 or (facing_camera and is_facing) or (not facing_camera and not is_facing):
+        for face, is_facing in zip(self.faces, self.faces_facing):
+            if len(face) < 3 or (facing_camera and not is_facing) or (not facing_camera and is_facing):
                 continue
 
             # Loop over the faces and draw the edges
@@ -552,7 +569,7 @@ class Projector:
 
                 # Check if the edge has already been drawn
                 edge = torch.stack([v0, v1])
-                if len(edges) != 0 and (edge == torch.stack(edges)).all(dim=(1, 2)).any():
+                if len(edges) != 0 and ((edge - torch.stack(edges)).abs() < self.tol_2d).all(dim=(1, 2)).any():
                     continue
                 edges.append(edge)
                 edges.append(edge.flip(dims=(0,)))  # Add the reverse edge to the list

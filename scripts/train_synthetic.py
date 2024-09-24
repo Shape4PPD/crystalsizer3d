@@ -64,7 +64,7 @@ def train():
     # Construct manager
     manager = Manager(
         dataset_args=dataset_args,
-        net_args=net_args,
+        network_args=net_args,
         generator_args=generator_args,
         denoiser_args=denoiser_args,
         keypoint_detector_args=keypoint_detector_args,

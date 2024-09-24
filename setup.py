@@ -36,7 +36,7 @@ setup(
         'pyyaml >= 6.0, < 6.1',
         'ruamel.yaml >= 0.18, < 1.0',
         # 'rtree >= 1.2, < 1.3',
-        'shapely >= 2.0, < 2.1',
+        'scikit-image >= 0.24, < 0.25',
         'tensorboard >= 2.17, < 2.18',
         'timm >= 1.0, < 1.1',
         'torch >= 2.4, < 2.5',  # https://pytorch.org/get-started/locally/

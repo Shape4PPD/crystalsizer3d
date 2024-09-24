@@ -13,7 +13,7 @@ from torch import Tensor, nn
 from crystalsizer3d import logger
 from crystalsizer3d.scene_components.textures import NoiseTexture
 from crystalsizer3d.util.geometry import align_points_to_xy_plane, calculate_relative_angles, merge_vertices, normalise, \
-    rotate_2d_points_to_square
+    rotate_2d_points_to_square, sort_face_vertices
 from crystalsizer3d.util.utils import init_tensor
 
 ROTATION_MODE_QUATERNION = 'quaternion'
@@ -509,36 +509,14 @@ class Crystal(nn.Module):
                 areas[hkl] = 0
                 continue
 
-            # Calculate the angles of each vertex relative to the centroid
-            centroid = torch.mean(face_vertices, dim=0)
-            angles = calculate_relative_angles(face_vertices, centroid)
-
-            # Sort the vertices based on the angles
-            sorted_idxs = torch.argsort(angles)
-            sorted_vertices = face_vertices[sorted_idxs]
-
-            # Flip the order if the normal is pointing inwards
-            normal = torch.zeros(3)
-            normal_norm = 0
-            largest_normal = normal
-            largest_normal_norm = 0
-            i = 0
-            while normal_norm < 1e-3 and i < len(sorted_vertices) - 1:
-                normal = torch.cross(sorted_vertices[i] - centroid, sorted_vertices[i + 1] - centroid, dim=0)
-                normal_norm = normal.norm()
-                if normal_norm > largest_normal_norm:
-                    largest_normal = normal
-                    largest_normal_norm = normal_norm
-                i += 1
-            if normal_norm < 1e-3:
-                normal = largest_normal
-            if torch.dot(normal, centroid) < 0:
-                sorted_idxs = sorted_idxs.flip(0)
-            sorted_face_vertex_idxs = face_vertex_idxs[sorted_idxs]
-            faces[hkl] = sorted_face_vertex_idxs
+            # Sort the face vertices
+            sorted_idxs = sort_face_vertices(face_vertices)
+            faces[hkl] = face_vertex_idxs[sorted_idxs]
+            face_vertices = face_vertices[sorted_idxs]
 
             # Build the triangular faces
-            mfv = torch.stack([centroid, *face_vertices[sorted_idxs]])
+            centroid = torch.mean(face_vertices, dim=0)
+            mfv = torch.stack([centroid, *face_vertices])
             N = len(face_vertices)
             jdx = torch.arange(N, device=device)
             mfi = torch.stack([torch.zeros(N, device=device, dtype=torch.int64), jdx % N + 1, (jdx + 1) % N + 1])

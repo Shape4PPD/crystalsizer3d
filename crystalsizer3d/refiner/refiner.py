@@ -857,7 +857,9 @@ class Refiner:
             for group in self.optimiser.param_groups:
                 for param in group['params']:
                     if param.grad is not None:
-                        assert not is_bad(param.grad), 'Bad gradients detected!'
+                        if is_bad(param.grad):
+                            logger.warning('Bad gradients detected!')
+                            param.grad.zero_()
             self.optimiser.step()
             self.optimiser.zero_grad()
             self.crystal.clamp_parameters(rescale=False)
@@ -1378,10 +1380,17 @@ class Refiner:
         # Calculate the loss for each anchor
         losses = []
         for vertex_key, anchor_coords in self.anchors.items():
+            vertex_id, face_idx = vertex_key
+            cluster_idx = self.projector.cluster_idxs[self.projector.vertex_ids == vertex_id]
+            is_visible = False
+            if len(cluster_idx) > 0:
+                cluster_key = (cluster_idx.item(), face_idx)
+                is_visible = cluster_key in self.projector.projected_vertex_keys
+
             # Vertex is visible, so calculate the distance between the vertex and the target anchor location
-            if vertex_key in self.projector.projected_vertex_keys:
-                idx = self.projector.projected_vertex_keys.index(vertex_key)
-                v_coords = self.projector.projected_vertex_coords[idx]
+            if is_visible:
+                idx = self.projector.projected_vertex_keys.index(cluster_key)
+                v_coords = self.projector.projected_vertices_rel[idx]
                 l = (v_coords - anchor_coords).norm()
                 losses.append(l)
 

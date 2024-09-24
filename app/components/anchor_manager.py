@@ -120,16 +120,22 @@ class AnchorManager:
         ]
         return vx, vy
 
-    def _get_vertex_image_coords(self, vertex_key: ProjectedVertexKey) -> Tuple[float, float]:
+    def _get_vertex_image_coords(self, cluster_key: ProjectedVertexKey) -> Tuple[float, float]:
         """
         Get the projected image coordinates of a vertex.
         """
-        if vertex_key not in self.projector.projected_vertex_keys:
-            self.anchor_visibility[vertex_key] = False
-            raise VertexNotFoundInImageError(f'Vertex {vertex_key} not found in the image.')
-        self.anchor_visibility[vertex_key] = True
-        idx = self.projector.projected_vertex_keys.index(vertex_key)
-        v_coords_rel = self.projector.projected_vertex_coords[idx]
+        cluster_idx, face_idx = cluster_key
+        vertex_ids = self.projector.vertex_ids[self.projector.cluster_idxs == cluster_idx]
+        if cluster_key not in self.projector.projected_vertex_keys:
+            for vertex_id in vertex_ids:
+                vertex_key = (int(vertex_id), face_idx)
+                self.anchor_visibility[vertex_key] = False
+            raise VertexNotFoundInImageError(f'Vertex {cluster_key} not found in the image.')
+        for vertex_id in vertex_ids:
+            vertex_key = (int(vertex_id), face_idx)
+            self.anchor_visibility[vertex_key] = True
+        idx = self.projector.projected_vertex_keys.index(cluster_key)
+        v_coords_rel = self.projector.projected_vertices_rel[idx]
         vx, vy = self._relative_to_image_coords(v_coords_rel)
         return vx, vy
 
@@ -201,7 +207,7 @@ class AnchorManager:
 
     def on_mouse_click(self, event: wx.MouseEvent):
         """
-        Select the currently-highlighted vertex.
+        Select the currently-highlighted vertex or fix the anchor point in the image.
         """
 
         # Select the currently-highlighted vertex.
@@ -240,7 +246,7 @@ class AnchorManager:
             return
 
         # Find the closest vertex to the mouse position and update the overlay
-        vertex_dists = torch.cdist(pos[None, ...], self.projector.projected_vertex_coords)[0]
+        vertex_dists = torch.cdist(pos[None, ...], self.projector.projected_vertices_rel)[0]
         closest_idx = vertex_dists.argmin()
         self.highlighted_vertex = self.projector.projected_vertex_keys[closest_idx]
         self.update_overlay()
@@ -290,8 +296,16 @@ class AnchorManager:
         if not _in_bounds(pos):
             return
         self.mode = ANCHOR_MODE_HIGHLIGHT
-        self.anchors[self.selected_vertex] = pos
-        self.anchor_visibility[self.selected_vertex] = True
+
+        # Expand the (possibly clustered) vertex idx to the actual vertex ids
+        cluster_idx, face_idx = self.selected_vertex
+        vertex_ids = self.projector.vertex_ids[self.projector.cluster_idxs == cluster_idx]
+        for vertex_id in vertex_ids:
+            vertex_key = (int(vertex_id), face_idx)
+            self.anchors[vertex_key] = pos
+            self.anchor_visibility[vertex_key] = True
+
+        # Reset the selected vertex
         self.anchor_point = None
         self.selected_vertex = None
         self.selected_anchor = None
@@ -340,16 +354,29 @@ class AnchorManager:
         canvas = self._new_canvas()
         mem_dc = wx.MemoryDC()
         mem_dc.SelectObject(canvas)
+        anchors_drawn = []
 
         # Draw the active (saved) anchors
         for vertex_key, anchor_pos in self.anchors.items():
             if vertex_key not in self.anchor_visibility:
                 self.anchor_visibility[vertex_key] = True
             was_visible = self.anchor_visibility[vertex_key]
-            if self.selected_anchor == vertex_key:
+
+            # Convert the vertex id to the cluster index
+            vertex_id, face_idx = vertex_key
+            cluster_idx = self.projector.cluster_idxs[self.projector.vertex_ids == vertex_id]
+            if len(cluster_idx) == 0:
+                if was_visible:
+                    self.anchor_visibility[vertex_key] = False
+                    wx.PostEvent(self.app_frame, AnchorsChangedEvent())
+                continue
+            cluster_key = (cluster_idx, face_idx)
+            if cluster_key in anchors_drawn:
+                continue
+            if self.selected_anchor == cluster_key:
                 continue
             try:
-                vx, vy = self._get_vertex_image_coords(vertex_key)
+                vx, vy = self._get_vertex_image_coords(cluster_key)
             except VertexNotFoundInImageError:
                 if was_visible:
                     wx.PostEvent(self.app_frame, AnchorsChangedEvent())
@@ -374,16 +401,24 @@ class AnchorManager:
             mem_dc.DrawLine(wx.Point((ax - d, ay - d)), wx.Point((ax + d, ay + d)))
             mem_dc.DrawLine(wx.Point((ax + d, ay - d)), wx.Point((ax - d, ay + d)))
 
+            # Only draw each cluster once
+            anchors_drawn.append(cluster_key)
+
         # Draw a cross at the selected anchor position with a connecting line from the selected vertex
         if self.selected_anchor is not None or self.selected_vertex is not None and self.anchor_point is not None:
-            if self.selected_anchor is not None:
-                vertex_key = self.selected_anchor
-                anchor_point = self.anchors[self.selected_anchor]
-            else:
-                vertex_key = self.selected_vertex
-                anchor_point = self.anchor_point
             try:
-                vx, vy = self._get_vertex_image_coords(vertex_key)
+                if self.selected_anchor is not None:
+                    vertex_id, face_idx = self.selected_anchor
+                    cluster_idx = self.projector.cluster_idxs[self.projector.vertex_ids == vertex_id]
+                    if len(cluster_idx) == 0:
+                        raise VertexNotFoundInImageError
+                    cluster_key = (cluster_idx, face_idx)
+                    anchor_point = self.anchors[self.selected_anchor]
+                else:
+                    cluster_key = self.selected_vertex
+                    anchor_point = self.anchor_point
+
+                vx, vy = self._get_vertex_image_coords(cluster_key)
                 ax, ay = self._relative_to_image_coords(anchor_point)
                 draw_line = math.sqrt((ax - vx)**2 + (ay - vy)**2) > self.HIGHLIGHT_CIRCLE_RADIUS * 1.2
 
@@ -406,24 +441,27 @@ class AnchorManager:
         # Draw a circle at the location of the highlighted/selected vertex
         if ((self.mode == ANCHOR_MODE_HIGHLIGHT and self.highlighted_vertex is not None)
                 or self.selected_vertex is not None or self.selected_anchor is not None):
-            if self.mode == ANCHOR_MODE_HIGHLIGHT:
-                v_id, face_idx = self.highlighted_vertex
-                colour = self.HIGHLIGHT_COLOUR_FACING if face_idx == 'facing' else self.HIGHLIGHT_COLOUR_BACK
-                outline_colour = (*colour, self.HIGHLIGHT_OUTLINE_ALPHA)
-                fill_colour = (*colour, self.HIGHLIGHT_FILL_ALPHA)
-                radius = self.HIGHLIGHT_CIRCLE_RADIUS
-            else:
-                if self.selected_anchor is not None:
-                    v_id, face_idx = self.selected_anchor
-                else:
-                    v_id, face_idx = self.selected_vertex
-                colour = self.SELECTION_COLOUR_FACING if face_idx == 'facing' else self.SELECTION_COLOUR_BACK
-                outline_colour = (*colour, self.SELECTION_OUTLINE_ALPHA)
-                fill_colour = (*colour, self.SELECTION_FILL_ALPHA)
-                radius = self.SELECTION_CIRCLE_RADIUS
-
             try:
-                vx, vy = self._get_vertex_image_coords((v_id, face_idx))
+                if self.mode == ANCHOR_MODE_HIGHLIGHT:
+                    cluster_idx, face_idx = self.highlighted_vertex
+                    colour = self.HIGHLIGHT_COLOUR_FACING if face_idx == 'facing' else self.HIGHLIGHT_COLOUR_BACK
+                    outline_colour = (*colour, self.HIGHLIGHT_OUTLINE_ALPHA)
+                    fill_colour = (*colour, self.HIGHLIGHT_FILL_ALPHA)
+                    radius = self.HIGHLIGHT_CIRCLE_RADIUS
+                else:
+                    if self.selected_anchor is not None:
+                        vertex_id, face_idx = self.selected_anchor
+                        cluster_idx = self.projector.cluster_idxs[self.projector.vertex_ids == vertex_id]
+                        if len(cluster_idx) == 0:
+                            raise VertexNotFoundInImageError
+                    else:
+                        cluster_idx, face_idx = self.selected_vertex
+                    colour = self.SELECTION_COLOUR_FACING if face_idx == 'facing' else self.SELECTION_COLOUR_BACK
+                    outline_colour = (*colour, self.SELECTION_OUTLINE_ALPHA)
+                    fill_colour = (*colour, self.SELECTION_FILL_ALPHA)
+                    radius = self.SELECTION_CIRCLE_RADIUS
+
+                vx, vy = self._get_vertex_image_coords((cluster_idx, face_idx))
                 mem_dc.SetPen(wx.Pen(outline_colour, 1))
                 mem_dc.SetBrush(wx.Brush(fill_colour))
                 mem_dc.DrawCircle(wx.Point((vx, vy)), radius)

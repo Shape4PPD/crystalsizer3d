@@ -99,7 +99,7 @@ class Manager:
             self,
             runtime_args: RuntimeArgs,
             dataset_args: DatasetTrainingArgs,
-            net_args: NetworkArgs,
+            network_args: NetworkArgs,
             generator_args: GeneratorArgs,
             denoiser_args: DenoiserArgs,
             keypoint_detector_args: KeypointDetectorArgs,
@@ -111,7 +111,7 @@ class Manager:
         # Argument groups
         self.runtime_args = runtime_args
         self.dataset_args = dataset_args
-        self.net_args = net_args
+        self.network_args = network_args
         self.generator_args = generator_args
         self.denoiser_args = denoiser_args
         self.keypoint_detector_args = keypoint_detector_args
@@ -215,24 +215,17 @@ class Manager:
         raise AttributeError(f"'{self.__class__.__name__}' object has no attribute '{name}'")
 
     @classmethod
-    def load(
-            cls,
-            model_path: Path,
-            args_changes: Dict[str, Dict[str, Any]],
-            save_dir: Optional[Path] = None,
-            print_networks: bool = False
-    ) -> 'Manager':
+    def _load_args_from_json(cls, model_path: Path) -> Dict[str, Any]:
         """
-        Instantiate a manager from a checkpoint json file.
+        Load model arguments from a JSON file.
         """
-        logger.info(f'Loading model from {model_path}.')
         with open(model_path, 'r') as f:
             data = json.load(f)
 
         # Ensure all the required arguments are present
         required_args = ['runtime_args', 'dataset_args', 'network_args',
-                         'generator_args', 'denoiser_args', 'transcoder_args',
-                         'optimiser_args']
+                         'generator_args', 'denoiser_args', 'keypoint_detector_args',
+                         'transcoder_args', 'optimiser_args']
         for arg in required_args:
             if arg not in data:
                 data[arg] = {}
@@ -248,13 +241,30 @@ class Manager:
         args = dict(
             runtime_args=RuntimeArgs.from_args(data['runtime_args']),
             dataset_args=DatasetTrainingArgs.from_args(data['dataset_args']),
-            net_args=NetworkArgs.from_args(data['network_args']),
+            network_args=NetworkArgs.from_args(data['network_args']),
             generator_args=GeneratorArgs.from_args(data['generator_args']),
             denoiser_args=DenoiserArgs.from_args(data['denoiser_args']),
+            keypoint_detector_args=KeypointDetectorArgs.from_args(data['keypoint_detector_args']),
             transcoder_args=TranscoderArgs.from_args(data['transcoder_args']),
             optimiser_args=OptimiserArgs.from_args(data['optimiser_args']),
-            print_networks=print_networks
         )
+
+        return args
+
+    @classmethod
+    def load(
+            cls,
+            model_path: Path,
+            args_changes: Dict[str, Dict[str, Any]],
+            save_dir: Optional[Path] = None,
+            print_networks: bool = False
+    ) -> 'Manager':
+        """
+        Instantiate a manager from a checkpoint json file.
+        """
+        logger.info(f'Loading model from {model_path}.')
+        args = cls._load_args_from_json(model_path)
+        args['print_networks'] = print_networks
 
         # Update the arguments with required changes
         for arg_group, arg_changes in args_changes.items():
@@ -267,31 +277,17 @@ class Manager:
         """
         Load a network from another checkpoint.
         """
-        with open(model_path, 'r') as f:
-            data = json.load(f)
-
-        # Always set resume to True, otherwise the model won't load
-        data['runtime_args']['resume'] = True
-        data['runtime_args']['resume_only'] = True
-        data['runtime_args']['resume_from'] = model_path
-
-        # Load the checkpoint
+        args = self._load_args_from_json(model_path)
         checkpoint = Checkpoint(
             dataset=self.ds,
-            runtime_args=RuntimeArgs.from_args(data['runtime_args']),
-            dataset_args=DatasetTrainingArgs.from_args(data['dataset_args']),
-            network_args=NetworkArgs.from_args(data['network_args']),
-            generator_args=GeneratorArgs.from_args(data['generator_args']),
-            denoiser_args=DenoiserArgs.from_args(data['denoiser_args']),
-            transcoder_args=TranscoderArgs.from_args(data['transcoder_args']),
-            optimiser_args=OptimiserArgs.from_args(data['optimiser_args']),
             save_dir=self.checkpoint.save_dir,
+            **args
         )
         assert len(checkpoint.snapshots) > 0, 'No snapshots found in the checkpoint.'
 
         # Load the network and optimiser parameter states
         state_path = checkpoint.get_state_path()
-        state = torch.load(state_path, map_location=self.device)
+        state = torch.load(state_path, map_location=self.device, weights_only=True)
 
         # Load predictor network parameters and optimiser state
         if network_name == 'denoiser':
@@ -364,7 +360,7 @@ class Manager:
             self.predictor = None
             return
 
-        net_args = self.net_args
+        net_args = self.network_args
         output_shape = self.parameters_shape if not self.transcoder_args.use_transcoder \
             else (self.transcoder_args.tc_latent_size,)
 
@@ -450,10 +446,10 @@ class Manager:
         loaded = False
         if self.runtime_args.resume and len(self.checkpoint.snapshots) > 0:
             state_path = self.checkpoint.get_state_path()
-            state = torch.load(state_path, map_location=self.device)
+            state = torch.load(state_path, map_location=self.device, weights_only=True)
             if 'net_p_state_dict' in state:
                 logger.info(f'Loading predictor network parameters from {state_path}.')
-                if self.net_args.base_net in ['vitnet', 'timm'] and self.optimiser_args.freeze_pretrained:
+                if self.network_args.base_net in ['vitnet', 'timm'] and self.optimiser_args.freeze_pretrained:
                     self.predictor.classifier.load_state_dict(self._fix_state(state['net_p_state_dict']), strict=False)
                 else:
                     self.predictor.load_state_dict(self._fix_state(state['net_p_state_dict']), strict=False)
@@ -539,7 +535,7 @@ class Manager:
         loaded = False
         if self.runtime_args.resume and len(self.checkpoint.snapshots) > 0:
             state_path = self.checkpoint.get_state_path()
-            state = torch.load(state_path, map_location=self.device)
+            state = torch.load(state_path, map_location=self.device, weights_only=True)
             if 'net_g_state_dict' in state:
                 logger.info(f'Loading generator network parameters from {state_path}.')
                 self.generator.load_state_dict(self._fix_state(state['net_g_state_dict']), strict=False)
@@ -584,7 +580,7 @@ class Manager:
         loaded = False
         if self.runtime_args.resume and len(self.checkpoint.snapshots) > 0:
             state_path = self.checkpoint.get_state_path()
-            state = torch.load(state_path, map_location=self.device)
+            state = torch.load(state_path, map_location=self.device, weights_only=True)
             if 'net_d_state_dict' in state:
                 logger.info(f'Loading discriminator network parameters from {state_path}.')
                 self.discriminator.load_state_dict(self._fix_state(state['net_d_state_dict']), strict=False)
@@ -610,7 +606,7 @@ class Manager:
 
         def load_pips(self, name='vgg_lpips'):
             ckpt = get_ckpt_path(name, DATA_PATH / 'vgg_lpips')
-            self.load_state_dict(torch.load(ckpt, map_location=torch.device('cpu')), strict=False)
+            self.load_state_dict(torch.load(ckpt, map_location=torch.device('cpu'), weights_only=True), strict=False)
             logger.info(f'Loaded pretrained LPIPS loss from {ckpt}.')
 
         LPIPS.load_from_pretrained = load_pips
@@ -619,7 +615,7 @@ class Manager:
         config = OmegaConf.load(self.denoiser_args.dn_mv2_config_path)
         self.dn_config = config
         denoiser = VQModel(**config.model.init_args)
-        sd = torch.load(self.denoiser_args.dn_mv2_checkpoint_path, map_location='cpu')['state_dict']
+        sd = torch.load(self.denoiser_args.dn_mv2_checkpoint_path, map_location='cpu', weights_only=True)['state_dict']
         denoiser.load_state_dict(sd, strict=False)
         denoiser.eval()
 
@@ -637,7 +633,7 @@ class Manager:
             loaded = False
             if self.runtime_args.resume and len(self.checkpoint.snapshots) > 0:
                 state_path = self.checkpoint.get_state_path()
-                state = torch.load(state_path, map_location=self.device)
+                state = torch.load(state_path, map_location=self.device, weights_only=True)
                 if 'net_dn_state_dict' in state:
                     logger.info(f'Loading denoiser network parameters from {state_path}.')
                     self.denoiser.load_state_dict(self._fix_state(state['net_dn_state_dict']), strict=False)
@@ -660,7 +656,7 @@ class Manager:
 
         def load_pips(self, name='vgg_lpips'):
             ckpt = get_ckpt_path(name, DATA_PATH / 'vgg_lpips')
-            self.load_state_dict(torch.load(ckpt, map_location=torch.device('cpu')), strict=False)
+            self.load_state_dict(torch.load(ckpt, map_location=torch.device('cpu'), weights_only=True), strict=False)
             logger.info(f'Loaded pretrained LPIPS loss from {ckpt}.')
 
         LPIPS.load_from_pretrained = load_pips
@@ -669,7 +665,8 @@ class Manager:
         config = OmegaConf.load(self.keypoint_detector_args.kd_mv2_config_path)
         self.kd_config = config
         keypoint_detector = VQModel(**config.model.init_args)
-        sd = torch.load(self.keypoint_detector_args.kd_mv2_checkpoint_path, map_location='cpu')['state_dict']
+        sd = torch.load(self.keypoint_detector_args.kd_mv2_checkpoint_path,
+                        map_location='cpu', weights_only=True)['state_dict']
         keypoint_detector.load_state_dict(sd, strict=False)
         keypoint_detector.eval()
 
@@ -687,7 +684,7 @@ class Manager:
             loaded = False
             if self.runtime_args.resume and len(self.checkpoint.snapshots) > 0:
                 state_path = self.checkpoint.get_state_path()
-                state = torch.load(state_path, map_location=self.device)
+                state = torch.load(state_path, map_location=self.device, weights_only=True)
                 if 'net_kd_state_dict' in state:
                     logger.info(f'Loading keypoint detector network parameters from {state_path}.')
                     self.keypoint_detector.load_state_dict(self._fix_state(state['net_kd_state_dict']), strict=False)
@@ -749,7 +746,7 @@ class Manager:
         loaded = False
         if self.runtime_args.resume and len(self.checkpoint.snapshots) > 0:
             state_path = self.checkpoint.get_state_path()
-            state = torch.load(state_path, map_location=self.device)
+            state = torch.load(state_path, map_location=self.device, weights_only=True)
             if 'net_t_state_dict' in state:
                 logger.info(f'Loading transcoder network parameters from {state_path}.')
                 self.transcoder.load_state_dict(self._fix_state(state['net_t_state_dict']), strict=False)
@@ -770,7 +767,7 @@ class Manager:
             return None
         rcf_path = self.generator_args.rcf_model_path
         rcf = RCF()
-        checkpoint = torch.load(rcf_path)
+        checkpoint = torch.load(rcf_path, weights_only=True)
         rcf.load_state_dict(checkpoint, strict=False)
         rcf.eval()
 
@@ -835,7 +832,7 @@ class Manager:
         # Predictor network
         if which == 'predictor' and self.dataset_args.train_predictor:
             # For the pretrained models, separate the feature extractor from the classifier
-            if self.net_args.base_net in ['vitnet', 'timm']:
+            if self.network_args.base_net in ['vitnet', 'timm']:
                 params = [{'params': self.predictor.classifier.parameters(), 'lr': oa.lr_init}, ]
                 if not oa.freeze_pretrained:
                     params.append({'params': self.predictor.model.parameters(), 'lr': oa.lr_pretrained_init})
@@ -966,7 +963,7 @@ class Manager:
         checkpoint = Checkpoint(
             dataset=self.ds,
             dataset_args=self.dataset_args,
-            network_args=self.net_args,
+            network_args=self.network_args,
             generator_args=self.generator_args,
             denoiser_args=self.denoiser_args,
             keypoint_detector_args=self.keypoint_detector_args,
@@ -1561,7 +1558,7 @@ class Manager:
         _, _, X_target_aug, X_target_clean, Y_target = data
         X_target_aug = X_target_aug.to(self.device)
         X_target_clean = X_target_clean.to(self.device)
-        kp_target = Y_target['keypoint_heatmap'].unsqueeze(1).to(self.device)
+        kp_target = Y_target['kp_heatmap'].unsqueeze(1).to(self.device)
 
         # Generate a heatmap of the keypoint positions
         kp_pred, l_codebook, l_breakdown = self.detect_keypoints(X_target_clean, restore_size=False, return_losses=True)
