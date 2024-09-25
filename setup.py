@@ -12,6 +12,7 @@ setup(
     install_requires=[
         # 'cholespy >= 1.0, < 1.1',
         # 'csd-python-api >= 3.1, < 3.2',
+        'configobj >= 5.0, < 5.1',
         'einops >= 0.8, < 0.9',
         'filelock >= 3.13, < 3.14',
         'ffmpeg-python >= 0.2, < 0.3',

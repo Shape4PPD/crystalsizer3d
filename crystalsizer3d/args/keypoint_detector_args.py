@@ -22,7 +22,6 @@ class KeypointDetectorArgs(BaseArgs):
         self.kd_model_name = kd_model_name
         self.kd_mv2_config_path = kd_mv2_config_path
         self.kd_mv2_checkpoint_path = kd_mv2_checkpoint_path
-        assert kd_train_keypoints or kd_train_edges, 'At least one of kd_train_keypoints or kd_train_edges must be True.'
         self.kd_train_keypoints = kd_train_keypoints
         self.kd_train_wireframe = kd_train_edges
         self.kd_use_clean_images = kd_use_clean_images

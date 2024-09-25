@@ -20,6 +20,7 @@ from crystalsizer3d.args.dataset_synthetic_args import DatasetSyntheticArgs
 from crystalsizer3d.args.dataset_training_args import DatasetTrainingArgs
 from crystalsizer3d.crystal import Crystal, ROTATION_MODE_AXISANGLE, ROTATION_MODE_QUATERNION
 from crystalsizer3d.csd_proxy import CSDProxy
+from crystalsizer3d.projector import Projector
 from crystalsizer3d.scene_components.scene import Scene
 from crystalsizer3d.scene_components.utils import orthographic_scale_factor
 from crystalsizer3d.util.keypoints import generate_keypoints_heatmap
@@ -165,7 +166,6 @@ class Dataset:
         if self.projector is not None:
             return
 
-        from crystalsizer3d.projector import Projector
         crystal = self.load_crystal(r_params=r_params)
         for param in crystal.parameters():
             param.requires_grad = False
