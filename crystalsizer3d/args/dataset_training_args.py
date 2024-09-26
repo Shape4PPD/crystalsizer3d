@@ -41,7 +41,7 @@ class DatasetTrainingArgs(BaseArgs):
             heatmap_blob_variance: float = 10.0,
             wireframe_blur_variance: float = 1.0,
 
-            use_distance_switches: bool = True,
+            use_distance_switches: bool = False,
             add_coord_grid: bool = False,
             check_symmetries: int = 0,
             use_canonical_rotations: bool = False,

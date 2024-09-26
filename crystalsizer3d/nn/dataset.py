@@ -5,13 +5,12 @@ from itertools import product
 from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
+import orjson
 import torch
 import yaml
 from PIL import Image
 from scipy.spatial.distance import cdist
 from scipy.spatial.transform import Rotation
-from skimage.draw import line_aa
-from skimage.filters import gaussian
 from trimesh import Trimesh
 
 from crystalsizer3d import DATASET_PROXY_PATH, logger
@@ -20,10 +19,6 @@ from crystalsizer3d.args.dataset_synthetic_args import DatasetSyntheticArgs
 from crystalsizer3d.args.dataset_training_args import DatasetTrainingArgs
 from crystalsizer3d.crystal import Crystal, ROTATION_MODE_AXISANGLE, ROTATION_MODE_QUATERNION
 from crystalsizer3d.csd_proxy import CSDProxy
-from crystalsizer3d.projector import Projector
-from crystalsizer3d.scene_components.scene import Scene
-from crystalsizer3d.scene_components.utils import orthographic_scale_factor
-from crystalsizer3d.util.keypoints import generate_keypoints_heatmap
 from crystalsizer3d.util.utils import ArgsCompatibleJSONEncoder, hash_data, to_numpy
 
 DATASET_TYPE_SYNTHETIC = 'synthetic'
@@ -88,8 +83,6 @@ class Dataset:
         assert path.exists(), f'Dataset path does not exist: {path}'
         self.path = path
         self.csd_proxy = CSDProxy()
-        self.scene = None
-        self.projector = None
 
         # Load the data
         self._load_data()
@@ -159,102 +152,6 @@ class Dataset:
         self.rotation_matrices = self._calculate_rotation_matrices()
         self.symmetry_groups = {}
 
-    def _init_projector(self, r_params: Dict[str, Any]):
-        """
-        Initialise the projector for the keypoint detector.
-        """
-        if self.projector is not None:
-            return
-
-        crystal = self.load_crystal(r_params=r_params)
-        for param in crystal.parameters():
-            param.requires_grad = False
-        self.scene = Scene(
-            res=self.dataset_args.image_size,
-            **self.dataset_args.to_dict(),
-        )
-        self.projector = Projector(
-            crystal,
-            image_size=(self.dataset_args.image_size, self.dataset_args.image_size),
-            zoom=orthographic_scale_factor(self.scene, z=crystal.vertices[:, 2].mean().item()),
-            multi_line=True
-        )
-
-    @torch.no_grad()
-    def _generate_keypoints_image(self, idx: int, r_params: Dict[str, Any]):
-        """
-        Generate a projected wireframe image with keypoints heatmap.
-        3 channel image output: 1st channel is the front-facing wireframe edges, 2nd channel is the back-facing wireframe
-        edges, 3rd channel is the keypoints heatmap.
-        """
-        logger.info(f'Generating keypoints map for image idx {idx}.')
-        if self.projector is None:
-            self._init_projector(r_params)
-        c_params = r_params['crystal']
-
-        # Set the crystal parameters
-        self.projector.crystal.scale.data = torch.tensor(c_params['scale'])
-        self.projector.crystal.distances.data = torch.tensor(c_params['distances'])
-        self.projector.crystal.origin.data = torch.tensor(c_params['origin'])
-        self.projector.crystal.rotation.data = torch.tensor(c_params['rotation'])
-        self.projector.crystal.material_ior.data = torch.tensor(c_params['material_ior'])
-
-        # Rebuild the crystal mesh
-        self.projector.crystal.build_mesh(update_uv_map=False)
-
-        # Recalculate the projector zoom based on the crystal vertices and reproject the mesh
-        self.projector.update_zoom(orthographic_scale_factor(
-            self.scene,
-            z=self.projector.crystal.vertices[:, 2].mean().item()
-        ))
-        self.projector.project(generate_image=False)
-
-        # Create the blank image with 3 channels, 2 for the wireframe and 1 for the keypoints
-        h, w = self.dataset_args.image_size, self.dataset_args.image_size
-        image = np.zeros((3, h, w))
-
-        # Draw the wireframe edges
-        for ref_face_idx, face_segments in self.projector.edge_segments.items():
-            if len(face_segments) == 0:
-                continue
-            for segment in face_segments:
-                segment_clamped = segment.clone()
-                segment_clamped[:, 0] = torch.clamp(segment_clamped[:, 0], 0, w - 1)
-                segment_clamped[:, 1] = torch.clamp(segment_clamped[:, 1], 0, h - 1)
-                channel = 0 if ref_face_idx == 'facing' else 1
-                points = segment_clamped.round().to(torch.uint32).tolist()
-                rr, cc, val = line_aa(points[0][1], points[0][0], points[1][1], points[1][0])
-                image[channel, rr, cc] = np.clip(val, 0, 1)
-
-        # Apply a gaussian blur and then re-normalise to "fatten" the midline
-        if self.dst_args.wireframe_blur_variance > 0:
-            image = gaussian(image, sigma=self.dst_args.wireframe_blur_variance, channel_axis=0)
-
-            # Normalise to [0-1] with float32 dtype
-            image_range = image.max() - image.min()
-            if image_range > 0:
-                image = (image - image.min()) / image_range
-
-        # Create the keypoints heatmap
-        heatmap = generate_keypoints_heatmap(
-            keypoints=self.projector.keypoints,
-            image_size=self.dataset_args.image_size,
-            blob_variance=self.dst_args.heatmap_blob_variance
-        )
-        heatmap = heatmap.clamp(min=0)
-        heatmap = heatmap / heatmap.max()
-        image[2] = to_numpy(heatmap)
-
-        # Convert to uint8 and transpose to (H, W, C)
-        image = (np.clip(image, 0, 1) * 255).astype(np.uint8)
-        image = image.transpose(1, 2, 0)
-
-        # Save the keypoints image
-        keypoints_dir = self.path / f'keypoints_wfv={self.dst_args.wireframe_blur_variance:.1f}_kpv={self.dst_args.heatmap_blob_variance:.1f}'
-        keypoints_dir.mkdir(parents=True, exist_ok=True)
-        keypoints_path = keypoints_dir / f'{idx:010d}.png'
-        Image.fromarray(image).save(keypoints_path)
-
     def _load_data(self):
         """
         Load the dataset from disk.
@@ -270,8 +167,8 @@ class Dataset:
         # Load rendering parameters (but don't fail if they don't exist)
         r_params_file = self.path / 'rendering_parameters.json'
         if r_params_file.exists():
-            with open(r_params_file, 'r') as f:
-                rendering_parameters = json.load(f)
+            with open(r_params_file, 'rb') as f:
+                rendering_parameters = orjson.loads(f.read())
             rendering_parameters = {int(k): v for k, v in rendering_parameters.items()}
         else:
             logger.warning(f'Rendering parameters file {r_params_file} does not exist.')
@@ -280,8 +177,8 @@ class Dataset:
         # Load crystal vertices
         vertices_file = self.path / 'vertices.json'
         if vertices_file.exists():
-            with open(vertices_file, 'r') as f:
-                vertices = json.load(f)
+            with open(vertices_file, 'rb') as f:
+                vertices = orjson.loads(f.read())
             vertices = {int(k): v for k, v in vertices.items()}
         else:
             logger.warning(f'Vertices file {vertices_file} does not exist.')
@@ -438,11 +335,11 @@ class Dataset:
         tt_split_path = self.path / f'train_test_split_{self.train_test_split_target:.2f}.json'
         if tt_split_path.exists():
             logger.info(f'Loading train/test splits from {tt_split_path}')
-            with open(tt_split_path, 'r') as f:
-                tt_split = json.load(f)
-                self.train_test_split_actual = tt_split['train_test_split_actual']
-                self.train_idxs = np.array(tt_split['train_idxs'])
-                self.test_idxs = np.array(tt_split['test_idxs'])
+            with open(tt_split_path, 'rb') as f:
+                tt_split = orjson.loads(f.read())
+            self.train_test_split_actual = tt_split['train_test_split_actual']
+            self.train_idxs = np.array(tt_split['train_idxs'])
+            self.test_idxs = np.array(tt_split['test_idxs'])
             return
 
         # Otherwise, split the dataset
@@ -615,8 +512,8 @@ class Dataset:
         # Include the projected vertex positions for the keypoint detector
         if self.dst_args.train_keypoint_detector:
             path = item['keypoints_image']
-            if not path.exists():
-                self._generate_keypoints_image(idx, r_params)
+            assert path.exists(), \
+                f'Keypoints image path does not exist: {path}. Run `scripts/generate_synthetic_dataset_keypoints.py` to generate keypoints images.'
             kp_img = np.array(Image.open(item['keypoints_image'])).astype(np.float32) / 255
             kp_img = np.clip(kp_img, 0, 1)
             params['wireframe'] = kp_img[..., :2].transpose(2, 0, 1)
@@ -819,8 +716,8 @@ class DatasetProxy:
         if not self.cache_path.exists():
             return False
         try:
-            with open(self.cache_path, 'r') as f:
-                self.ds_cache = json.load(f)
+            with open(self.cache_path, 'rb') as f:
+                self.ds_cache = orjson.loads(f.read())
         except Exception as e:
             logger.error(f'Could not load cache from {self.cache_path}: {e}. Removing file.')
             self.cache_path.unlink()

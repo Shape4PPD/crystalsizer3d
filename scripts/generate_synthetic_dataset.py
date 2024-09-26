@@ -23,7 +23,7 @@ def parse_args(printout: bool = True) -> Tuple[DatasetSyntheticArgs, Namespace]:
     """
     Parse command line arguments and build parameter holders.
     """
-    parser = ArgumentParser(description='Generate a dataset of segmented objects found in videos.')
+    parser = ArgumentParser(description='Generate a dataset of synthetic crystals.')
     DatasetSyntheticArgs.add_args(parser)
     parser.add_argument('--ds-name', type=str,
                         help='Set a dataset name to use for setting multiple workers on the same dataset.')

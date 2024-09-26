@@ -27,6 +27,7 @@ setup(
         'numpy >= 1.26, < 2',
         'opencv-python >= 4.10, < 5.0',
         'omegaconf >= 2.3, < 2.4',
+        'orjson >= 3.10, < 4.0',
         'parti-pytorch >= 0.2, < 0.3',
         'pillow >= 10.4, < 10.5',
         'pyfastnoisesimd >= 0.4, < 0.5',
