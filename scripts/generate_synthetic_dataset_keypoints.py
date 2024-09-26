@@ -4,6 +4,7 @@ import time
 from argparse import ArgumentParser, Namespace
 from multiprocessing import Pool, current_process
 from pathlib import Path
+from random import shuffle
 from typing import Any, Dict, List, Tuple
 
 import numpy as np
@@ -231,6 +232,7 @@ def generate_keypoints():
     logger.info('Checking for existing keypoints images.')
     existing_images = {entry.name for entry in os.scandir(keypoints_dir) if entry.is_file()}
     idxs = [idx for idx in ds.data.keys() if ds.data[idx]['keypoints_image'].name not in existing_images]
+    shuffle(idxs)
     c_params = [ds.data[idx]['rendering_parameters']['crystal'] for idx in idxs]
     logger.info(f'Found {len(idxs)} images without keypoints.')
 
