@@ -1,3 +1,4 @@
+import os
 import shutil
 import time
 from argparse import ArgumentParser, Namespace
@@ -222,13 +223,10 @@ def generate_keypoints():
     keypoints_dir.mkdir(parents=True, exist_ok=True)
 
     # Loop over dataset and get all the idxs and crystal params that are missing keypoint images
-    idxs = [
-        idx for idx in ds.data.keys() if not ds.data[idx]['keypoints_image'].exists()
-    ]
-    c_params = [
-        ds.data[idx]['rendering_parameters']['crystal']
-        for idx in idxs
-    ]
+    logger.info('Checking for existing keypoints images.')
+    existing_images = {entry.name for entry in os.scandir(keypoints_dir) if entry.is_file()}
+    idxs = [idx for idx in ds.data.keys() if ds.data[idx]['keypoints_image'].name not in existing_images]
+    c_params = [ds.data[idx]['rendering_parameters']['crystal'] for idx in idxs]
     logger.info(f'Found {len(idxs)} images without keypoints.')
 
     # Split the idxs into batches
