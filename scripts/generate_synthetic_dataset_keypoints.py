@@ -68,6 +68,12 @@ def _generate_keypoints_image(
     3 channel image output: 1st channel is the front-facing wireframe edges, 2nd channel is the back-facing wireframe
     edges, 3rd channel is the keypoints heatmap.
     """
+    keypoints_path = save_dir / f'{idx:010d}.png'
+
+    # If the keypoints image already exists, skip
+    if keypoints_path.exists():
+        return
+
     # Set the crystal parameters
     projector.crystal.scale.data = torch.tensor(c_params['scale'])
     projector.crystal.distances.data = torch.tensor(c_params['distances'])
@@ -126,7 +132,6 @@ def _generate_keypoints_image(
     image = image.transpose(1, 2, 0)
 
     # Save the keypoints image
-    keypoints_path = save_dir / f'{idx:010d}.png'
     Image.fromarray(image).save(keypoints_path)
 
 
