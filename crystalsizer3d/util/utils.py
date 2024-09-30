@@ -85,6 +85,28 @@ def to_uint8(arr: np.ndarray) -> np.ndarray:
 
     return uint8_array
 
+def move_tensors_to_device(tensor_list, device):
+    """
+    Move all tensors in tensor_list to the specified device.
+    """
+    return [tensor.to(device) for tensor in tensor_list]
+
+def remove_duplicate_tensors(tensor_list):
+    """
+    Remove duplicate tensors by comparing their values.
+    """
+    unique_tensors = []
+    seen = set()
+    
+    for tensor in tensor_list:
+        # Convert tensor to a tuple so it can be hashable and comparable
+        tensor_tuple = tuple(tensor.cpu().numpy().flatten())
+        
+        if tensor_tuple not in seen:
+            seen.add(tensor_tuple)
+            unique_tensors.append(tensor)
+    
+    return unique_tensors
 
 def init_tensor(
         tensor: Union[Tensor, np.ndarray, List[float], Tuple[float, ...], float, int],

@@ -6,9 +6,9 @@ from crystalsizer3d.crystal import Crystal
 from kornia.geometry import axis_angle_to_rotation_matrix, center_crop, quaternion_to_rotation_matrix
 
 from crystalsizer3d.util.geometry import is_point_in_bounds, line_equation_coefficients, line_intersection, normalise
-from crystalsizer3d.util.utils import init_tensor
+from crystalsizer3d.util.utils import init_tensor, move_tensors_to_device, remove_duplicate_tensors
 
-
+from torch import Tensor, nn
 import numpy as np
 import matplotlib.pyplot as plt
 
@@ -70,8 +70,14 @@ device = torch.device('cuda')
 class Point2DTorch:
     def __init__(self, point, normal, marker, device):
         self.device = device
-        self.point = torch.tensor(point, dtype=torch.float32,device=self.device)
-        self.normal = torch.tensor(normal, dtype=torch.float32,device=self.device)
+        self.point = point#.clone().detach().requires_grad_(True)
+        self.normal_pre = normal#.clone().detach().requires_grad_(True).to(device)
+        self.normal = self.normal_pre/torch.norm(self.normal_pre)
+        # self.marker = marker.clone().detach()
+        
+        ## normalise the normal
+        # self.normal = torch.tensor(normal, dtype=torch.float32,device=self.device)
+        
         self.marker = torch.tensor(marker, dtype=torch.int,device=self.device) # 0 if external, 1 if refracted
     
     def __repr__(self):
@@ -92,8 +98,9 @@ class PointCollection:
         self.points = []
     
     def add_point(self, point, normal, marker):
-        point_obj = Point2DTorch(point, normal, marker, self.device)
-        self.points.append(point_obj)
+        if self._does_point_exist(point) == False:
+            point_obj = Point2DTorch(point, normal, marker, self.device)
+            self.points.append(point_obj)
     
     def add_points(self, points, normal, marker):
         """Add multiple points with the same normal
@@ -103,21 +110,46 @@ class PointCollection:
             normal (_type_): _description_
             marker (_type_): _description_
         """
+        #check its not repeated
         for point in points:
-            point_obj = Point2DTorch(point, normal, marker, self.device)
-            self.points.append(point_obj)
+            if self._does_point_exist(point) == False:
+                point_obj = Point2DTorch(point, normal, marker, self.device)
+                self.points.append(point_obj)
+    
+    def _does_point_exist(self,point):
+        if len(self.points) == 0:
+            return False
+        all_points = self.get_all_points_tensor()
+        matches = (all_points == point.unsqueeze(0)).all(dim=1)
+        contained = matches.any().item()
+        return contained
+        
         
     def get_all_points(self):
         return self.points
+    
+    def get_point(self,index):
+        return self.points[index]
     
     def get_all_points_tensor(self):
         points_list = [point.get_point() for point in self.points]
         return torch.stack(points_list)
     
+    def get_all_normals_tensor(self):
+        normals_list = [point.get_normal() for point in self.points]
+        return torch.stack(normals_list)
+    
     def get_points_and_normals_tensor(self):
         points_normals_list = [(point.get_point(), point.get_normal()) for point in self.points]
         points_normals_tensor = torch.stack([torch.stack(pn) for pn in points_normals_list])
         return points_normals_tensor
+    
+    def get_points_array(self):
+        point_array = np.zeros(shape=(180,2))
+        for i, point in enumerate(self.points):
+            point_np = point.point.detach().cpu().numpy()
+            point_array[i] = point_np
+        return point_array
     
     def __len__(self):
         return len(self.points)
@@ -126,7 +158,7 @@ class PointCollection:
         return f"PointCollection({self.points})"
 
 
-class ProjectorPoints:
+class ProjectorPoints(nn.Module):
     vertices: torch.Tensor
     faces: List[torch.Tensor]
     face_normals: torch.Tensor
@@ -141,10 +173,11 @@ class ProjectorPoints:
             camera_axis: List[int] = [0, 0, -1],
             zoom: float = 1.,
             external_ior: float = 1.333,  # water
+            image_size: Tuple[int, int] = (1000, 1000),
     ):
     
     ### this should essentially be the same as the projector class, except it gives points instead of lines
-       
+        super().__init__()
     
         self.crystal = crystal
         self.device = crystal.origin.device
@@ -153,6 +186,14 @@ class ProjectorPoints:
         self.point_collection = PointCollection(device=self.device)
         
         self.view_axis = normalise(init_tensor(camera_axis, device=self.device))
+        
+        # Set image size and aspect ratio
+        self.image_size = image_size
+        self.aspect_ratio = image_size[0] / image_size[1]
+        self.zoom = zoom
+        self.x_range = init_tensor([-self.aspect_ratio, self.aspect_ratio], device=self.device) / self.zoom
+        self.y_range = init_tensor([-1, 1], device=self.device) / self.zoom
+
         
         
     def project(self) -> torch.Tensor:
@@ -174,7 +215,6 @@ class ProjectorPoints:
             R = quaternion_to_rotation_matrix(self.crystal.rotation[None, ...])[0]
         self.face_normals = self.crystal.N @ R.T
 
-
         self.generate_points()
         
         return self.point_collection
@@ -186,7 +226,11 @@ class ProjectorPoints:
         Project 3d vertices into 2d plane, while calculating refraction of back planes
         """
         self.vertices_2d = self.project_to_2d(self.vertices)
+        normals = torch.ones(2,device=device)
         # self.visable_points = PointCollection(device=self.device) ##
+        # self.point_collection.add_points(self.vertices_2d,normals,0)
+        
+        # return
         all_points = []
         
         # get non-refracted points first
@@ -195,13 +239,19 @@ class ProjectorPoints:
             if len(face) < 3 or face_normal @ self.view_axis > 0:
                 continue
             vertices_2d = self.vertices_2d[face]
+            # for vertex in vertices_2d:
+            #     self.point_collection.add_point(vertex,normals,0)
+            # # self.point_collection.add_points(vertices_2d,normals,0)
+            
+            # continue
             # generate points on edge
             for i in range(len(vertices_2d)):
                 cur_vertex = vertices_2d[i]
                 next_vertex = vertices_2d[(i + 1) % len(vertices_2d)]
                 points, line_normal = self._edge_points(cur_vertex,next_vertex)
-                for point in points:
-                    self.point_collection.add_point(point,line_normal,0) # 0 for front facing
+                if torch.all(line_normal == 0) == False: # filter out points that dont have a normal in image plane
+                    for point in points:
+                        self.point_collection.add_point(point,line_normal,0) # 0 for front facing
                     
             # for each from face, i.e. non-refracted face, calculate refraction through that face.
             self._calculate_refraction(face,face_normal, face_distance)
@@ -265,14 +315,22 @@ class ProjectorPoints:
                     visable_points.append(intersections[0])
                     visable_points.append(end_vertex)
                 else:
-                    assert len(intersections) <= 2
-                    if len(intersections) == 2:
+                    if len(intersections) > 2:
+                        # usual this means a point is repeated
+                        #### just need to delete repeated points
+                        
+                        condensed_intersections = [tensor for tensor in intersections if tensor.grad_fn is not None]  ## this line shouldnt be here
+                        assert len(condensed_intersections) <= 2
+                        visable_points.append(condensed_intersections[0])
+                        visable_points.append(condensed_intersections[1])
+                    elif len(intersections) == 2:
                         #both outside need both intersection points
                         visable_points.append(intersections[0])
                         visable_points.append(intersections[1])
             if len(visable_points) > 0:
                 points, line_normal = self._edge_points(visable_points[0],visable_points[1])
-                self.point_collection.add_points(points,line_normal,1)
+                if torch.all(line_normal == 0) == False:
+                    self.point_collection.add_points(points,line_normal,1)
     
     def _line_face_intersection(self,vertices,test_edge):
         """Checks whether an edge crosses a face in 2d
@@ -281,6 +339,7 @@ class ProjectorPoints:
             vertices: face given in 2d coordinates
             edge: [xy1, xy2] two vertices given as a list
         """
+        ###### loses tensor here
         
         n = vertices.shape[0]
         intersections = 0
@@ -290,6 +349,11 @@ class ProjectorPoints:
         start_inside = self._is_point_in_polygon(vertices, test_edge[0])
         end_inside = self._is_point_in_polygon(vertices, test_edge[1])
         
+        def does_point_exist(point):
+            for inter in intersection_points:
+                if torch.equal(inter,point):
+                    return True
+            return False
         # Check for intersections with each polygon edge
         for i in range(n):
             v1 = vertices[i]
@@ -298,15 +362,21 @@ class ProjectorPoints:
             intersection, intersect = self._line_intersection(test_edge,[v1,v2])
             if intersect:
                 intersections += 1
-                intersection_points.append(intersection)
+                if does_point_exist(intersection) == False:
+                    intersection_points.append(intersection)
             # Check whether start or end point is on polygon
             if torch.equal(v1,test_edge[0]):
                 intersections += 1
-                intersection_points.append(v1)
+                if does_point_exist(v1) == False:
+                    intersection_points.append(v1)
             if torch.equal(v1,test_edge[1]):
                 intersections += 1
-                intersection_points.append(v1)
-            
+                if does_point_exist(v1) == False:
+                    intersection_points.append(v1)
+        for inter in intersection_points:
+            if inter.requires_grad == False:
+                print("help!")
+        assert len(intersection_points) <=2 
         return intersection_points, start_inside, end_inside
        
     def _ploygon_area(self,vertices):
@@ -347,11 +417,12 @@ class ProjectorPoints:
         torch.Tensor: A tensor containing the generated points.
         """
         # Ensure start_point and end_point are tensors
-        start_point = torch.tensor(start_point, dtype=torch.float32,device=self.device)
-        end_point = torch.tensor(end_point, dtype=torch.float32,device=self.device)
+        # start_point = torch.tensor(start_point, dtype=torch.float32,device=self.device)
+        # end_point = torch.tensor(end_point, dtype=torch.float32,device=self.device)
         num_points = self._num_points(start_point,end_point)
         # Generate a linear space between 0 and 1
-        t = torch.linspace(0, 1, steps=num_points,device=self.device)
+        # generate two more points for corners and remove
+        t = torch.linspace(0, 1, steps=num_points+2,device=self.device)
         
         # Interpolate between start_point and end_point
         points = (1 - t).unsqueeze(1) * start_point + t.unsqueeze(1) * end_point
@@ -361,12 +432,12 @@ class ProjectorPoints:
         
         # Find a normal vector to the direction vector
         normal_vector = torch.tensor([-direction[1], direction[0]], dtype=torch.float32)
-        
-        return points, normal_vector
+        # remove first and last point (cornors)
+        return points[1:-1], normal_vector
     
     def _num_points(self,start_point,end_point):
         #### update this function
-        return 10
+        return 3
     
     def _extract_unique_edges(self,faces):
     # Initialize an empty set for edges
@@ -427,7 +498,8 @@ class ProjectorPoints:
         # Calculate the intersection point
         intersect_x = ((x1*y2 - y1*x2) * (x3 - x4) - (x1 - x2) * (x3*y4 - y3*x4)) / denom
         intersect_y = ((x1*y2 - y1*x2) * (y3 - y4) - (y1 - y2) * (x3*y4 - y3*x4)) / denom
-        intersection = torch.tensor([intersect_x, intersect_y])
+        # intersection = torch.tensor([intersect_x, intersect_y])
+        intersection = torch.stack([intersect_x, intersect_y]) ## check this is corect
         
         # Check if the intersection point is within both line segments
         def is_between(p, q, r):
@@ -494,7 +566,7 @@ class ProjectorPoints:
         # Add distance to plane
         return points
 
-    def project_to_2d(self, points):
+    def project_to_2d(self, points):  ### this isn't giving correct results
         # Normalize the view direction
         view_direction = self.view_axis / torch.norm(self.view_axis)
         
@@ -521,10 +593,26 @@ class ProjectorPoints:
         # Project the 3D points into the 2D plane
         projected_points = torch.matmul(points, projection_matrix)
         
+        # scale to image
+        x_min, x_max = self.x_range
+        y_max, y_min = self.y_range  # Flip the y-axis to match the image coordinates
+
+        # x_origin = 
+        # y_origin
+
+        x_scale = (x_max - x_min) / self.image_size[1]
+        y_scale = (y_max - y_min) / self.image_size[0]
+
+        projected_vertices = projected_points[:, :2].clone()
+        projected_vertices[:, 0] = (projected_vertices[:, 0] - x_min) / x_scale
+        projected_vertices[:, 1] = (projected_vertices[:, 1] - y_min) / y_scale
+
+        return projected_vertices
+        
         return projected_points
 
 
-def plot_2d_projection(point_collections: PointCollection, plot_normals=False):
+def plot_2d_projection(point_collections: PointCollection, plot_normals=False,ax=None):
     """
     Plots 2D points from a PyTorch tensor or a list of tensors.
     
@@ -549,24 +637,31 @@ def plot_2d_projection(point_collections: PointCollection, plot_normals=False):
         if tensor.dim() != 3 or tensor.size(1) != 2:
             raise ValueError("Each tensor must be of shape (N, 2, 2) where N is the number of points.")
         
-        pointx = tensor[:, 0, 0].cpu().numpy()
-        pointy = tensor[:,0, 1].cpu().numpy()
-        normalx = tensor[:, 1, 0].cpu().numpy()
-        normaly = tensor[:, 1, 1].cpu().numpy()
+        pointx = tensor[:, 0, 0].detach().cpu().numpy()
+        pointy = tensor[:,0, 1].detach().cpu().numpy()
+        normalx = tensor[:, 1, 0].detach().cpu().numpy()
+        normaly = tensor[:, 1, 1].detach().cpu().numpy()
         # Plot the points # plot_2d_projection.counter % 20
-        plt.scatter(pointx, pointy, color=colours(i), label=f'Tensor {i+1}',s=2)
+        if ax == None:
+            plt.scatter(pointx, pointy, color=colours(i), label=f'Tensor {i+1}',s=2)
+        else:
+            ax.scatter(pointx, pointy, color=colours(i), label=f'Tensor {i+1}',s=2)
+            
         if plot_normals:
             scale = 0.2
             for px,py,nx,ny in zip(pointx,pointy,normalx,normaly):
-                plt.arrow(px, py, nx*scale, ny*scale, head_width=0.1, head_length=0.1, fc=colours(i), ec=colours(i))
+                if ax == None:
+                    plt.arrow(px, py, nx*scale, ny*scale, head_width=0.1, head_length=0.1, fc=colours(i), ec=colours(i))
+                else:
+                    ax.arrow(px, py, nx*scale, ny*scale, head_width=0.1, head_length=0.1, fc=colours(i), ec=colours(i))
     
-    
-    plt.xlim((-1.5,1.5))
-    plt.ylim((2.0,-2.0))
-    plt.xlabel('X')
-    plt.ylabel('Y')
-    plt.legend()
-    plt.show()
+    if ax == None:
+        plt.xlim((-1.5,1.5))
+        plt.ylim((2.0,-2.0))
+        plt.xlabel('X')
+        plt.ylabel('Y')
+        plt.legend()
+        plt.show()
        
         
 if __name__ == "__main__":
