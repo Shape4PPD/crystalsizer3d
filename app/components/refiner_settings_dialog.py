@@ -402,6 +402,17 @@ class RefinerSettings(SettingsPanel):
             'Use rcf model',
             'bool',
         )
+        self.add_field(
+            'use_keypoints',
+            'Use keypoints detection',
+            'bool',
+        )
+        self.add_field(
+            'keypoints_model_path',
+            'Keypoints detector model path',
+            'path',
+            file_picker_wildcard='JSON files (*.json)|*.json',
+        )
 
         def toggle_inverse_rendering(event=None):
             """
@@ -761,6 +772,11 @@ class LossWeightingsSettings(SettingsPanel):
         self.add_field(
             'w_switch_probs',
             'Conjugate face switching probabilities loss',
+            'scientific',
+        )
+        self.add_field(
+            'w_keypoints',
+            'Keypoints distances loss',
             'scientific',
         )
         self.add_field(

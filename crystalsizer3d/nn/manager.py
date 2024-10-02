@@ -289,7 +289,7 @@ class Manager:
         state_path = checkpoint.get_state_path()
         state = torch.load(state_path, map_location=self.device, weights_only=True)
 
-        # Load predictor network parameters and optimiser state
+        # Load denoiser
         if network_name == 'denoiser':
             self.denoiser_args = checkpoint.denoiser_args
             if self.denoiser is None:
@@ -301,6 +301,21 @@ class Manager:
                 self._init_optimiser('denoiser')
             if self.optimiser_dn is not None:
                 self.optimiser_dn.load_state_dict(state['optimiser_dn_state_dict'])
+
+        # Load keypoint detector
+        elif network_name == 'keypointdetector':
+            self.keypoint_detector_args = checkpoint.keypoint_detector_args
+            if self.keypoint_detector is None:
+                self.dataset_args.train_keypoint_detector = True
+                self._init_keypoint_detector(load_from_checkpoint=False)
+            logger.info(f'Loading keypoint detector network parameters from {state_path}.')
+            self.keypoint_detector.load_state_dict(self._fix_state(state['net_kd_state_dict']), strict=False)
+            if self.optimiser_kd is None:
+                self._init_optimiser('keypointdetector')
+            if self.optimiser_kd is not None:
+                self.optimiser_kd.load_state_dict(state['optimiser_kd_state_dict'])
+
+        # Other networks not supported
         else:
             raise ValueError(f'Unsupported network: {network_name}')
 
@@ -1924,10 +1939,12 @@ class Manager:
         Take a batch of images and detect the keypoints.
         """
         X = X.to(self.device)
+        assert X.ndim == 4 and X.shape[1] == 3, 'Input images must be in [B, 3, H, W] format.'
+        img_size = X.shape[-2:]
 
         # Resize images for input
         kd_size = self.kd_config.data.init_args.train.params.config.size
-        if self.image_shape[-1] != kd_size:
+        if img_size[0] != kd_size:
             X = F.interpolate(X, size=(kd_size, kd_size), mode='bilinear', align_corners=False)
 
         # Generate the vertex heatmaps and wireframes
@@ -1936,7 +1953,7 @@ class Manager:
 
         # Resize for output
         if restore_size:
-            keypoints = F.interpolate(keypoints, size=self.image_shape[-2:], mode='bilinear', align_corners=False)
+            keypoints = F.interpolate(keypoints, size=img_size, mode='bilinear', align_corners=False)
 
         # Split into keypoints heatmaps and wireframe
         kp_heatmap = None

@@ -415,10 +415,11 @@ class Projector:
                 continue
 
             # Consider the refracted projection of each rear-facing edge in the given face
-            rear_edges = self.projected_vertices[face_idx][self.rear_edges]
-            refracted_segments = line_segments_in_polygon(rear_edges, fv2d, tol=self.tol_2d)
-            if len(refracted_segments) > 0:
-                segments[face_idx] = refracted_segments
+            if len(self.rear_edges) > 0:
+                rear_edges = self.projected_vertices[face_idx][self.rear_edges]
+                refracted_segments = line_segments_in_polygon(rear_edges, fv2d, tol=self.tol_2d)
+                if len(refracted_segments) > 0:
+                    segments[face_idx] = refracted_segments
 
         # Collect the facing edges
         facing_edges = []
@@ -444,7 +445,7 @@ class Projector:
 
         # De-duplicate
         keypoints = torch.stack(keypoints)
-        keypoints = torch.unique(keypoints, dim=0)
+        keypoints, _ = merge_vertices(keypoints, epsilon=self.tol_2d)
         self.keypoints = keypoints
 
     def _generate_image(self) -> Tensor:
@@ -461,8 +462,8 @@ class Projector:
                 colour = self.colour_facing_towards if ref_face_idx == 'facing' else self.colour_facing_away
                 for segment in face_segments:
                     segment_clamped = segment.clone()
-                    segment_clamped[:, 0] = torch.clamp(segment_clamped[:, 0], 0, self.image_size[1] - 1)
-                    segment_clamped[:, 1] = torch.clamp(segment_clamped[:, 1], 0, self.image_size[0] - 1)
+                    segment_clamped[:, 0] = torch.clamp(segment_clamped[:, 0], 1, self.image_size[1] - 2)
+                    segment_clamped[:, 1] = torch.clamp(segment_clamped[:, 1], 1, self.image_size[0] - 2)
                     image = draw_line(image, segment_clamped[0], segment_clamped[1], colour)
 
         # Refract all the lines through the face then cut out the visible parts

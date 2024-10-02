@@ -16,6 +16,7 @@ setup(
         'einops >= 0.8, < 0.9',
         'filelock >= 3.13, < 3.14',
         'ffmpeg-python >= 0.2, < 0.3',
+        'geomloss >= 0.2, < 0.3',
         'gigagan-pytorch >= 0.2, < 0.3',
         # 'gpytoolbox >= 0.2, < 0.3',
         'kornia >= 0.7, < 0.8',

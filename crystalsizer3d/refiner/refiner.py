@@ -16,10 +16,12 @@ import torch
 import torch.nn.functional as F
 import yaml
 from PIL import Image
+from geomloss import SamplesLoss
 from matplotlib import pyplot as plt
 from matplotlib.axes import Axes
 from matplotlib.figure import Figure
 from matplotlib.patches import Rectangle
+from skimage.feature import peak_local_max
 from omegaconf import OmegaConf
 from taming.models.lfqgan import VQModel
 from taming.util import get_ckpt_path
@@ -63,6 +65,8 @@ class Refiner:
     X_target_denoised: Optional[Union[Tensor, List[Tensor]]]
     X_target_aug: Union[Tensor, List[Tensor]]
     X_target_patches: Optional[Tensor]
+    X_target_keypoints: Optional[Tensor] = None
+
     X_pred: Tensor = None
     X_pred_patches: Optional[Tensor] = None
     patch_centres: Optional[List[Tuple[int, int]]] = None
@@ -75,6 +79,7 @@ class Refiner:
     conj_pairs: List[Tuple[int, int]]
     conj_switch_probs: Tensor
 
+    keypoint_targets: Optional[Tensor] = None
     anchors: Dict[ProjectedVertexKey, Tensor] = {}
 
     rcf_feats_og: Optional[List[Tensor]]
@@ -157,9 +162,11 @@ class Refiner:
             target_str = str(self.args.ds_idx)
         else:
             target_str = self.args.image_path.stem
-        model_str = self.args.predictor_model_path.stem[:4] \
-                    + (
-                        f'_{self.args.denoiser_model_path.stem[:4]}' if self.args.denoiser_model_path is not None else '')
+        model_str = self.args.predictor_model_path.stem[:4] + \
+                    (f'_{self.args.denoiser_model_path.stem[:4]}'
+                     if self.args.denoiser_model_path is not None else '') + \
+                    (f'_{self.args.keypoints_model_path.stem[:4]}'
+                     if self.args.keypoints_model_path is not None and self.args.use_keypoints else '')
         base_params_str = (f'spp{self.args.spp}' +
                            f'_res{self.args.working_image_size}' +
                            (f'_ms' if self.args.multiscale else '') +
@@ -172,23 +179,25 @@ class Refiner:
         dir_name = hash_data(self.args.to_dict())
 
         # Check for existing directory
+        copy_dirs = ['cache', 'initial_prediction', 'denoise_patches', 'keypoints']
         if base_dir.exists():
             pattern = re.compile(rf'{dir_name}.*')
             existing_dirs = [d for d in base_dir.iterdir() if pattern.match(d.name)]
             if len(existing_dirs) > 0:
                 logger.warning(f'Found existing directory: {existing_dirs[0]}. Overwriting.')
-                cache_dir = existing_dirs[0] / 'cache'
-                if cache_dir.exists():
-                    shutil.move(cache_dir, base_dir / 'cache_tmp')
+                for d in copy_dirs:
+                    if (existing_dirs[0] / d).exists():
+                        shutil.move(existing_dirs[0] / d, base_dir / f'{d}_tmp')
                 shutil.rmtree(existing_dirs[0])
 
         # Make the new save directory
         self.save_dir = base_dir / (dir_name + f'_{START_TIMESTAMP}')
         self.save_dir.mkdir(parents=True, exist_ok=True)
-        if (base_dir / 'cache_tmp').exists():
-            shutil.move(base_dir / 'cache_tmp', self.save_dir / 'cache')
-        else:
-            (self.save_dir / 'cache').mkdir()
+        for d in copy_dirs:
+            if (base_dir / f'{d}_tmp').exists():
+                shutil.move(base_dir / f'{d}_tmp', self.save_dir / d)
+            else:
+                (self.save_dir / d).mkdir()
 
         # Save arguments to yml file
         with open(self.save_dir / 'args.yml', 'w') as f:
@@ -219,7 +228,9 @@ class Refiner:
         self.projector = Projector(
             crystal=self.crystal,
             image_size=(self.args.working_image_size, self.args.working_image_size),
-            zoom=orthographic_scale_factor(self.scene)
+            zoom=orthographic_scale_factor(self.scene),
+            multi_line=True,
+            rtol=1e-2
         )
 
     def _init_blur(self):
@@ -338,11 +349,30 @@ class Refiner:
             model_input = self.X_target[None, ...].permute(0, 3, 1, 2)
             self.rcf_feats_og = self.rcf(model_input, apply_sigmoid=False)
 
+    def _init_keypoints_model(self):
+        """
+        Initialise the keypoints model.
+        """
+        if self.args.use_keypoints:
+            assert self.args.keypoints_model_path.exists(), 'Keypoints model path does not exist!'
+        else:
+            self.keypoints_model = None
+            return
+
+        # Load the keypoints model
+        self.manager.load_network(self.args.keypoints_model_path, 'keypointdetector')
+
+        self.keypoints_model
+
     def _resize_to_wis(self, X: Tensor) -> Tensor:
         """
         Resize the image to the working image size.
         """
+        trim_channel_dim = False
         trim_batch_dim = False
+        if X.ndim == 2:
+            X = X[None, ...]
+            trim_channel_dim = True
         if X.ndim == 3:
             X = X[None, ...]
             trim_batch_dim = True
@@ -363,6 +393,8 @@ class Refiner:
         if out_hwc:
             X = X.permute(0, 2, 3, 1)
         if trim_batch_dim:
+            X = X[0]
+        if trim_channel_dim:
             X = X[0]
         return X
 
@@ -425,37 +457,52 @@ class Refiner:
             except Exception as e:
                 logger.warning(f'Failed to load cached denoised target image: {e}')
                 cache_path.unlink()
+        save_dir = self.save_dir / 'denoise_patches'
+        save_dir.mkdir(parents=True, exist_ok=True)
 
         # Load the denoiser model if set
         if self.args.denoiser_model_path is not None:
             assert self.args.denoiser_model_path.exists(), f'Denoiser model path does not exist: {self.args.denoiser_model_path}.'
             self.manager.load_network(self.args.denoiser_model_path, 'denoiser')
 
-        # Denoise the input image if a denoiser is available
-        if self.manager.denoiser is not None:
-            logger.info('Denoising input image.')
-            with torch.no_grad():
-                X_denoised = denoise_image(
-                    manager=self.manager,
-                    X=self.X_target.permute(2, 0, 1),
-                    n_tiles=self.args.denoiser_n_tiles,
-                    overlap=self.args.denoiser_tile_overlap,
-                    batch_size=self.args.denoiser_batch_size
-                )
-
-            # Destroy the denoiser to free up space
-            logger.info('Destroying denoiser to free up space.')
-            self.manager.denoiser = None
-            del self.manager.denoiser
-            torch.cuda.empty_cache()
-            gc.collect()
-        else:
+        # If no denoiser is set, return here
+        if self.manager.denoiser is None:
             assert self.args.initial_pred_from != 'denoised', 'No denoiser set, so can\'t predict using a denoised image'
             return None
 
-        # Resize target image to the working image size for inverse rendering
-        X_denoised = self._resize_to_wis(X_denoised)
-        X_denoised = X_denoised.permute(1, 2, 0)
+        # Denoise the input image if a denoiser is available
+        logger.info('Denoising input image.')
+        with torch.no_grad():
+            X_denoised, X_patches, X_patches_denoised, patch_positions = denoise_image(
+                manager=self.manager,
+                X=self.X_target.permute(2, 0, 1),
+                n_tiles=self.args.denoiser_n_tiles,
+                overlap=self.args.denoiser_tile_overlap,
+                batch_size=self.args.denoiser_batch_size,
+                return_patches=True
+            )
+
+            # Resize target image to the working image size for inverse rendering
+            X_denoised = self._resize_to_wis(X_denoised)
+            X_denoised = X_denoised.permute(1, 2, 0)
+
+        # Save the denoiser output (and input)
+        X_img = Image.fromarray(to_numpy(self.X_target * 255).astype(np.uint8))
+        X_img.save(save_dir / 'X_original.png')
+        X_denoised_img = Image.fromarray(to_numpy(X_denoised * 255).astype(np.uint8))
+        X_denoised_img.save(save_dir / 'X_denoised.png')
+        for i, (patch, patch_denoised, (x, y)) in enumerate(zip(X_patches, X_patches_denoised, patch_positions)):
+            patch_img = Image.fromarray(to_numpy(patch.permute(1, 2, 0) * 255).astype(np.uint8))
+            patch_img.save(save_dir / f'{i:02d}_x={x}_y={y}.png')
+            patch_denoised_img = Image.fromarray(to_numpy(patch_denoised.permute(1, 2, 0) * 255).astype(np.uint8))
+            patch_denoised_img.save(save_dir / f'{i:02d}_x={x}_y={y}_denoised.png')
+
+        # Destroy the denoiser to free up space
+        logger.info('Destroying denoiser to free up space.')
+        self.manager.denoiser = None
+        del self.manager.denoiser
+        torch.cuda.empty_cache()
+        gc.collect()
 
         # Multiscale
         if self.args.multiscale:
@@ -464,6 +511,57 @@ class Refiner:
         # Save the denoised target
         torch.save(X_denoised, cache_path)
         self.X_target_denoised = X_denoised
+
+    def _init_X_target_keypoints(self):
+        """
+        Generate or load the keypoints target.
+        """
+        if not self.args.use_keypoints:
+            self.X_target_keypoints = None
+            return
+
+        # Try to load the keypoints image from cache
+        cache_path = self.save_dir / 'cache' / f'X_keypoints_from_{self.args.keypoints_pred_from}.pt'
+        if cache_path.exists():
+            try:
+                X_kp = torch.load(cache_path, weights_only=True)
+                X_kp = self._resize_to_wis(X_kp)
+                self.X_target_keypoints = X_kp.to(self.device)
+                logger.info(f'Loaded target keypoints image from {cache_path}')
+                return
+            except Exception as e:
+                logger.warning(f'Failed to load cached keypoints image: {e}')
+                cache_path.unlink()
+
+        # Load the keypoint detector
+        self.manager.load_network(self.args.keypoints_model_path, 'keypointdetector')
+        assert self.manager.keypoint_detector is not None, 'No keypoints model loaded, so can\'t predict keypoints.'
+
+        # Predict the keypoints from the input image
+        logger.info('Predicting keypoints.')
+        X_target = self.X_target if self.args.keypoints_pred_from == 'original' else self.X_target_denoised
+        with torch.no_grad():
+            X_target = X_target.permute(2, 0, 1)[None, ...]  # (b, c, h, w)
+            kp_heatmap, wireframe = self.manager.detect_keypoints(X_target)
+
+        # Destroy the keypoint detector to free up space
+        logger.info('Destroying keypoint detector to free up space.')
+        self.manager.keypoint_detector = None
+        del self.manager.keypoint_detector
+        torch.cuda.empty_cache()
+        gc.collect()
+
+        # Resize keypoints image to the working image size for inverse rendering
+        X_kp = self._resize_to_wis(kp_heatmap)
+        X_kp = X_kp.squeeze()  # (h, w)
+
+        # Save the keypoints heatmap image
+        save_dir = self.save_dir / 'keypoints'
+        save_dir.mkdir(parents=True, exist_ok=True)
+        kp_img = Image.fromarray(to_numpy(X_kp * 255).astype(np.uint8))
+        kp_img.save(save_dir / f'heatmap_from_{self.args.keypoints_pred_from}.png')
+        torch.save(X_kp, cache_path)
+        self.X_target_keypoints = X_kp
 
     def _init_Y_target(self):
         """
@@ -512,6 +610,57 @@ class Refiner:
             self.args.conj_switch_prob_init * torch.ones(len(pairs)),
             requires_grad=True
         )
+
+    def _init_keypoint_targets(self):
+        """
+        Initialise the keypoint targets.
+        """
+        if not self.args.use_keypoints:
+            self.keypoint_targets = None
+            return
+        if self.X_target_keypoints is None:
+            self._init_X_target_keypoints()
+
+        # Find the peaks in the keypoints image
+        heatmap = to_numpy(self.X_target_keypoints)
+        coords = peak_local_max(
+            heatmap,
+            min_distance=self.args.keypoints_min_distance,
+            threshold_abs=self.args.keypoints_threshold,
+        )
+        coords = coords[:, ::-1].copy()  # Flip the coordinates to (y, x) to match the projector
+
+        # Save the keypoint targets
+        self.keypoint_targets = torch.from_numpy(coords).to(torch.float32) #.to(self.device)
+        logger.info(f'Found {len(coords)} keypoints in image.')
+
+        # Save the scaled keypoints image
+        save_dir = self.save_dir / 'keypoints'
+        heatmap_thresholded = heatmap.copy()
+        heatmap_thresholded[heatmap < self.args.keypoints_threshold] = 0
+        kp_img = Image.fromarray((heatmap_thresholded * 255).astype(np.uint8))
+        kp_img.save(save_dir / f'heatmap_thesh={self.args.keypoints_threshold}.png')
+
+        # Mark the detected keypoint locations on the image
+        for lbl, X in zip(
+                ['heatmap', 'X', 'X_denoised'],
+                [heatmap_thresholded, self.X_target, self.X_target_denoised]
+        ):
+            if X is None:
+                continue
+            if isinstance(X, Tensor):
+                img = to_numpy(X)
+            else:
+                img = X
+            fig, ax = plt.subplots()
+            ax.imshow(img)
+            ax.scatter(coords[:, 0], coords[:, 1], c='r', s=75, marker='x', linewidths=1)
+            ax.set_axis_off()
+            fig.savefig(
+                save_dir / f'{lbl}_keypoints_thesh={self.args.keypoints_threshold}_d={self.args.keypoints_min_distance}.png',
+                bbox_inches='tight', pad_inches=0
+            )
+            plt.close(fig)
 
     def _init_optimiser(self):
         """
@@ -573,14 +722,18 @@ class Refiner:
         """
         Set up the metrics to track.
         """
-        metric_keys = [
-            'losses/l1',
-            'losses/l2',
-            'losses/perceptual',
-            'losses/latent',
-            'losses/rcf',
-            'losses/anchors',
-        ]
+        metric_keys = ['losses/anchors', ]
+        if self.args.use_inverse_rendering:
+            metric_keys += ['losses/l1', 'losses/l2']
+            if self.args.use_perceptual_model:
+                metric_keys.append('losses/perceptual')
+            if self.args.use_latents_model:
+                metric_keys.append('losses/latent')
+            if self.args.use_rcf_model:
+                metric_keys.append('losses/rcf')
+        if self.args.use_keypoints:
+            metric_keys.append('losses/keypoints')
+
         return metric_keys
 
     def _init_tb_logger(self):
@@ -607,8 +760,7 @@ class Refiner:
             else:
                 self.crystal.copy_parameters_from(scene.crystal)
                 scene.crystal = self.crystal
-            # self.crystal.to('cpu')
-            self.crystal.to(self.device)
+            self.crystal.to('cpu')
             scene.light_radiance = nn.Parameter(init_tensor(scene.light_radiance, device=self.device),
                                                 requires_grad=True)
             scene.build_mi_scene()
@@ -666,6 +818,12 @@ class Refiner:
             X_target = self.X_target_denoised
         else:
             raise ValueError(f'Invalid initial_pred_from: {self.args.initial_pred_from}')
+
+        # Convert to greyscale
+        X_target = X_target.mean(dim=-1, keepdim=True)
+        X_target = X_target.expand(-1, -1, 3)
+
+        # Set the target image
         self.X_target_aug = X_target
         if isinstance(X_target, list):
             X_target = X_target[0]
@@ -693,6 +851,14 @@ class Refiner:
         torch.cuda.empty_cache()
         gc.collect()
 
+        # Ensure the inverse rendering losses are turned on
+        use_inverse_rendering = self.args.use_inverse_rendering
+        self.args.use_inverse_rendering = True
+        use_latents_model = self.args.use_latents_model
+        self.args.use_latents_model = self.args.w_latent > 0
+        use_perceptual_model = self.args.use_perceptual_model
+        self.args.use_perceptual_model = self.args.w_perceptual > 0
+
         # Generate some images from the parameters
         X_pred_batch = []
         scene_batch = []
@@ -700,6 +866,7 @@ class Refiner:
         for i in range(bs):
             # Render the image
             r_params = self.manager.ds.denormalise_rendering_params(Y_pred_batch, idx=i)
+            # r_params['crystal']['rotation'] = (-np.array(r_params['crystal']['rotation'])).tolist()
             X_pred_i, scene_i = self.manager.crystal_renderer.render_from_parameters(r_params, return_scene=True)
             scene_batch.append(scene_i)
 
@@ -712,15 +879,29 @@ class Refiner:
                 mode='bilinear',
                 align_corners=False
             )[0].permute(1, 2, 0)
+
+            # Convert to greyscale
+            X_pred_i = X_pred_i.mean(dim=-1, keepdim=True).expand(-1, -1, 3)
+
+            # Add the image to the batch
             X_pred_batch.append(X_pred_i)
 
             # Multiscale
             if self.args.multiscale:
                 X_pred_i = to_multiscale(X_pred_i, self.blur)
 
-            # Calculate losses
+            # Set the variables temporarily
             self.X_pred = X_pred_i
+            self.scene = scene_i
             self.crystal = scene_i.crystal
+            self.crystal.to('cpu')
+
+            # Project the crystal mesh - reinitialise the projector for the new scene
+            if self.args.use_keypoints and len(self.keypoint_targets) > 0:
+                self._init_projector()
+                self.projector.project(generate_image=False)
+
+            # Calculate losses
             loss_i, _ = self._calculate_losses()
             losses.append(loss_i.item())
 
@@ -728,6 +909,12 @@ class Refiner:
             X = X_pred_i[0] if isinstance(X_pred_i, list) else X_pred_i
             img = Image.fromarray(to_numpy(X * 255).astype(np.uint8))
             img.save(save_dir / f'{i:02d}_noise={noise_scale[i]:.3f}_loss={loss_i:.4E}.png')
+
+        # Restore the inverse rendering losses setting
+        del self.projector
+        self.args.use_inverse_rendering = use_inverse_rendering
+        self.args.use_latents_model = use_latents_model
+        self.args.use_perceptual_model = use_perceptual_model
 
         # Pick the best image
         best_idx = np.argmin(losses)
@@ -757,7 +944,7 @@ class Refiner:
         scene.crystal.to('cpu')
 
         # Save variables
-        scene.to_yml(scene_path)
+        scene.to_yml(scene_path, overwrite=True)
         torch.save(X_pred, X_pred_path)
 
         # Set variables
@@ -770,8 +957,11 @@ class Refiner:
         """
         Train the parameters for a number of steps.
         """
+        if self.args.use_keypoints and self.keypoint_targets is None:
+            self._init_keypoint_targets()
         if self.scene is None:
             self.make_initial_prediction()
+        self.crystal.rotation.data = torch.tensor([0,0,-1.5])
         n_steps = self.args.max_steps
         start_step = self.step
         end_step = start_step + n_steps
@@ -781,6 +971,10 @@ class Refiner:
         running_loss = 0.
         running_metrics = {k: 0. for k in self.metric_keys}
         running_tps = 0
+
+        # Plot initial prediction
+        self.step = start_step - 1
+        self._make_plots(force=True)
 
         for step in range(start_step, end_step):
             start_time = time.time()
@@ -860,6 +1054,8 @@ class Refiner:
                         if is_bad(param.grad):
                             logger.warning('Bad gradients detected!')
                             param.grad.zero_()
+            self.crystal.rotation.grad.data[0] = 0
+            self.crystal.rotation.grad.data[1] = 0
             self.optimiser.step()
             self.optimiser.zero_grad()
             self.crystal.clamp_parameters(rescale=False)
@@ -966,6 +1162,10 @@ class Refiner:
             X_target_aug.clip_(0, 1)
         self.X_target_aug = X_target_aug
 
+        # Project the crystal mesh
+        if (self.args.use_keypoints and len(self.keypoint_targets) > 0) or len(self.anchors) > 0:
+            self.projector.project(generate_image=False)
+
         # Calculate losses
         loss, stats = self._calculate_losses(distances=distances)
         self.loss = loss.item()
@@ -980,7 +1180,7 @@ class Refiner:
         self.scene_params[Scene.ROUGHNESS_KEY] = dr.ravel(roughness)
         self.scene_params[Scene.RADIANCE_KEY] = dr.unravel(mi.Color3f, radiance)
         self.scene_params.update()
-        return mi.render(self.scene.mi_scene, self.scene_params, seed=seed)
+        return mi.render(self.scene.mi_scene, self.scene_params, seed=max(0, seed))
 
     def _calculate_losses(
             self,
@@ -990,24 +1190,32 @@ class Refiner:
         """
         Calculate losses.
         """
+
+        # Inverse rendering losses
         if self.args.use_inverse_rendering:
             l1_loss, l1_stats = self._img_loss(X_target=self.X_target_aug, X_pred=self.X_pred, loss_type='l1',
                                                decay_factor=self.args.l_decay_l1)
             l2_loss, l2_stats = self._img_loss(X_target=self.X_target_aug, X_pred=self.X_pred, loss_type='l2',
                                                decay_factor=self.args.l_decay_l2)
+            percept_loss, percept_stats = self._perceptual_loss()
+            latent_loss, latent_stats = self._latents_loss()
+            rcf_loss, rcf_stats = self._rcf_loss(is_patch=is_patch)
         else:
             l1_loss, l1_stats = torch.tensor(0.), {}
             l2_loss, l2_stats = torch.tensor(0.), {}
-        percept_loss, percept_stats = self._perceptual_loss()
-        latent_loss, latent_stats = self._latents_loss()
-        rcf_loss, rcf_stats = self._rcf_loss(is_patch=is_patch)
+            percept_loss, percept_stats = torch.tensor(0.), {}
+            latent_loss, latent_stats = torch.tensor(0.), {}
+            rcf_loss, rcf_stats = torch.tensor(0.), {}
+
+        # Regularisations
         overshoot_loss, overshoot_stats = self._overshoot_loss(distances=distances)
         symmetry_loss, symmetry_stats = self._symmetry_loss()
         z_pos_loss, z_pos_stats = self._z_pos_loss()
         rxy_loss, rxy_stats = self._rotation_xy_loss()
-        if not is_patch:
-            patch_loss, patch_stats = self._patches_loss()
         switch_loss, switch_stats = self._switch_loss()
+
+        # Keypoints and anchors
+        keypoints_loss, keypoints_stats = self._keypoints_loss()
         anchors_loss, anchors_stats = self._anchors_loss()
 
         # Combine losses
@@ -1021,19 +1229,23 @@ class Refiner:
                + z_pos_loss * self.args.w_z_pos \
                + rxy_loss * self.args.w_rotation_xy \
                + switch_loss * self.args.w_switch_probs \
+               + keypoints_loss * self.args.w_keypoints \
                + anchors_loss * self.args.w_anchors
 
-        if not is_patch:
-            loss = loss * self.args.w_fullsize + patch_loss * self.args.w_patches
-        assert not is_bad(loss), 'Bad loss!'
-
+        # Combine stats
         stats = {
             'losses/total': loss.item(),
             **l1_stats, **l2_stats, **percept_stats, **latent_stats, **rcf_stats, **overshoot_stats, **symmetry_stats,
-            **z_pos_stats, **rxy_stats, **switch_stats, **anchors_stats
+            **z_pos_stats, **rxy_stats, **switch_stats, **keypoints_stats, **anchors_stats
         }
+
+        # Patches - recalculate all the losses for each patch
         if not is_patch:
+            patch_loss, patch_stats = self._patches_loss()
+            loss = loss * self.args.w_fullsize + patch_loss * self.args.w_patches
             stats.update(patch_stats)
+
+        assert not is_bad(loss), 'Bad loss!'
 
         return loss, stats
 
@@ -1365,6 +1577,43 @@ class Refiner:
 
         return loss, stats
 
+    def _keypoints_loss(self):
+        """
+        Calculate the keypoints loss.
+        """
+        loss = torch.tensor(0., device=self.device)
+        stats = {}
+        if not self.args.use_keypoints or self.keypoint_targets is None or len(self.keypoint_targets) == 0:
+            return loss, stats
+
+        # Normalise the keypoint coordinates by the image size
+        projector_keypoints = self.projector.keypoints / self.args.working_image_size
+        target_keypoints = self.keypoint_targets / self.args.working_image_size
+
+        # Calculate the closest distances between the projected keypoints and the detected targets
+        if self.args.keypoints_loss_type == 'mindists':
+            distances = torch.cdist(projector_keypoints, target_keypoints)
+            d_target_to_projector = distances.amin(dim=0)
+            d_projector_to_target = distances.amin(dim=1)
+            loss = d_target_to_projector.mean() + d_projector_to_target.mean()
+
+        # Calculate the sinkhorn loss
+        elif self.args.keypoints_loss_type == 'sinkhorn':
+            loss_mod = SamplesLoss('sinkhorn', p=2, blur=0.01)
+            loss = loss_mod(projector_keypoints, target_keypoints)
+
+        # Calculate the sinkhorn loss
+        elif self.args.keypoints_loss_type == 'hausdorff':
+            loss_mod = SamplesLoss('hausdorff', p=2, blur=0.01)
+            loss = loss_mod(projector_keypoints, target_keypoints)
+
+        else:
+            raise RuntimeError(f'Unknown keypoints loss type: {self.args.keypoints_loss_type}.')
+
+        stats[f'losses/keypoints'] = loss.item()
+
+        return loss, stats
+
     def _anchors_loss(self):
         """
         Calculate the loss for manual constraints.
@@ -1373,9 +1622,6 @@ class Refiner:
         stats = {}
         if len(self.anchors) == 0:
             return loss, stats
-
-        # Project the vertices
-        self.projector.project(generate_image=False)
 
         # Calculate the loss for each anchor
         losses = []
@@ -1435,8 +1681,13 @@ class Refiner:
         """
         X_target_og = self.X_target if isinstance(self.X_target, Tensor) else self.X_target[0]
         X_target_aug = self.X_target_aug if isinstance(self.X_target_aug, Tensor) else self.X_target_aug[0]
-        X_pred = [self.X_pred] if isinstance(self.X_pred, Tensor) else self.X_pred
-        Xs = [X_target_og, X_target_aug, *X_pred]
+        Xs = [X_target_og, X_target_aug]
+        if self.args.use_inverse_rendering:
+            X_pred = [self.X_pred] if isinstance(self.X_pred, Tensor) else self.X_pred
+            Xs.extend(X_pred)
+        if self.args.use_keypoints:
+            Xs.append(self.X_target_keypoints)
+        n_cols = len(Xs)
 
         n_rows = 3
         rcf_feats = None
@@ -1448,12 +1699,6 @@ class Refiner:
             for f in rcf_feats:
                 assert len(f) >= 3, 'Number of RCF features must match the number of images.'
             n_rows += len(self.args.plot_rcf_feats)
-
-        n_cols = 3
-        if self.args.plot_n_samples == -1:
-            n_cols += len(X_pred) - 1
-        else:
-            n_cols += min(len(X_pred) - 1, self.args.plot_n_samples)
 
         fig, axes = plt.subplots(n_rows, n_cols, figsize=(n_cols * 2.3, n_rows * 2.4), squeeze=False)
         for i in range(n_cols):
@@ -1475,8 +1720,15 @@ class Refiner:
                                      linestyle='--')
                     ax.add_patch(rect)
 
+            # Show the keypoints
+            if self.args.use_keypoints and i == len(Xs) - 1 and self.keypoint_targets is not None:
+                keypoints = to_numpy(self.keypoint_targets)
+                ax.scatter(keypoints[:, 0], keypoints[:, 1], c='r', s=50, marker='x', linewidth=0.5)
+
             # Add wireframe overlay
             ax = axes[1, i]
+            if img.ndim == 2:
+                img = np.stack([img] * 3, axis=-1)
             self.projector.set_background(img)
             img_overlay = to_numpy(self.projector.project() * 255).astype(np.uint8).squeeze().transpose(1, 2, 0)
             ax.imshow(img_overlay)

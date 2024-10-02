@@ -166,6 +166,7 @@ class Crystal(nn.Module):
         # Register buffers
         self.register_buffer('all_distances', torch.empty(0))
         self.register_buffer('N', torch.empty(0))
+        self.register_buffer('vertices_og', torch.empty(0))
         self.register_buffer('vertices', torch.empty(0))
         self.register_buffer('mesh_vertices', torch.empty(0))
         self.register_buffer('mesh_faces', torch.empty(0, dtype=torch.int64))

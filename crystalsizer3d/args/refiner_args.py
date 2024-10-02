@@ -26,11 +26,19 @@ class RefinerArgs(BaseArgs):
             initial_pred_noise_min: float = 0.0,
             initial_pred_noise_max: float = 0.2,
 
+            # Keypoint detection settings
+            keypoints_model_path: Optional[Path] = None,
+            keypoints_pred_from: str = 'denoised',
+            keypoints_min_distance: int = 5,
+            keypoints_threshold: float = 0.5,
+            keypoints_loss_type: str = 'mindists',
+
             # Refining settings
             use_inverse_rendering: bool = True,
             use_perceptual_model: bool = True,
             use_latents_model: bool = True,
             use_rcf_model: bool = True,
+            use_keypoints: bool = False,
 
             # Rendering settings
             working_image_size: int = 200,
@@ -101,6 +109,7 @@ class RefinerArgs(BaseArgs):
             w_patches: float = 1.0,
             w_fullsize: float = 1.0,
             w_switch_probs: float = 1.0,
+            w_keypoints: float = 1.0,
             w_anchors: float = 1.0,
 
             # Loss decay factors
@@ -150,6 +159,8 @@ class RefinerArgs(BaseArgs):
             image_path = Path(image_path)
         if isinstance(denoiser_model_path, str):
             denoiser_model_path = Path(denoiser_model_path)
+        if isinstance(keypoints_model_path, str):
+            keypoints_model_path = Path(keypoints_model_path)
         if isinstance(mv2_config_path, str):
             mv2_config_path = Path(mv2_config_path)
         if isinstance(mv2_checkpoint_path, str):
@@ -181,11 +192,21 @@ class RefinerArgs(BaseArgs):
         self.initial_pred_noise_min = initial_pred_noise_min
         self.initial_pred_noise_max = initial_pred_noise_max
 
+        # Keypoint detection settings
+        if keypoints_model_path is not None:
+            assert keypoints_model_path.exists(), f'Keypoints model path does not exist: {keypoints_model_path}'
+        self.keypoints_model_path = keypoints_model_path
+        self.keypoints_pred_from = keypoints_pred_from
+        self.keypoints_min_distance = keypoints_min_distance
+        self.keypoints_threshold = keypoints_threshold
+        self.keypoints_loss_type = keypoints_loss_type
+
         # Refining settings
         self.use_inverse_rendering = use_inverse_rendering
         self.use_perceptual_model = use_inverse_rendering & use_perceptual_model
         self.use_latents_model = use_inverse_rendering & use_latents_model
         self.use_rcf_model = use_inverse_rendering & use_rcf_model
+        self.use_keypoints = use_keypoints
 
         # Rendering settings
         self.working_image_size = working_image_size
@@ -260,6 +281,7 @@ class RefinerArgs(BaseArgs):
         self.w_patches = w_patches
         self.w_fullsize = w_fullsize
         self.w_switch_probs = w_switch_probs
+        self.w_keypoints = w_keypoints
         self.w_anchors = w_anchors
 
         # Loss decay factors
@@ -308,7 +330,7 @@ class RefinerArgs(BaseArgs):
         Add arguments to a command parser.
         """
         group = parser.add_argument_group('Refiner Args')
-        group.add_argument('--predictor-model-path', type=Path, required=True,
+        group.add_argument('--predictor-model-path', type=Path,
                            help='Path to the model\'s json file.')
         group.add_argument('--image-path', type=Path,
                            help='Path to the image to process. If set, will override the dataset entry.')
@@ -335,6 +357,19 @@ class RefinerArgs(BaseArgs):
         group.add_argument('--initial-pred-noise-max', type=float, default=0.1,
                            help='Minimum amount of noise to add to the batch of images used to generate the initial prediction.')
 
+        # Keypoint detection settings
+        group.add_argument('--keypoints-model-path', type=Path,
+                           help='Path to the keypoints model checkpoint.')
+        group.add_argument('--keypoints-pred-from', type=str, default='denoised', choices=['denoised', 'original'],
+                           help='Calculate the keypoints from either the original or denoised image.')
+        group.add_argument('--keypoints-min-distance', type=int, default=5,
+                           help='Minimum pixel distance between keypoints.')
+        group.add_argument('--keypoints-threshold', type=float, default=0.5,
+                           help='Threshold for keypoints detection.')
+        group.add_argument('--keypoints-loss-type', type=str, default='mindists',
+                           choices=['mindists', 'sinkhorn', 'hausdorff'],
+                           help='Type of loss to use for keypoints refinement.')
+
         # Refining settings
         group.add_argument('--use-inverse-rendering', type=str2bool, default=True,
                            help='Use inverse rendering.')
@@ -344,6 +379,8 @@ class RefinerArgs(BaseArgs):
                            help='Use a latents model. Requires inverse rendering.')
         group.add_argument('--use-rcf-model', type=str2bool, default=True,
                            help='Use the RCF model. Requires inverse rendering.')
+        group.add_argument('--use-keypoints', type=str2bool, default=False,
+                           help='Use the keypoints detection method.')
 
         # Rendering settings
         group.add_argument('--working-image-size', type=int, default=300,
@@ -480,6 +517,8 @@ class RefinerArgs(BaseArgs):
                            help='Weight of the combined losses on the full sized image. Only used when using patches.')
         group.add_argument('--w-switch-probs', type=float, default=0.1,
                            help='Weight of the conjugate face switching probabilities loss regulariser term.')
+        group.add_argument('--w-keypoints', type=float, default=1.,
+                           help='Weight of the keypoints loss. Only used when using keypoints model.')
         group.add_argument('--w-anchors', type=float, default=1.,
                            help='Weight of the manually-defined anchors loss.')
 
