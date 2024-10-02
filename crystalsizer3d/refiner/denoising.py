@@ -1,4 +1,4 @@
-from typing import List, Tuple
+from typing import List, Tuple, Union
 
 import numpy as np
 import torch
@@ -71,8 +71,15 @@ def stitch_image(patches: Tensor, patch_positions: List[Tuple[int, int]], overla
                 weights[-(k + 1), :] *= f
             if j < n_patches_per_side - 1:
                 weights[:, -(k + 1)] *= f
+
+        existing_weights = full_weights[start_x:end_x, start_y:end_y]
+        weights_adj = torch.clamp(existing_weights + weights - 1, min=0)
+        weights = weights - weights_adj
         stitched_image[:, start_x:end_x, start_y:end_y] += patch * weights
         full_weights[start_x:end_x, start_y:end_y] += weights
+
+    # Check that the blending weights all sum to 1
+    assert torch.allclose(full_weights, torch.ones_like(full_weights))
 
     return stitched_image
 
@@ -95,8 +102,9 @@ def denoise_image(
         X: Tensor,
         n_tiles: int = 1,
         overlap: float = 0.,
-        batch_size: int = -1
-) -> Tensor:
+        batch_size: int = -1,
+        return_patches: bool = False
+) -> Union[Tensor, Tuple[Tensor, Tensor, Tensor, List[Tuple[int, int]]]]:
     """
     Denoise the image by splitting it into patches, denoising the patches, and stitching them back together.
     """
@@ -128,5 +136,8 @@ def denoise_image(
         mode='bilinear',
         align_corners=False
     )[0]
+
+    if return_patches:
+        return X_denoised, X_patches, X_patches_denoised, patch_positions
 
     return X_denoised
