@@ -16,6 +16,7 @@ from torch import Tensor
 
 from crystalsizer3d import USE_MLAB
 from crystalsizer3d.crystal import Crystal, ROTATION_MODE_AXISANGLE, ROTATION_MODE_QUATERNION
+from crystalsizer3d.nn.data_loader import DataBatch
 from crystalsizer3d.util.geometry import get_closest_rotation
 from crystalsizer3d.util.utils import equal_aspect_ratio, to_numpy, to_rgb
 
@@ -691,7 +692,7 @@ def plot_light(
 
 def plot_training_samples(
         manager: Manager,
-        data: Tuple[dict, Tensor, Tensor, Tensor, Dict[str, Tensor]],
+        data: DataBatch,
         outputs: Dict[str, Any],
         train_or_test: str,
         idxs: List[int],
@@ -700,7 +701,7 @@ def plot_training_samples(
     Plot the image and parameter comparisons.
     """
     n_examples = len(idxs)
-    metas, images, images_aug, images_clean, Y_target = data
+    metas, images, images_aug, images_clean, images_clean_aug, Y_target = data
     Y_pred = outputs['Y_pred']
     dsa = manager.dataset_args
     if dsa.train_generator:
@@ -838,7 +839,7 @@ def plot_training_samples(
 
 def plot_generator_samples(
         manager: Manager,
-        data: Tuple[dict, Tensor, Tensor, Tensor, Dict[str, Tensor]],
+        data: DataBatch,
         outputs: Dict[str, Any],
         train_or_test: str,
         idxs: List[int],
@@ -847,7 +848,7 @@ def plot_generator_samples(
     Plot the image and generator output.
     """
     n_examples = len(idxs)
-    metas, images, images_aug, images_clean, Y_target = data
+    metas, images, images_aug, images_clean, images_clean_aug, Y_target = data
     X_pred = outputs['X_pred']
     n_rows = 3
     fig = plt.figure(figsize=(n_examples * 2.7, n_rows * 3))
@@ -896,7 +897,7 @@ def plot_generator_samples(
 
 def plot_denoiser_samples(
         manager: Manager,
-        data: Tuple[dict, Tensor, Tensor, Tensor, Dict[str, Tensor]],
+        data: DataBatch,
         outputs: Dict[str, Any],
         train_or_test: str,
         idxs: List[int],
@@ -905,7 +906,7 @@ def plot_denoiser_samples(
     Plot the image and denoiser output.
     """
     n_examples = len(idxs)
-    metas, images, images_aug, images_clean, Y_target = data
+    metas, images, images_aug, images_clean, images_clean_aug, Y_target = data
     X_dn = outputs['X_denoised']
     n_rows = 3
     fig = plt.figure(figsize=(n_examples * 2.7, n_rows * 3))
@@ -952,7 +953,7 @@ def plot_denoiser_samples(
 
 def plot_keypoint_detector_samples(
         manager: Manager,
-        data: Tuple[dict, Tensor, Tensor, Tensor, Dict[str, Tensor]],
+        data: DataBatch,
         outputs: Dict[str, Any],
         train_or_test: str,
         idxs: List[int],
@@ -961,7 +962,7 @@ def plot_keypoint_detector_samples(
     Plot the image and keypoint heatmaps output.
     """
     n_examples = len(idxs)
-    metas, images, images_aug, images_clean, Y_target = data
+    metas, images, images_aug, images_clean, images_clean_aug, Y_target = data
     n_rows = 1
     if manager.keypoint_detector_args.kd_train_keypoints:
         n_rows += 2
@@ -1017,7 +1018,7 @@ def plot_keypoint_detector_samples(
 
         # Plot the (possibly augmented) input image
         if manager.keypoint_detector_args.kd_use_clean_images:
-            img_input = img_clean
+            img_input = to_numpy(images_clean_aug[idx]).squeeze()
         else:
             img_input = to_numpy(images_aug[idx]).squeeze()
         add_plot(meta['image'].name, img_input)

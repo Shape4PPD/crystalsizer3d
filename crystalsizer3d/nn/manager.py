@@ -40,7 +40,7 @@ from crystalsizer3d.crystal import Crystal, ROTATION_MODE_AXISANGLE, ROTATION_MO
 from crystalsizer3d.crystal_generator import CrystalGenerator
 from crystalsizer3d.crystal_renderer import CrystalRenderer
 from crystalsizer3d.nn.checkpoint import Checkpoint
-from crystalsizer3d.nn.data_loader import get_data_loader
+from crystalsizer3d.nn.data_loader import DataBatch, get_data_loader
 from crystalsizer3d.nn.dataset import DatasetProxy
 from crystalsizer3d.nn.focal_loss import FocalLoss
 from crystalsizer3d.nn.models.basenet import BaseNet
@@ -1227,7 +1227,7 @@ class Manager:
 
     def _train_batch(
             self,
-            data: Tuple[dict, Tensor, Tensor, Optional[Tensor], Dict[str, Tensor]]
+            data: DataBatch
     ) -> Tuple[dict, float, dict]:
         """
         Train on a single batch of data.
@@ -1403,12 +1403,12 @@ class Manager:
 
     def _process_batch_predictor(
             self,
-            data: Tuple[dict, Tensor, Tensor, Optional[Tensor], Dict[str, Tensor]]
+            data: DataBatch
     ) -> Tuple[Dict[str, Any], Tensor, Dict]:
         """
         Take a batch of images, predict the parameters and calculate the average loss per example.
         """
-        _, _, X_target_aug, X_target_clean, Y_target = data  # Use the (possibly) augmented image as input
+        _, _, X_target_aug, X_target_clean, _, Y_target = data  # Use the (possibly) augmented image as input
         X_target_aug = X_target_aug.to(self.device)
         if X_target_clean is not None:
             X_target_clean = X_target_clean.to(self.device)
@@ -1456,14 +1456,14 @@ class Manager:
 
     def _process_batch_generator(
             self,
-            data: Tuple[dict, Tensor, Tensor, Tensor, Dict[str, Tensor]]
+            data: DataBatch
     ) -> Tuple[Dict[str, Any], Tensor, Dict]:
         """
         Take a batch of input data, push it through the network and calculate the average loss per example.
         """
         if self.dataset_args.train_combined:
             raise RuntimeError('Training the generator separately in train_combined mode is disabled.')
-        _, _, _, X_target, Y_target = data  # Use the clean image as the target
+        _, _, _, X_target, _, Y_target = data  # Use the clean image as the target
         X_target = X_target.to(self.device)
         Y_target = {
             k: [vi.to(self.device) for vi in v] if isinstance(v, list) else v.to(self.device)
@@ -1486,13 +1486,13 @@ class Manager:
 
     def _process_batch_discriminator(
             self,
-            data: Tuple[dict, Tensor, Tensor, Tensor, Dict[str, Tensor]],
+            data: DataBatch,
             X_pred: Tensor
     ) -> Tuple[Dict[str, Any], Tensor, Dict]:
         """
         Run the discriminator on the real and predicted images and calculate losses.
         """
-        _, _, X_target, _, _ = data  # Use the clean image as target
+        _, _, _, X_target, _, _ = data  # Use the clean image as target
         X_target = X_target.to(self.device)
 
         # Evaluate the real and fake images
@@ -1514,12 +1514,12 @@ class Manager:
 
     def _process_batch_denoiser(
             self,
-            data: Tuple[dict, Tensor, Tensor, Tensor, Dict[str, Tensor]]
+            data: DataBatch
     ) -> Tuple[Dict[str, Any], Tensor, Dict]:
         """
         Take a batch of noisy images and try to recover the clean images.
         """
-        _, _, X_target_aug, X_target_clean, Y_target = data
+        _, _, X_target_aug, X_target_clean, _, Y_target = data
         X_target_aug = X_target_aug.to(self.device)
         X_target_clean = X_target_clean.to(self.device)
 
@@ -1565,14 +1565,14 @@ class Manager:
 
     def _process_batch_keypoint_detector(
             self,
-            data: Tuple[dict, Tensor, Tensor, Tensor, Dict[str, Tensor]]
+            data: DataBatch
     ) -> Tuple[Dict[str, Any], Tensor, Dict]:
         """
-        Take a batch of noisy images and try to identify the crystal vertex positions and/or wireframe edges.
+        Take a batch of images and try to identify the crystal vertex positions and/or wireframe edges.
         """
-        _, _, X_target_aug, X_target_clean, Y_target = data
+        _, _, X_target_aug, _, X_target_clean_aug, Y_target = data
         if self.keypoint_detector_args.kd_use_clean_images:
-            X_target = X_target_clean.to(self.device)
+            X_target = X_target_clean_aug.to(self.device)
         else:
             X_target = X_target_aug.to(self.device)
         outputs = {}
@@ -1675,8 +1675,8 @@ class Manager:
 
     def _process_batch_transcoder(
             self,
-            data: Tuple[dict, Tensor, Tensor, Tensor, Dict[str, Tensor]],
-            Z_pred: Optional[Tensor] = None
+            data: DataBatch,
+            Z_pred: Tensor | None = None
     ) -> Tuple[Dict[str, Any], Tensor, Dict]:
         """
         Run the transcoder on the parameter to latent mappings.
@@ -1684,7 +1684,7 @@ class Manager:
 
         # VAE transcoder
         if self.transcoder_args.tc_model_name in ['vae', 'tvae']:
-            _, _, _, _, Y_target = data
+            _, _, _, _, _, Y_target = data
             Y_target = {
                 k: [vi.to(self.device) for vi in v] if isinstance(v, list) else v.to(self.device)
                 for k, v in Y_target.items()
@@ -1879,7 +1879,7 @@ class Manager:
             if k in ['distances', 'transformation', 'material', 'light']
         ], dim=1)
 
-    def generate(self, Y: Dict[str, Tensor]) -> Optional[Tensor]:
+    def generate(self, Y: Dict[str, Tensor]) -> Tensor | None:
         """
         Take a batch of parameters and generate a batch of images.
         """
@@ -1934,7 +1934,10 @@ class Manager:
             X: Tensor,
             restore_size: bool = True,
             return_losses: bool = False
-    ) -> Union[Tuple[Optional[Tensor], Optional[Tensor]], Tuple[Optional[Tensor], Optional[Tensor], Tensor, Any]]:
+    ) -> Union[
+        Tuple[Tensor | None, Tensor | None],
+        Tuple[Tensor | None, Tensor | None, Tensor, Any]
+    ]:
         """
         Take a batch of images and detect the keypoints.
         """
@@ -1978,8 +1981,8 @@ class Manager:
             self,
             Y_pred: Dict[str, Tensor],
             Y_target: Dict[str, Union[Tensor, List[Tensor]]],
-            X_target_clean: Optional[Tensor],
-    ) -> Tuple[Tensor, Dict[str, Any], Optional[Tensor]]:
+            X_target_clean: Tensor | None,
+    ) -> Tuple[Tensor, Dict[str, Any], Tensor | None]:
         """
         Calculate losses.
         """
@@ -2352,8 +2355,8 @@ class Manager:
 
     def calculate_generator_losses(
             self,
-            X_pred: Optional[Tensor],
-            X_target: Optional[Tensor],
+            X_pred: Tensor | None,
+            X_target: Tensor | None,
             Y_target: Dict[str, Union[Tensor, List[Tensor]]],
             include_teacher_loss: bool = True,
             include_discriminator_loss: bool = True,
@@ -2800,7 +2803,7 @@ class Manager:
     def _calculate_com_loss(
             self,
             Z: Tensor,
-            Z_target: Optional[Tensor] = None,
+            Z_target: Tensor | None = None,
             Y_target: Optional[Dict[str, Union[Tensor, List[Tensor]]]] = None,
             use_sym_rotations: bool = True
     ):
@@ -2841,7 +2844,7 @@ class Manager:
 
     def _make_plots(
             self,
-            data: Tuple[dict, Tensor, Tensor, Tensor, Dict[str, Tensor]],
+            data: DataBatch,
             outputs: Dict[str, Any],
             stats: Dict[str, Tensor],
             train_or_test: str,

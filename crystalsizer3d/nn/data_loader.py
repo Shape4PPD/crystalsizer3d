@@ -11,6 +11,8 @@ from torchvision.transforms.functional import to_tensor
 from crystalsizer3d.args.dataset_training_args import DatasetTrainingArgs
 from crystalsizer3d.nn.dataset import Dataset
 
+DataBatch = Tuple[dict, Tensor, Tensor, Optional[Tensor], Optional[Tensor], Dict[str, Tensor]]
+
 
 class GaussianNoise(torch.nn.Module):
     def __init__(self, sigma_min: float = 0.1, sigma_max: float = 1.0):
@@ -51,7 +53,7 @@ class DatasetLoader(DatasetTorch, ABC):
 
     def _init_image_transforms(self) -> transforms.Compose:
         return transforms.Compose([
-            transforms.RandomChoice([
+            transforms.RandomOrder([
                 transforms.RandomApply([
                     transforms.GaussianBlur(
                         kernel_size=9,
@@ -69,11 +71,11 @@ class DatasetLoader(DatasetTorch, ABC):
             ]),
         ])
 
-    def __getitem__(self, index: int) \
-            -> Tuple[dict, Tensor, Tensor, Optional[Tensor], Dict[str, Tensor]]:
+    def __getitem__(self, index: int) -> DataBatch:
         ds_idx = self.idxs[index]
         item, image, image_clean, params = self.ds.load_item(ds_idx)
         image = to_tensor(image)
+        image_clean_aug = None
         if image_clean is not None:
             image_clean = to_tensor(image_clean)
         params = {
@@ -83,10 +85,14 @@ class DatasetLoader(DatasetTorch, ABC):
 
         if self.image_transforms is not None:
             image_aug = self.image_transforms(image)
+            if image_clean is not None:
+                image_clean_aug = self.image_transforms(image_clean)
         else:
             image_aug = image.clone()
+            if image_clean is not None:
+                image_clean_aug = image_clean.clone()
 
-        return item, image, image_aug, image_clean, params
+        return item, image, image_aug, image_clean, image_clean_aug, params
 
     def __len__(self) -> int:
         return self.ds.get_size(self.train_or_test)
@@ -122,7 +128,8 @@ def get_data_loader(
             default_collate(transposed[1]),  # image
             default_collate(transposed[2]),  # image_aug
             default_collate(transposed[3]) if transposed[3][0] is not None else None,  # image_clean
-            collate_targets(transposed[4]),  # params
+            default_collate(transposed[4]) if transposed[4][0] is not None else None,  # image_clean_aug
+            collate_targets(transposed[5]),  # params
         ]
 
         return ret
