@@ -11,6 +11,7 @@ from typing import Any, Dict, List, Optional, Tuple, Union
 import numpy as np
 import torch
 import torch.nn.functional as F
+from geomloss import SamplesLoss
 from kornia.geometry import axis_angle_to_rotation_matrix
 from matplotlib import pyplot as plt
 from matplotlib.figure import Figure
@@ -2248,6 +2249,14 @@ class Manager:
         # Calculate the average minimum distance per vertex
         l_vertices = (d.sum(dim=1) / (d > 0).sum(dim=1).clip(1)).mean()
 
+        # Calculate the sinkhorn loss
+        sinkhorn_loss = SamplesLoss('sinkhorn', p=2, blur=0.01)
+        w_pred = ((torch.arange(v_pred.shape[1], device=v_pred.device)
+                   .expand(v_pred.shape[0], -1) < nv_pred.unsqueeze(1)).to(torch.float32) / nv_pred[:, None])
+        w_target = ((torch.arange(v_target.shape[1], device=v_pred.device)
+                     .expand(v_target.shape[0], -1) < nv_target.unsqueeze(1))).to(torch.float32) / nv_target[:, None]
+        l_vertices_sinkhorn = sinkhorn_loss(w_pred, v_pred, w_target, v_target).mean()
+
         # Regularise the distances so all planes are touching the polyhedron
         N_dot_v = torch.einsum('pi,bvi->bpv', self.crystal.N, v_pred_og)
         distances_min = N_dot_v.amax(dim=-1)[:, :distances.shape[1]]
@@ -2268,12 +2277,14 @@ class Manager:
             torch.zeros_like(undershoot)
         ).mean()
 
-        loss = l_vertices \
+        loss = self.optimiser_args.w_3d_v_mindists * l_vertices \
+               + self.optimiser_args.w_3d_v_sinkhorn * l_vertices_sinkhorn \
                + self.optimiser_args.w_3d_overshoot * l_overshoot \
                + self.optimiser_args.w_3d_undershoot * l_undershoot
 
         stats = {
             '3d/l_vertices': l_vertices.item(),
+            '3d/l_vertices_sinkhorn': l_vertices_sinkhorn.item(),
             '3d/l_overshoot': l_overshoot.item(),
             '3d/l_undershoot': l_undershoot.item(),
             'losses/3d': loss.item()

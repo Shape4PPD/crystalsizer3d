@@ -53,6 +53,8 @@ class OptimiserArgs(BaseArgs):
             w_distances: float = 1.0,
             w_transformation: float = 1.0,
             w_3d: float = 1.0,
+            w_3d_v_mindists: float = 1.0,
+            w_3d_v_sinkhorn: float = 1.0,
             w_3d_overshoot: float = 0.,
             w_3d_undershoot: float = 0.,
             w_material: float = 1.0,
@@ -148,6 +150,8 @@ class OptimiserArgs(BaseArgs):
         self.w_distances = w_distances
         self.w_transformation = w_transformation
         self.w_3d = w_3d
+        self.w_3d_v_mindists = w_3d_v_mindists
+        self.w_3d_v_sinkhorn = w_3d_v_sinkhorn
         self.w_3d_overshoot = w_3d_overshoot
         self.w_3d_undershoot = w_3d_undershoot
         self.w_material = w_material
@@ -248,6 +252,10 @@ class OptimiserArgs(BaseArgs):
                            help='Weight for transformation loss.')
         group.add_argument('--w-3d', type=float, default=1.0,
                            help='Weight for 3D loss.')
+        group.add_argument('--w-3d-v-mindists', type=float, default=1.0,
+                           help='Weight for 3D vertices loss calculated with min distances between vertices.')
+        group.add_argument('--w-3d-v-sinkhorn', type=float, default=0.,
+                           help='Weight for 3D vertices loss calculated with Sinkhorn distances between vertices.')
         group.add_argument('--w-3d-overshoot', type=float, default=0.,
                            help='Weight for overshoot component of the 3D loss (gets applied to the 3d loss before w_3d applied to the whole 3d loss).')
         group.add_argument('--w-3d-undershoot', type=float, default=0.,
