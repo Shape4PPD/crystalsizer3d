@@ -185,13 +185,28 @@ def _init(args: Optional[RuntimeArgs], method: str):
 
     # Load the input image (and parameters if loading from the dataset)
     if args.image_path is None:
-        metas, X_target, X_target_clean, Y_target = manager.ds.load_item(args.ds_idx)
-        X_target = to_tensor(X_target)
+        item, image, image_clean, Y_target = manager.ds.load_item(args.ds_idx)
         Y_target = {
             k: torch.from_numpy(v).to(torch.float32).to(manager.device)
             for k, v in Y_target.items()
         }
-        r_params_target = metas['rendering_parameters']
+        r_params_target = item['rendering_parameters']
+
+        if manager.dataset_args.use_clean_images:
+            # X_target = image_clean   # todo: fix the broken clean images!
+
+            # The clean images are not correct, so use this to re-render the target image
+            img_target2, scene_target = manager.crystal_renderer.render_from_parameters(
+                r_params_target, return_scene=True
+            )
+            scene_target.clear_interference()
+            img_target2_clean = scene_target.render()
+            Image.fromarray(img_target2_clean).save(save_dir / f'X_target_v2.png')
+            img = Image.open(save_dir / f'X_target_v2.png')
+            X_target = to_tensor(img)
+        else:
+            X_target = image
+        X_target = to_tensor(X_target)
 
     else:
         X_target = to_tensor(Image.open(args.image_path))
@@ -331,12 +346,10 @@ def _make_plots(
     # Re-render with the rendering pipeline
     if Y_target is not None:
         img_target2, scene_target = manager.crystal_renderer.render_from_parameters(r_params_target, return_scene=True)
-        # img_target2 = cv2.cvtColor(img_target2, cv2.COLOR_RGB2BGR)
         Image.fromarray(img_target2).save(save_dir / f'target_rerendered_{idx:02d}.png')
 
     # Render the predicted crystal
     img_pred, scene_pred = manager.crystal_renderer.render_from_parameters(r_params_pred, return_scene=True)
-    # img_pred = cv2.cvtColor(img_pred, cv2.COLOR_RGB2BGR)
     Image.fromarray(img_pred).save(save_dir / f'predicted_{idx:02d}.png')
 
     # Project the wireframes onto the images
@@ -513,8 +526,8 @@ if __name__ == '__main__':
 
     # plot_prediction()
     # plot_prediction_noise_batch()
-    # plot_denoised_prediction()
-    plot_denoised_patches()
+    plot_denoised_prediction()
+    # plot_denoised_patches()
 
     # # Iterate over all images in the image_path directory
     # args_ = parse_arguments()

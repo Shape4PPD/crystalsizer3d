@@ -1055,7 +1055,7 @@ def _plot_vaetc_examples(
     Plot some VAE transcoder examples.
     """
     n_examples = min(self.runtime_args.plot_n_examples, self.runtime_args.batch_size)
-    metas, images, images_aug, params = data
+    metas, images, images_aug, images_clean, images_clean_aug, Y_target = data
     Yr_noisy = outputs['Yr_mu']
     Yr_clean = outputs['Yr_mu_clean']
     prop_cycle = plt.rcParams['axes.prop_cycle']

@@ -381,14 +381,9 @@ class Dataset:
         item = self.data[idx]
         r_params = item['rendering_parameters']
 
-        # Load the image
-        if self.dst_args.use_clean_images:
-            img = Image.open(item['image_clean'])
-        else:
-            img = Image.open(item['image'])
-
-        # Load the clean image too if training the generator, denoiser or keypoint detector
-        if self.dst_args.train_generator or self.dst_args.train_denoiser or self.dst_args.train_keypoint_detector:
+        # Load the noisy and clean images
+        img = Image.open(item['image'])
+        if item['image_clean'].exists():
             img_clean = Image.open(item['image_clean'])
         else:
             img_clean = None

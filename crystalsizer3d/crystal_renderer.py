@@ -355,7 +355,6 @@ def _render_batch(
                 bubble.to(device)
             scene.build_mi_scene()
             img = scene.render(seed=seed + idx)
-            img = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)  # todo: do we need this?
             cv2.imwrite(str(output_dir / params['image']), img)
             scene_params = scene.to_dict()
             rendering_params[idx] = {
@@ -383,7 +382,6 @@ def _render_batch(
             if da.generate_clean:
                 scene.clear_interference()
                 img_clean = scene.render(seed=seed + idx)
-                img_clean = cv2.cvtColor(img_clean, cv2.COLOR_RGB2BGR)
                 cv2.imwrite(str(output_dir / params['image']) + '_clean', img_clean)
 
         except RenderError as e:
@@ -914,7 +912,6 @@ class CrystalRenderer:
             **self.dataset_args.to_dict(),
         )
         img = scene.render(seed=params['seed'] if 'seed' in params else get_seed())
-        img = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)  # todo: do we need this?
 
         if return_scene:
             return img, scene

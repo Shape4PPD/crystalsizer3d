@@ -130,6 +130,7 @@ class Manager:
             set_seed(self.runtime_args.seed)
 
         # Load checkpoint
+        self.training = False
         self.checkpoint = self._init_checkpoint(save_dir=save_dir)
 
     @property
@@ -473,6 +474,7 @@ class Manager:
                 loaded = True
         if not loaded and self.runtime_args.resume_only:
             raise ValueError('Predictor network parameters not found in the checkpoint.')
+        self.predictor.eval()
 
         # Instantiate an exponential moving average tracker for the predictor loss
         self.p_loss_ema = EMA()
@@ -560,6 +562,7 @@ class Manager:
                 loaded = True
         if not loaded and self.runtime_args.resume_only:
             raise ValueError('Generator network parameters not found in the checkpoint.')
+        self.generator.eval()
 
         # Instantiate an exponential moving average tracker for the generator loss
         self.g_loss_ema = EMA()
@@ -604,6 +607,7 @@ class Manager:
                 loaded = True
         if not loaded and self.runtime_args.resume_only:
             raise ValueError('Discriminator network parameters not found in the checkpoint.')
+        self.discriminator.eval()
 
         # Instantiate an exponential moving average tracker for the discriminator loss
         self.d_loss_ema = EMA()
@@ -657,6 +661,7 @@ class Manager:
                     loaded = True
             if not loaded and self.runtime_args.resume_only:
                 raise ValueError('Denoiser network parameters not found in the checkpoint.')
+        self.denoiser.eval()
 
     def _init_keypoint_detector(self, load_from_checkpoint: bool = True):
         """
@@ -708,6 +713,7 @@ class Manager:
                     loaded = True
             if not loaded and self.runtime_args.resume_only:
                 raise ValueError('Keypoint detector network parameters not found in the checkpoint.')
+        self.keypoint_detector.eval()
 
     def _init_transcoder(self):
         """
@@ -770,6 +776,7 @@ class Manager:
                 loaded = True
         if not loaded and self.runtime_args.resume_only:
             raise ValueError('Transcoder network parameters not found in the checkpoint.')
+        self.transcoder.eval()
 
         # Instantiate exponential moving average trackers for the reconstruction and regularisation losses
         self.tc_rec_loss_ema = EMA()
@@ -1047,6 +1054,7 @@ class Manager:
         """
         Put the networks in evaluation mode.
         """
+        self.training = False
         for net_name in ['predictor', 'generator', 'discriminator', 'denoiser', 'keypoint_detector', 'transcoder']:
             if net_name in self.__dict__:
                 net = getattr(self, net_name)
@@ -1057,6 +1065,7 @@ class Manager:
         """
         Put the networks in training mode.
         """
+        self.training = True
         if self.dataset_args.train_predictor:
             self.predictor.train()
         if self.dataset_args.train_generator:
@@ -1409,8 +1418,14 @@ class Manager:
         """
         Take a batch of images, predict the parameters and calculate the average loss per example.
         """
-        _, _, X_target_aug, X_target_clean, _, Y_target = data  # Use the (possibly) augmented image as input
-        X_target_aug = X_target_aug.to(self.device)
+        _, _, X_target_aug, X_target_clean, X_target_clean_aug, Y_target = data
+
+        # Use the (possibly) augmented image as input, either clean or noisy
+        if self.dataset_args.use_clean_images:
+            X_target = X_target_clean_aug
+        else:
+            X_target = X_target_aug
+        X_target = X_target.to(self.device)
         if X_target_clean is not None:
             X_target_clean = X_target_clean.to(self.device)
         Y_target = {
@@ -1419,7 +1434,7 @@ class Manager:
         }
 
         # Predict the parameters and calculate losses
-        Y_pred = self.predict(X_target_aug)
+        Y_pred = self.predict(X_target)
         loss, metrics, X_pred2 = self.calculate_predictor_losses(Y_pred, Y_target, X_target_clean)
         outputs = {
             'Y_pred': Y_pred,
@@ -1460,7 +1475,7 @@ class Manager:
             data: DataBatch
     ) -> Tuple[Dict[str, Any], Tensor, Dict]:
         """
-        Take a batch of input data, push it through the network and calculate the average loss per example.
+        Take a batch of parameters and generate images.
         """
         if self.dataset_args.train_combined:
             raise RuntimeError('Training the generator separately in train_combined mode is disabled.')

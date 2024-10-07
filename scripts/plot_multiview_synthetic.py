@@ -276,8 +276,7 @@ def _plot_perspectives(
                 crystal.rotation.data = rotvec
                 scene = create_scene(crystal=crystal, spp=args.spp, res=args.res)
                 img = mi.render(scene)
-                img = mi.util.convert_to_bitmap(img)
-                img = cv2.cvtColor(np.array(img), cv2.COLOR_RGB2BGR)
+                img = np.array(mi.util.convert_to_bitmap(img))
                 cv2.imwrite(str(output_dir / f'perspective_{kx:.2f}_{ky:.2f}_{kz:.2f}.png'), img)
 
 

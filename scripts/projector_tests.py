@@ -305,7 +305,6 @@ def check_bounds():
         cell_surface_scale=3,
     )
     img = scene.render()
-    img = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
 
     # Check the scaling
     for i in range(4):
@@ -373,7 +372,6 @@ def match_to_scene():
         cell_surface_scale=3,
     )
     img = scene.render()
-    img = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)  # todo: do we need this?
 
     # Get the unit scale factor
     z = crystal.vertices[:, 2].mean().item()

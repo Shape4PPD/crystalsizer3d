@@ -415,8 +415,11 @@ class Refiner:
                 cache_path.unlink()
 
         if self.args.image_path is None:
-            metas, X_target, Y_target = self.manager.ds.load_item(self.args.ds_idx)
-            X_target = to_tensor(X_target)
+            metas, image, image_clean, Y_target = self.manager.ds.load_item(self.args.ds_idx)
+            if self.manager.dataset_args.use_clean_images:
+                X_target = to_tensor(image_clean)
+            else:
+                X_target = to_tensor(image)
 
         else:
             X_target = to_tensor(Image.open(self.args.image_path))
@@ -769,7 +772,6 @@ class Refiner:
 
             # Render the scene to get the initial X_pred
             X_pred = scene.render(seed=get_seed())
-            X_pred = cv2.cvtColor(X_pred, cv2.COLOR_RGB2BGR)
             X_pred = X_pred.astype(np.float32) / 255.
             X_pred = torch.from_numpy(X_pred).permute(2, 0, 1).to(self.device)
             X_pred = F.interpolate(
