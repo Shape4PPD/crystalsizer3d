@@ -1866,12 +1866,7 @@ class Manager:
             output['distances'] = Y_dists
 
         if self.dataset_args.train_transformation:
-            n_params = len(self.ds.labels_transformation)
-            if self.dataset_args.rotation_mode == ROTATION_MODE_QUATERNION:
-                n_params += len(self.ds.labels_rotation_quaternion)
-            else:
-                assert self.dataset_args.rotation_mode == ROTATION_MODE_AXISANGLE
-                n_params += len(self.ds.labels_rotation_axisangle)
+            n_params = len(self.ds.labels_transformation_active)
             output['transformation'] = Y[:, idx:idx + n_params]
             idx += n_params
 
@@ -2136,10 +2131,15 @@ class Manager:
         Calculate the transformation losses.
         """
         location_loss = ((t_pred[:, :3] - t_target[:, :3])**2).mean()
-        scale_loss = ((t_pred[:, 3] - t_target[:, 3])**2).mean()
+        if self.dataset_args.train_scale:
+            scale_loss = ((t_pred[:, 3] - t_target[:, 3])**2).mean()
+            r_idx = 4
+        else:
+            scale_loss = torch.tensor(0., device=self.device)
+            r_idx = 3
 
         if self.dataset_args.rotation_mode == ROTATION_MODE_QUATERNION:
-            q_pred = t_pred[:, 4:]
+            q_pred = t_pred[:, r_idx:]
             v_norms = q_pred.norm(dim=-1, keepdim=True)
             q_pred = q_pred / v_norms
 
@@ -2161,11 +2161,11 @@ class Manager:
                     rotation_losses[i] = angular_differences[min_idx]
                 rotation_loss = rotation_losses.mean()
             else:
-                rotation_loss = ((q_pred - t_target[:, 4:])**2).mean()
+                rotation_loss = ((q_pred - t_target[:, r_idx:])**2).mean()
 
         else:
             assert self.dataset_args.rotation_mode == ROTATION_MODE_AXISANGLE
-            R_pred = axis_angle_to_rotation_matrix(t_pred[:, 4:])
+            R_pred = axis_angle_to_rotation_matrix(t_pred[:, r_idx:])
 
             # Use the sym_rotations, could be different number for each batch item so have to loop over
             if sym_rotations is not None:
@@ -2183,7 +2183,7 @@ class Manager:
                     rotation_losses[i] = angular_differences[min_idx]
                 rotation_loss = rotation_losses.mean()
             else:
-                R_target = axis_angle_to_rotation_matrix(t_target[:, 4:])
+                R_target = axis_angle_to_rotation_matrix(t_target[:, r_idx:])
                 rotation_loss = geodesic_distance(R_pred, R_target).mean()
 
         loss = location_loss + scale_loss + rotation_loss
@@ -2213,15 +2213,23 @@ class Manager:
         """
         distances = self.ds.prep_distances(
             distance_vals=Y_pred['distances'],
-            switches=Y_pred['distance_switches'] if 'distance_switches' in Y_pred else None
+            switches=Y_pred['distance_switches'] if 'distance_switches' in Y_pred else None,
+            normalise=self.dataset_args.train_scale
         )
+        origin = Y_pred['transformation'][:, :3]
+        if self.dataset_args.train_scale:
+            scale = Y_pred['transformation'][:, 3]
+            rotation = Y_pred['transformation'][:, 4:]
+        else:
+            scale = torch.ones(len(origin), device=self.device)
+            rotation = Y_pred['transformation'][:, 3:]
 
         # Calculate the polyhedral vertices for the parameters
         v_pred, v_pred_og, nv_pred, farthest_dists = calculate_polyhedral_vertices(
             distances=distances,
-            origin=Y_pred['transformation'][:, :3],
-            scale=Y_pred['transformation'][:, 3],
-            rotation=Y_pred['transformation'][:, 4:],
+            origin=origin,
+            scale=scale,
+            rotation=rotation,
             symmetry_idx=self.crystal.symmetry_idx if self.ds.dataset_args.asymmetry is None else None,
             plane_normals=self.crystal.N,
         )
@@ -2761,9 +2769,10 @@ class Manager:
             idx += 1
             groups['t/origin_z'] = (idx, idx + 1)
             idx += 1
-            # Leave out scale as it is sort of dependent on the morphology
-            # groups['t/scale'] = (idx, idx + 1)
-            idx += 1
+            if self.dataset_args.train_scale:
+                # Leave out scale as it is sort of dependent on the morphology
+                # groups['t/scale'] = (idx, idx + 1)
+                idx += 1
             if self.dataset_args.rotation_mode == ROTATION_MODE_QUATERNION:
                 groups['t/rotation'] = (idx, idx + 4)
                 idx += 4

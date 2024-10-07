@@ -68,7 +68,8 @@ def plot_symmetry_group(mesh, symm_group):
 
 class Dataset:
     labels_zingg = ['si', 'il']
-    labels_transformation = ['x', 'y', 'z', 's']
+    labels_origin = ['x', 'y', 'z']
+    labels_scale = ['s', ]
     labels_rotation_quaternion = ['rw', 'rx', 'ry', 'rz']
     labels_rotation_axisangle = ['rax', 'ray', 'raz']
     labels_material = ['ior', 'r']
@@ -109,13 +110,14 @@ class Dataset:
             if self.dst_args.use_distance_switches:
                 labels += self.labels_distance_switches
         if self.dst_args.train_transformation:
-            labels += self.labels_transformation
+            labels += self.labels_origin
+            if self.dst_args.train_scale:
+                labels += self.labels_scale
             if self.dst_args.rotation_mode == ROTATION_MODE_QUATERNION:
                 labels += self.labels_rotation_quaternion
             else:
                 assert self.dst_args.rotation_mode == ROTATION_MODE_AXISANGLE
                 labels += self.labels_rotation_axisangle
-
         if self.dst_args.train_material:
             labels += self.labels_material
         if self.dst_args.train_light:
@@ -126,7 +128,7 @@ class Dataset:
         for k in labels:
             if k[:2] == 'ds':
                 continue
-            if k not in self.labels_transformation and self.ds_stats[k]['var'] == 0:
+            if k not in self.labels_origin + self.labels_scale and self.ds_stats[k]['var'] == 0:
                 logger.warning(f'Removing key {k} from parameters as it has 0 variance.')
                 fixed_parameters[k] = self.ds_stats[k]['mean']
                 if k in self.labels_distances and self.dst_args.use_distance_switches:
@@ -141,7 +143,8 @@ class Dataset:
         self.labels_distances_active = [k for k in self.labels_distances if k in self.labels]
         self.labels_distance_switches_active = [k for k in self.labels_distance_switches if k in self.labels]
         self.labels_transformation_active = [k for k in
-                                             self.labels_transformation + self.labels_rotation_quaternion + self.labels_rotation_axisangle
+                                             self.labels_origin + self.labels_scale
+                                             + self.labels_rotation_quaternion + self.labels_rotation_axisangle
                                              if k in self.labels]
         self.labels_material_active = [k for k in self.labels_material if k in self.labels]
         self.labels_light_active = [k for k in self.labels_light if k in self.labels]
@@ -252,8 +255,8 @@ class Dataset:
         Generate or load dataset statistics for normalisation.
         """
         path = self.path / 'ds_stats.yml'
-        keys = (self.labels_zingg + self.labels_distances +
-                self.labels_transformation + self.labels_material + self.labels_light)
+        keys = (self.labels_zingg + self.labels_distances + self.labels_origin +
+                self.labels_scale + self.labels_material + self.labels_light)
         if self.dataset_args.rotation_mode == ROTATION_MODE_AXISANGLE:
             keys += self.labels_rotation_axisangle
         else:
@@ -283,12 +286,10 @@ class Dataset:
                 logger.info(f'Processed {i + 1} / {len(self.data)} items.')
             r_params = item['rendering_parameters']
             for k in keys:
-                if k in self.labels_transformation:
-                    if k in ['x', 'y', 'z']:
-                        val = r_params['crystal']['origin']['xyz'.index(k)]
-                    else:
-                        assert k == 's'
-                        val = r_params['crystal']['scale']
+                if k in self.labels_origin:
+                    val = r_params['crystal']['origin']['xyz'.index(k)]
+                elif k in self.labels_scale:
+                    val = r_params['crystal']['scale']
                 elif k in self.labels_rotation_quaternion:
                     quat = r_params['crystal']['rotation']
                     val = quat['wxyz'.index(k[1])]
@@ -428,9 +429,15 @@ class Dataset:
             ranges = l_max - l_min
             range_max = ranges.max()
             origin = 2 * (origin - l_min - ranges / 2) / range_max
+            transformation = [*origin, ]
 
-            # Standardise the scale to [eps, 1]
-            scale = eps_1_normalise(r_params['crystal']['scale'], 's', MIN_NORMALISED_SCALE)
+            if self.dst_args.train_scale:
+                # Standardise the scale to [eps, 1]
+                scale = eps_1_normalise(r_params['crystal']['scale'], 's', MIN_NORMALISED_SCALE)
+                transformation.append(scale)
+            else:
+                # Multiply the distances by the scale
+                params['distances'] *= r_params['crystal']['scale']
 
             # Rotation representation in the dataset
             if self.dataset_args.rotation_mode == ROTATION_MODE_QUATERNION:
@@ -445,12 +452,8 @@ class Dataset:
             else:
                 assert self.dst_args.rotation_mode == ROTATION_MODE_AXISANGLE
                 rotation = R0.as_rotvec()
-
-            params['transformation'] = np.array([
-                *origin,
-                scale,
-                *rotation
-            ])
+            transformation.extend(list(rotation))
+            params['transformation'] = np.array(transformation)
 
             # Apply the rotation to the symmetry group
             if self.dst_args.check_symmetries > 0:
@@ -651,7 +654,8 @@ class Dataset:
             self,
             distance_vals: torch.Tensor,
             switches: Optional[torch.Tensor] = None,
-            missing_distance_val: float = 100.
+            missing_distance_val: float = 100.,
+            normalise: bool = True
     ) -> torch.Tensor:
         """
         Prepare the distance values.
@@ -665,6 +669,7 @@ class Dataset:
             distance_vals=distance_vals,
             switches=switches,
             missing_distance_val=missing_distance_val,
+            normalise=normalise,
         )
 
 
@@ -756,7 +761,8 @@ class DatasetProxy:
             self,
             distance_vals: torch.Tensor,
             switches: Optional[torch.Tensor] = None,
-            missing_distance_val: float = 100.
+            missing_distance_val: float = 100.,
+            normalise: bool = True
     ) -> torch.Tensor:
         """
         Prepare the distance values.
@@ -770,6 +776,7 @@ class DatasetProxy:
             distance_vals=distance_vals,
             switches=switches,
             missing_distance_val=missing_distance_val,
+            normalise=normalise,
         )
 
 
@@ -819,6 +826,7 @@ def denormalise_rendering_params(
         distance_vals=dist,
         switches=switches,
         missing_distance_val=missing_distance_val,
+        normalise=dst_args.train_scale
     ).tolist()
 
     # Transformation parameters
@@ -835,10 +843,15 @@ def denormalise_rendering_params(
         c_params['origin'] = location.tolist()
 
         # Invert the scale back to the original scale
-        c_params['scale'] = inverse_eps_1_normalise(trans[3].item(), 's', MIN_NORMALISED_SCALE)
+        if dst_args.train_scale:
+            c_params['scale'] = inverse_eps_1_normalise(trans[3].item(), 's', MIN_NORMALISED_SCALE)
+            r_idx = 4
+        else:
+            c_params['scale'] = 1
+            r_idx = 3
 
         # Rotation angles
-        c_params['rotation'] = trans[4:].tolist()
+        c_params['rotation'] = trans[r_idx:].tolist()
     else:
         assert default_rendering_params is not None, 'Need to provide defaults for missing transformation parameters.'
         assert 'crystal' in default_rendering_params, 'Need to provide defaults for missing transformation parameters.'
@@ -918,7 +931,8 @@ def prep_distances(
         labels_distances_active: List[str],
         distance_vals: torch.Tensor,
         switches: Optional[torch.Tensor] = None,
-        missing_distance_val: float = 100.
+        missing_distance_val: float = 100.,
+        normalise: bool = True
 ) -> torch.Tensor:
     """
     Prepare the distance values.
@@ -948,12 +962,13 @@ def prep_distances(
                 distances[:, d_pos] = ds_stats[d_lbl]['mean']
 
     # Normalise the distances by the maximum (in each batch element)
-    d_max = distances.amax(dim=1, keepdim=True)
-    distances = torch.where(
-        d_max > 1e-8,
-        distances / d_max,
-        distances
-    )
+    if normalise:
+        d_max = distances.amax(dim=1, keepdim=True)
+        distances = torch.where(
+            d_max > 1e-8,
+            distances / d_max,
+            distances
+        )
 
     # Ensure negative distances are set to the missing value
     distance_vals[distance_vals < 0] = missing_distance_val

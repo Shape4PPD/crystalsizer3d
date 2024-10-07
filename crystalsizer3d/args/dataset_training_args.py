@@ -26,6 +26,7 @@ class DatasetTrainingArgs(BaseArgs):
             train_zingg: bool = True,
             train_distances: bool = True,
             train_transformation: bool = True,
+            train_scale: bool = True,
             train_3d: bool = True,
             train_material: bool = True,
             train_light: bool = True,
@@ -68,6 +69,7 @@ class DatasetTrainingArgs(BaseArgs):
         self.train_zingg = train_zingg
         self.train_distances = train_distances
         self.train_transformation = train_transformation
+        self.train_scale = train_scale
         self.train_3d = train_3d
         self.train_material = train_material
         self.train_light = train_light
@@ -134,6 +136,8 @@ class DatasetTrainingArgs(BaseArgs):
                            help='Train distance parameters.')
         group.add_argument('--train-transformation', type=str2bool, default=True,
                            help='Train transformation parameters.')
+        group.add_argument('--train-scale', type=str2bool, default=True,
+                           help='Train scale parameter.')
         group.add_argument('--train-3d', type=str2bool, default=True,
                            help='Train the distance and transformation parameters using 3D comparisons.')
         group.add_argument('--train-material', type=str2bool, default=True,
@@ -151,7 +155,7 @@ class DatasetTrainingArgs(BaseArgs):
         group.add_argument('--train-keypoint-detector', type=str2bool, default=False,
                            help='Train the keypoint detector network.')
         group.add_argument('--train-edge-detector', type=str2bool, default=False,
-                            help='Train the edge detector network.')
+                           help='Train the edge detector network.')
 
         # Rotation mode
         group.add_argument('--rotation-mode', type=str, default=ROTATION_MODE_AXISANGLE, choices=ROTATION_MODES,

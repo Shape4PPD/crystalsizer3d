@@ -352,11 +352,11 @@ def plot_distances(
     d_pred2 = _load_single_parameter(Y_pred2, 'distances', idx)
 
     # Prepare the distances
-    d_pred = ds.prep_distances(torch.from_numpy(d_pred))
+    d_pred = ds.prep_distances(torch.from_numpy(d_pred), normalise=ds.dst_args.train_scale)
     if d_target is not None:
-        d_target = ds.prep_distances(torch.from_numpy(d_target))
+        d_target = ds.prep_distances(torch.from_numpy(d_target), normalise=ds.dst_args.train_scale)
     if d_pred2 is not None:
-        d_pred2 = ds.prep_distances(torch.from_numpy(d_pred2))
+        d_pred2 = ds.prep_distances(torch.from_numpy(d_pred2), normalise=ds.dst_args.train_scale)
 
     # Group asymmetric distances by face group
     distance_groups = {}
@@ -433,9 +433,27 @@ def plot_distances(
     ax.set_xticklabels(xlabels)
     if len(xlabels) > 5:
         ax.tick_params(axis='x', labelsize='small')
-    ax.set_ylim(0, 1)
-    ax.set_yticks([0, 0.5, 1])
-    ax.set_yticklabels(['0', '', '1'])
+    if ds.dst_args.train_scale:
+        ax.set_ylim(0, 1)
+        ax.set_yticks([0, 0.5, 1])
+        ax.set_yticklabels(['0', '', '1'])
+    else:
+        max_y = d_pred.max()
+        if d_target is not None:
+            max_y = max(max_y, d_target.max())
+        if d_pred2 is not None:
+            max_y = max(max_y, d_pred2.max())
+        if 'distances' in share_ax:
+            ax_to_label = share_ax['distances']
+            max_y = max(max_y, ax_to_label.get_ylim()[1] / 1.05)
+        else:
+            ax_to_label = ax
+        ax_to_label.set_ylim(0, max_y * 1.05)
+        yticks = np.arange(int(max_y * 2 + 1)) / 2
+        yticklabels = [f'{int(y):0d}' if y == int(y) else '' for y in yticks]
+        ax_to_label.set_yticks(yticks)
+        ax_to_label.set_yticklabels(yticklabels)
+
     if show_legend:
         _shared_ax_legend(share_ax, ax, 'distances')
 
@@ -550,6 +568,7 @@ def plot_transformation(
     t_pred = _load_single_parameter(Y_pred, 'transformation', idx)
     t_target = _load_single_parameter(Y_target, 'transformation', idx)
     t_pred2 = _load_single_parameter(Y_pred2, 'transformation', idx)
+    r_idx = 4 if manager.dataset_args.train_scale else 3
 
     # Adjust the target rotation to the best matching symmetry group
     if (Y_target is not None
@@ -558,7 +577,7 @@ def plot_transformation(
         sym_rotations = Y_target['sym_rotations']
         if isinstance(sym_rotations, list):
             sym_rotations = sym_rotations[idx]
-        t_target[4:] = get_closest_rotation(t_pred[4:], sym_rotations)
+        t_target[r_idx:] = get_closest_rotation(t_pred[r_idx:], sym_rotations)
 
     # Add bar chart data
     locs, bar_width, offset = _add_bars(
@@ -579,8 +598,9 @@ def plot_transformation(
     else:
         k = 3 / 4 * bar_width
     ax.axvspan(locs[0] - k, locs[2] + k, alpha=0.1, color='green')
-    ax.axvspan(locs[3] - k, locs[3] + k, alpha=0.1, color='red')
-    ax.axvspan(locs[4] - k, locs[-1] + k, alpha=0.1, color='blue')
+    if manager.dataset_args.train_scale:
+        ax.axvspan(locs[3] - k, locs[3] + k, alpha=0.1, color='red')
+    ax.axvspan(locs[r_idx] - k, locs[-1] + k, alpha=0.1, color='blue')
 
     ax.set_title('Transformation')
     ax.axhline(0, color='grey', linestyle='--', linewidth=1)
@@ -1173,17 +1193,17 @@ def _plot_vaetc_examples(
             ax_.scatter(locs + bar_width, s_clean, color=colours, marker='+', s=30)
 
     def plot_transformation(ax_, idx_):
-        xlabels = self.ds.labels_transformation.copy()
-        if self.ds.ds_args.rotation_mode == ROTATION_MODE_QUATERNION:
-            xlabels += self.ds.labels_rotation_quaternion
-        else:
-            xlabels += self.ds.labels_rotation_axisangle
+        xlabels = self.ds.labels_transformation_active.copy()
         _plot_bar_chart('transformation', idx_, ax_, xlabels, 'Transformation')
         locs = np.arange(len(xlabels))
         offset = 1.6 * bar_width
         ax_.axvspan(locs[0] - offset, locs[2] + offset, alpha=0.1, color='green')
-        ax_.axvspan(locs[3] - offset, locs[3] + offset, alpha=0.1, color='red')
-        ax_.axvspan(locs[4] - offset, locs[-1] + offset, alpha=0.1, color='blue')
+        if self.ds.dataset_args.train_scale:
+            ax_.axvspan(locs[3] - offset, locs[3] + offset, alpha=0.1, color='red')
+            r_idx = 4
+        else:
+            r_idx = 3
+        ax_.axvspan(locs[r_idx] - offset, locs[-1] + offset, alpha=0.1, color='blue')
 
     def plot_material(ax_, idx_):
         labels = []
