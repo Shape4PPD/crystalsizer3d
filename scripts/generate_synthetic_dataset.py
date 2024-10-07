@@ -152,6 +152,7 @@ def validate(
     for i, idx in enumerate(idxs):
         logger.info(f'Validating entry idx={idx} ({i + 1}/{n_examples}).')
         img_path = val_dir / '0000000001.png'
+        img_path_clean = val_dir / '0000000001_clean.png'
 
         try:
             # Load the parameters for this idx
@@ -164,7 +165,7 @@ def validate(
             distances = np.array([example[f'd{i}_{k}'] for i, k in enumerate(ref_idxs)])
             _, _, z, m = generator.generate_crystal(distances=distances)
 
-            # Render the crystal
+            # Render the noisy crystal image
             img, scene = renderer.render_from_parameters(r_params, return_scene=True)
             cv2.imwrite(str(img_path), img)
 
@@ -177,6 +178,21 @@ def validate(
             img_compare.paste(img_new, (img_og.width, 0))
             img_compare.save(img_path_compare)
 
+            if 'clean_image' in example:
+                # Render the clean crystal image
+                scene.clear_interference()
+                img_clean = scene.render(seed=r_params['seed'])
+                cv2.imwrite(str(img_path_clean), img_clean)
+
+                # Save the images side by side for comparison
+                img_path_compare_clean = val_dir / f'compare_{idx:05d}_clean.png'
+                img_clean_og = Image.open(example['clean_image'])
+                img_clean_new = Image.open(img_path_clean)
+                img_clean_compare = Image.new('RGB', (img_clean_og.width * 2, img_clean_og.height))
+                img_clean_compare.paste(img_clean_og, (0, 0))
+                img_clean_compare.paste(img_clean_new, (img_clean_og.width, 0))
+                img_clean_compare.save(img_path_compare_clean)
+
             # Assert that the images aren't too different
             img_og = np.array(img_og).astype(np.float32)
             img_new = np.array(img_new).astype(np.float32)
@@ -184,6 +200,14 @@ def validate(
             max_diff = np.max(np.abs(img_og - img_new))
             assert max_diff < 15 and mean_diff < 0.01, \
                 f'Images are too different! (Mean diff={mean_diff:.3E}, Max diff={max_diff:.1f})'
+
+            # Assert that the clean images aren't too different
+            img_clean_og = np.array(img_clean_og).astype(np.float32)
+            img_clean_new = np.array(img_clean_new).astype(np.float32)
+            mean_diff_clean = np.mean(np.abs(img_clean_og - img_clean_new))
+            max_diff_clean = np.max(np.abs(img_clean_og - img_clean_new))
+            assert max_diff_clean < 15 and mean_diff_clean < 0.01, \
+                f'Clean images are too different! (Mean diff={mean_diff_clean:.3E}, Max diff={max_diff_clean:.1f})'
 
             # Check that the vertices match
             v1 = to_numpy(scene.crystal.vertices)
@@ -229,8 +253,18 @@ def generate_dataset():
             logger.warning(f'Overwriting existing dataset at {save_dir}.')
             shutil.rmtree(save_dir)
         else:
-            logger.info(f'Dataset already exists at {save_dir}. Resuming...')
-            return resume(save_dir, runtime_args)
+            # Load arguments
+            assert (save_dir / 'options.yml').exists(), f'Options file does not exist: {save_dir / "options.yml"}'
+            with open(save_dir / 'options.yml', 'r') as f:
+                args = yaml.load(f, Loader=yaml.FullLoader)
+                dataset_args = DatasetSyntheticArgs.from_args(args['dataset_args'])
+
+            # If parameters and images dir exists then resume
+            param_path = save_dir / 'parameters.csv'
+            images_dir = save_dir / 'images'
+            if param_path.exists() and images_dir.exists():
+                logger.info(f'Dataset already exists at {save_dir}. Resuming...')
+                return resume(save_dir, runtime_args)
 
     # Set a timer going to record how long this takes
     start_time = time.time()

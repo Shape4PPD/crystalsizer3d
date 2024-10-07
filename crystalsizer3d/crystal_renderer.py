@@ -306,7 +306,12 @@ def _render_batch(
                 scene.bubbles = []
 
             # Sample the light radiance
-            scene.light_radiance = np.random.uniform(da.light_radiance_min, da.light_radiance_max)
+            radiance = np.random.uniform(da.light_radiance_min, da.light_radiance_max)
+            if np.ptp(radiance) > da.light_radiance_ptp_max:
+                mean_rad = radiance.mean()
+                radiance = (radiance - mean_rad) * (da.light_radiance_ptp_max / np.ptp(radiance))
+                radiance = radiance + mean_rad
+            scene.light_radiance = radiance
 
             # Randomise the light texture
             if da.light_texture_dim > -1:
@@ -340,6 +345,7 @@ def _render_batch(
                     min_area=da.crystal_area_min,
                     max_area=da.crystal_area_max,
                     centre_crystal=da.centre_crystals,
+                    rotation_max_xy=da.rotation_max_xy,
                     rebuild_scene=False,
                 )
                 scene.place_bubbles(
@@ -359,7 +365,7 @@ def _render_batch(
             scene_params = scene.to_dict()
             rendering_params[idx] = {
                 'seed': seed + idx,
-                'light_radiance': scene_params['light_radiance'].tolist(),
+                'light_radiance': scene_params['light_radiance'],
                 'light_st_texture': scene_params['light_st_texture'],
                 'cell_bumpmap': scene_params['cell_bumpmap'],
                 'cell_bumpmap_idx': scene_params['cell_bumpmap_idx'],

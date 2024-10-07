@@ -458,6 +458,7 @@ class Scene:
             min_area: float = 0.1,
             max_area: float = 0.5,
             centre_crystal: bool = False,
+            rotation_max_xy: float = -1,
             max_placement_attempts: int = 1000,
             rebuild_scene: bool = True,
     ):
@@ -477,9 +478,19 @@ class Scene:
 
             # Apply random rotation
             if self.crystal.rotation_mode == ROTATION_MODE_AXISANGLE:
-                self.crystal.rotation.data = normalise(torch.rand(3)) * torch.rand(1) * 2 * math.pi
+                axis = normalise(torch.rand(3))
+                if rotation_max_xy > 0:
+                    axis[:2] = axis[:2] * rotation_max_xy / (2 * math.pi)
+                    axis = normalise(axis)
+                rotation = axis * torch.rand(1) * 2 * math.pi
+
+            # Quaternions
             else:
-                self.crystal.rotation.data = normalise(torch.rand(4) * 2 * math.pi)
+                quaternion = normalise(torch.rand(4) * 2 * math.pi)
+                if rotation_max_xy > 0:
+                    quaternion[1:3] = quaternion[1:3] * rotation_max_xy / (2 * math.pi)
+                rotation = normalise(quaternion)
+            self.crystal.rotation.data = rotation
 
             # Sample a target area for how much of the image should be covered by the crystal
             target_area = np.random.uniform(min_area, max_area)
@@ -495,6 +506,7 @@ class Scene:
                     min_area=min_area - 0.01,
                     max_area=max_area - 0.01,
                     centre_crystal=centre_crystal,
+                    rotation_max_xy=rotation_max_xy,
                     max_placement_attempts=max_placement_attempts,
                     rebuild_scene=rebuild_scene,
                 )
