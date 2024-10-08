@@ -52,6 +52,7 @@ def parse_args(printout: bool = True) -> Tuple[DatasetSyntheticArgs, Namespace]:
         ds_name=args.ds_name if args.ds_name is not None else START_TIMESTAMP,
         overwrite_existing=args.overwrite_existing,
         seed=args.seed,
+        generate_only=args.generate_only,
         n_generator_workers=args.n_generator_workers,
         n_renderer_workers=args.n_renderer_workers,
         migrate_distances=args.migrate_distances
