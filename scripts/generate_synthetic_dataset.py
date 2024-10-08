@@ -31,6 +31,8 @@ def parse_args(printout: bool = True) -> Tuple[DatasetSyntheticArgs, Namespace]:
                         help='Overwrite an existing dataset if it exists, otherwise try resume then validate.')
     parser.add_argument('--seed', type=int, default=1,
                         help='Set the random seed for the dataset generation.')
+    parser.add_argument('--generate-only', type=str2bool, default=False,
+                        help='Only generate the crystal parameters and images, do not render them.')
     parser.add_argument('--n-generator-workers', type=int, default=N_WORKERS,
                         help='Set the number of workers to use for generating crystals.')
     parser.add_argument('--n-renderer-workers', type=int, default=1,
@@ -263,6 +265,9 @@ def generate_dataset():
             param_path = save_dir / 'parameters.csv'
             images_dir = save_dir / 'images'
             if param_path.exists() and images_dir.exists():
+                if runtime_args.generate_only:
+                    logger.info(f'Crystal parameters already exists at {save_dir}. Aborting since generate_only=True.')
+                    return
                 logger.info(f'Dataset already exists at {save_dir}. Resuming...')
                 return resume(save_dir, runtime_args)
 
@@ -330,6 +335,11 @@ def generate_dataset():
                 entry[f'd{j}_{hkl}'] = float(distances[j])
                 entry[f'a{j}_{hkl}'] = float(areas[j])
             writer.writerow(entry)
+
+    if runtime_args.generate_only:
+        elapsed_time = time.time() - start_time
+        logger.info(f'Finished in {elapsed_time // 60:.0f}m {elapsed_time % 60:.0f}s.')
+        return
 
     # Render the crystals
     logger.info('Rendering crystals.')
