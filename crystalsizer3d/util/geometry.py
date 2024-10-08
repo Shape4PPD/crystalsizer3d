@@ -505,7 +505,8 @@ def calculate_relative_angles(vertices: Tensor, centroid: Tensor, tol: float = 1
     """
     vertices, success = align_points_to_xy_plane(vertices, centroid, tol=tol)
     if not success:
-        angles = torch.linspace(0, 2 * torch.pi, steps=len(vertices) + 1, device=vertices.device)[:-1]
+        angles = torch.linspace(0, 2 * torch.pi, steps=len(vertices) + 1,
+                                device=vertices.device, dtype=vertices.dtype)[:-1]
     else:
         angles = torch.atan2(vertices[:, 1], vertices[:, 0])
     return angles
@@ -517,6 +518,7 @@ def sort_face_vertices(vertices: Tensor) -> Tensor:
     Sort the vertices of a face in clockwise order.
     """
     device = vertices.device
+    dtype = vertices.dtype
 
     # Calculate the angles of each vertex relative to the centroid
     centroid = torch.mean(vertices, dim=0)
@@ -527,7 +529,7 @@ def sort_face_vertices(vertices: Tensor) -> Tensor:
     sorted_vertices = vertices[sorted_idxs]
 
     # Flip the order if the normal is pointing inwards
-    normal = torch.zeros(3, device=device)
+    normal = torch.zeros(3, device=device, dtype=dtype)
     normal_norm = normal.norm()
     largest_normal = normal
     largest_normal_norm = normal_norm
