@@ -683,7 +683,7 @@ class DatasetProxy:
     ):
         self.dst_args = dst_args
         self.path = dst_args.dataset_path
-        self.cache_path = DATASET_PROXY_PATH / f'{hash_data(str(self.path))}.json'
+        self.cache_path = DATASET_PROXY_PATH / f'{dst_args.hash()}.json'
         if not self._load_cache():
             self._load_dataset()
 
