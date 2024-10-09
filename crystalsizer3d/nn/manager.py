@@ -1855,7 +1855,7 @@ class Manager:
                 # Apply the switches
                 ignore_distances = Y_switches < .5
                 Y_dists = torch.where(ignore_distances, torch.ones_like(Y_dists) * 100, Y_dists)
-            elif self.ds.labels_distances == self.ds.labels_distances_active:
+            elif self.dataset_args.train_scale and self.ds.labels_distances == self.ds.labels_distances_active:
                 # Normalise the predictions by the maximum value per batch item
                 Ypd_max = Y_dists.amax(dim=1, keepdim=True).abs()
                 Y_dists = torch.where(Ypd_max > 0, Y_dists / Ypd_max, Y_dists)
