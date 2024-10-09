@@ -20,6 +20,7 @@ class TimmNet(BaseNet):
             dropout_prob: float = 0.,
             droppath_prob: float = 0.,
             classifier_dropout_prob: float = 0.,
+            resize_input: bool = True,
             build_model: bool = True
     ):
         super().__init__(input_shape, output_shape)
@@ -28,6 +29,7 @@ class TimmNet(BaseNet):
         self.dropout_prob = dropout_prob
         self.droppath_prob = droppath_prob
         self.classifier_dropout_prob = classifier_dropout_prob
+        self.resize_input = resize_input
 
         # Load pretrained model
         self.model = timm.create_model(
@@ -36,6 +38,7 @@ class TimmNet(BaseNet):
             num_classes=0,
             drop_rate=self.dropout_prob,
             drop_path_rate=self.droppath_prob,
+            img_size=input_shape[-1] if not self.resize_input else None,
         )
         self.data_config = resolve_model_data_config(self.model)
 
@@ -98,7 +101,7 @@ class TimmNet(BaseNet):
             x = x.expand(-1, 3, -1, -1)
 
         # Resize to required input shape
-        if x.shape[-1] != self.data_config['input_size'][-1]:
+        if self.resize_input and x.shape[-1] != self.data_config['input_size'][-1]:
             x = F.interpolate(x, size=self.data_config['input_size'][-2:], mode='bilinear', align_corners=False)
 
         # Normalise

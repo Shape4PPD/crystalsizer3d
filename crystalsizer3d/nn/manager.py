@@ -444,6 +444,7 @@ class Manager:
                 dropout_prob=params['dropout_prob'],
                 droppath_prob=params['droppath_prob'],
                 classifier_dropout_prob=params['classifier_dropout_prob'],
+                resize_input=params['resize_input'],
                 **shared_args
             )
         else:
@@ -1542,10 +1543,10 @@ class Manager:
         # Denoise the image
         X_denoised, l_codebook, l_breakdown = self.denoise(X_target_aug, restore_size=False, return_losses=True)
 
-        # Resize clean image to match denoised size
-        if X_target_clean.shape[-2:] != X_denoised.shape[-2:]:
-            X_target_clean = F.interpolate(X_target_clean, size=X_denoised.shape[-2:], mode='bilinear',
-                                           align_corners=False)
+        # Resize denoised image to match clean size
+        if X_denoised.shape[-2:] != X_target_clean.shape[-2:]:
+            X_denoised = F.interpolate(X_denoised, size=X_target_clean.shape[-2:],
+                                       mode='bilinear', align_corners=False)
 
         # Calculate losses
         dn_loss: VQLPIPSWithDiscriminator = self.denoiser.loss
@@ -1925,7 +1926,7 @@ class Manager:
 
         # Resize images for input
         dn_size = self.dn_config.data.init_args.train.params.config.size
-        if self.image_shape[-1] != dn_size:
+        if self.denoiser_args.dn_resize_input and self.image_shape[-1] != dn_size:
             X = F.interpolate(X, size=(dn_size, dn_size), mode='bilinear', align_corners=False)
 
         # Denoise the images
@@ -1958,7 +1959,7 @@ class Manager:
 
         # Resize images for input
         kd_size = self.kd_config.data.init_args.train.params.config.size
-        if img_size[0] != kd_size:
+        if self.keypoint_detector_args.kd_resize_input and img_size[0] != kd_size:
             X = F.interpolate(X, size=(kd_size, kd_size), mode='bilinear', align_corners=False)
 
         # Generate the vertex heatmaps and wireframes
