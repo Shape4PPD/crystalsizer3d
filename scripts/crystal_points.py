@@ -144,6 +144,14 @@ class PointCollection:
         points_normals_tensor = torch.stack([torch.stack(pn) for pn in points_normals_list])
         return points_normals_tensor
     
+    def get_grid_sample_points(self,H,W):
+        points_list = [point.get_point() for point in self.points]
+        grid = torch.stack(points_list)
+        grid[:, 0] = 2.0 * grid[:, 0] / (W - 1) - 1.0  # x (width)
+        grid[:, 1] = 2.0 * grid[:, 1] / (H - 1) - 1.0  # y (height)
+        grid = grid.view(1, -1, 1, 2)
+        return grid
+    
     def get_points_array(self):
         point_array = np.zeros(shape=(180,2))
         for i, point in enumerate(self.points):
@@ -226,13 +234,13 @@ class ProjectorPoints(nn.Module):
         Project 3d vertices into 2d plane, while calculating refraction of back planes
         """
         self.vertices_2d = self.project_to_2d(self.vertices)
+        print(self.vertices_2d)
         normals = torch.ones(2,device=device)
         # self.visable_points = PointCollection(device=self.device) ##
         # self.point_collection.add_points(self.vertices_2d,normals,0)
         
         # return
         all_points = []
-        
         # get non-refracted points first
         for face, face_normal, face_distance in zip(self.faces, self.face_normals, self.distances):
             # want faces facing view axis
@@ -254,7 +262,7 @@ class ProjectorPoints(nn.Module):
                         self.point_collection.add_point(point,line_normal,0) # 0 for front facing
                     
             # for each from face, i.e. non-refracted face, calculate refraction through that face.
-            self._calculate_refraction(face,face_normal, face_distance)
+            #self._calculate_refraction(face,face_normal, face_distance)
             
                     
     def _calculate_refraction(self,front_face,front_normal,front_distance):
@@ -339,8 +347,8 @@ class ProjectorPoints(nn.Module):
             vertices: face given in 2d coordinates
             edge: [xy1, xy2] two vertices given as a list
         """
-        ###### loses tensor here
-        
+        ### add a dubug function that plots, vertices, test_edge and intersections
+        ### check that test edge isnt two adjacent vertices in vertices tensor, then there is no intercestion so ignore
         n = vertices.shape[0]
         intersections = 0
         intersection_points = []
@@ -351,14 +359,17 @@ class ProjectorPoints(nn.Module):
         
         def does_point_exist(point):
             for inter in intersection_points:
-                if torch.equal(inter,point):
+                if torch.allclose(inter,point):
                     return True
             return False
         # Check for intersections with each polygon edge
         for i in range(n):
             v1 = vertices[i]
             v2 = vertices[(i + 1) % n]
-            
+            if torch.isclose(v1,test_edge[0]).all() and torch.isclose(v2,test_edge[1]).all():
+                continue
+            if torch.isclose(v2,test_edge[0]).all() and torch.isclose(v1,test_edge[1]).all():
+                continue
             intersection, intersect = self._line_intersection(test_edge,[v1,v2])
             if intersect:
                 intersections += 1
@@ -376,7 +387,9 @@ class ProjectorPoints(nn.Module):
         for inter in intersection_points:
             if inter.requires_grad == False:
                 print("help!")
-        assert len(intersection_points) <=2 
+        if len(intersection_points) > 2:
+            plot_shape_and_edges(vertices, test_edge, intersection_points)
+        assert len(intersection_points) <=2
         return intersection_points, start_inside, end_inside
        
     def _ploygon_area(self,vertices):
@@ -431,13 +444,13 @@ class ProjectorPoints(nn.Module):
         direction = end_point - start_point
         
         # Find a normal vector to the direction vector
-        normal_vector = torch.tensor([-direction[1], direction[0]], dtype=torch.float32)
+        normal_vector = torch.tensor([-direction[1], direction[0]], dtype=torch.float32, device=self.device)
         # remove first and last point (cornors)
         return points[1:-1], normal_vector
     
     def _num_points(self,start_point,end_point):
         #### update this function
-        return 3
+        return 100
     
     def _extract_unique_edges(self,faces):
     # Initialize an empty set for edges
@@ -542,6 +555,7 @@ class ProjectorPoints(nn.Module):
         else:
             # once you've calculated the refraction angles
             # you need to work out where it refracts on the plane
+            assert 1 - sin2_theta_t > 0, "Negative going into square root"
             cos_theta_t = torch.sqrt(1 - sin2_theta_t)
             theta_t = torch.arccos(cos_theta_t)
             theta_inc = torch.arccos(cos_theta_inc)
@@ -612,6 +626,42 @@ class ProjectorPoints(nn.Module):
         return projected_points
 
 
+def plot_shape_and_edges(vertices: torch.Tensor, test_edge: list, points: list):
+    # Check input dimensions
+    assert vertices.shape[1] == 2, "Vertices tensor must have shape (n, 2)"
+    assert len(test_edge) == 2, "Test edge must be a list of two 1x2 tensors"
+    assert all([point.shape == torch.Size([2]) for point in points]), "Each point must be a 1x2 tensor"
+    
+    # Move vertices to CPU and detach from computational graph
+    vertices_np = vertices.cpu().detach().numpy()
+    
+    # Plot the shape by connecting vertices with a line (loop)
+    plt.plot(
+        torch.cat([vertices, vertices[:1]]).cpu().detach().numpy()[:, 0], 
+        torch.cat([vertices, vertices[:1]]).cpu().detach().numpy()[:, 1], 
+        marker='o', linestyle='-', color='b', label='Shape'
+    )
+    
+    # Plot the test edge: move to CPU and detach
+    edge_points = torch.stack(test_edge).cpu().detach().numpy()
+    plt.plot(edge_points[:, 0], edge_points[:, 1], marker='o', linestyle='-', color='r', label='Test Edge')
+    
+    # Plot the individual points with no connecting lines: move to CPU and detach
+    points_np = torch.stack(points).cpu().detach().numpy()
+    plt.scatter(points_np[:, 0], points_np[:, 1], color='g', label='Points')
+    
+    # Add labels and legends
+    plt.xlabel('X')
+    plt.ylabel('Y')
+    plt.title('Shape with Test Edge and Points')
+    plt.legend()
+    
+    # Show the plot
+    plt.grid(True)
+    plt.gca().set_aspect('equal', adjustable='box')  # Equal aspect ratio for x and y
+    plt.show()
+
+
 def plot_2d_projection(point_collections: PointCollection, plot_normals=False,ax=None):
     """
     Plots 2D points from a PyTorch tensor or a list of tensors.
@@ -644,6 +694,10 @@ def plot_2d_projection(point_collections: PointCollection, plot_normals=False,ax
         # Plot the points # plot_2d_projection.counter % 20
         if ax == None:
             plt.scatter(pointx, pointy, color=colours(i), label=f'Tensor {i+1}',s=2)
+            plt.xlabel('X')
+            plt.ylabel('Y')
+            plt.legend()
+            plt.show()
         else:
             ax.scatter(pointx, pointy, color=colours(i), label=f'Tensor {i+1}',s=2)
             
@@ -655,13 +709,13 @@ def plot_2d_projection(point_collections: PointCollection, plot_normals=False,ax
                 else:
                     ax.arrow(px, py, nx*scale, ny*scale, head_width=0.1, head_length=0.1, fc=colours(i), ec=colours(i))
     
-    if ax == None:
-        plt.xlim((-1.5,1.5))
-        plt.ylim((2.0,-2.0))
-        plt.xlabel('X')
-        plt.ylabel('Y')
-        plt.legend()
-        plt.show()
+    # if ax == None:
+    #     # plt.xlim((-1.5,1.5))
+    #     # plt.ylim((2.0,-2.0))
+    #     plt.xlabel('X')
+    #     plt.ylabel('Y')
+    #     plt.legend()
+    #     plt.show()
        
         
 if __name__ == "__main__":

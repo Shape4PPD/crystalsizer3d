@@ -13,7 +13,7 @@ from crystalsizer3d.args.base_args import BaseArgs
 from crystalsizer3d.nn.models.rcf import RCF
 from crystalsizer3d.util.utils import print_args, to_numpy
 
-if USE_CUDA:
+if USE_CUDA == False:
     device = torch.device('cuda')
 else:
     device = torch.device('cpu')
@@ -115,7 +115,7 @@ def generate_edge_images():
 
         # Save the distance transform
         # feature_map[feature_map < 0.2] = 0
-        img = img.resize((200, 200))
+        # img = img.resize((200, 200))
         img = np.array(img).astype(np.float32)/255
         img = (img - img.min()) / (img.max() - img.min())
         thresh = 0.5

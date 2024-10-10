@@ -22,6 +22,7 @@ from crystalsizer3d.scene_components.scene import Scene
 from crystalsizer3d.scene_components.utils import project_to_image
 from crystalsizer3d.util.utils import print_args, to_numpy, init_tensor
 
+from crystal_points import ProjectorPoints, plot_2d_projection
 
 from edge_detection import load_rcf
 
@@ -30,7 +31,7 @@ if USE_CUDA:
 else:
     device = torch.device('cpu')
 
-torch.autograd.set_detect_anomaly(True)
+# torch.autograd.set_detect_anomaly(True)
     
 """
 Outline - 
@@ -42,18 +43,19 @@ RCF
 
 class ContourDistanceNormalLoss(nn.Module):
     def __init__(self,
+                 distance_image,
                  model_path: Path = ROOT_PATH / 'tmp' / 'bsds500_pascal_model.pth',
+                #  zoom: float = 1.,
                  ):
         super(ContourDistanceNormalLoss, self).__init__()
         
         #load RCF model            
-        self.rcf = load_rcf(model_path)
+        # self.rcf = load_rcf(model_path)
+        self.distance_image = torch.abs(distance_image)
         
         # Detect edges
-        
-        
-    
-    def forward(self, distance_image, points, normals):
+           
+    def forward(self, points, normals):
         """
         Arguments:
         - distance_image (torch.Tensor): A tensor of shape (H, W) representing the distance map where 0 represents the contour.
@@ -63,9 +65,9 @@ class ContourDistanceNormalLoss(nn.Module):
         Returns:
         - loss (torch.Tensor): The computed loss based on the change in the distance along the normal vectors.
         """
-        
+
         N = points.shape[0]  # Number of points
-        H, W = distance_image.shape[-2], distance_image.shape[-1]  # Height and Width of the distance image
+        H, W = self.distance_image.shape[-2], self.distance_image.shape[-1]  # Height and Width of the distance image
         
         # Ensure points are within the bounds of the image
         points = points.clamp(min=0, max=max(H-1, W-1))
@@ -73,31 +75,28 @@ class ContourDistanceNormalLoss(nn.Module):
         # Initialize a tensor to accumulate the losses
         losses = []
         
-        # Small step size for finite difference
-        delta = 1e-3
-        
         for i in range(N):
             # Extract the point and the normal vector for this iteration
-            x, y = points[i]
+            # x, y = points[i]
             reference_point = points[i]
-            nx, ny = normals[i]
+            # nx, ny = normals[i]
             
-            line_points = self.sample_points_along_line_full_image(points[i],normals[i], 100, distance_image.shape)
+            line_points = self.sample_points_along_line_full_image(points[i],normals[i], 100, self.distance_image.shape)
             # sampled_values = self.sample_image_along_line(distance_image,line_points)
-            reference_value = self.sample_image_at_point(distance_image, reference_point)
+            reference_value = self.sample_image_at_point(self.distance_image, reference_point)
             
-            nearest_minimum_position, nearest_minimum_value = self.find_nearest_local_minimum(distance_image, line_points, reference_value)
+            _, nearest_minimum_value = self.find_nearest_local_minimum(self.distance_image, line_points, reference_point)
                         
             # Compute the mean squared error between the sampled values and the reference value
             loss = F.mse_loss(nearest_minimum_value, reference_value)
-            
+            # loss = F.mse_loss(reference_point, reference_point)
             losses.append(loss)
             
             # something is funnyt wioth how its getting the vallues from the image as x approches w and y approches h
         
         # Return the mean loss across all points
         return torch.mean(torch.stack(losses))
-    
+        
     def sample_points_along_line_full_image(self, point, normal_vector, num_samples, image_shape):
         """
         Samples points along a line across the entire image, given a point and a normal vector.
@@ -298,6 +297,9 @@ class ContourDistanceNormalLoss(nn.Module):
         #     "index": local_minima_indices[nearest_minimum_index],
         #     "distance": distances[nearest_minimum_index]
         # }
+
+
+   
     
 def run(distance_image):
     
@@ -365,9 +367,13 @@ def run(distance_image):
     
         
 def plot(distance_image,points,save_dir,name):
-    plt.imshow(distance_image.cpu().numpy(), cmap='hot')
+    try:
+        points_array = points.get_points_array()
+    except:
+        points_array = points.cpu().detach().numpy()
+    plt.imshow(distance_image.detach().cpu().numpy(), cmap='hot')
     plt.colorbar()
-    plt.scatter(points[:, 0].detach().cpu().numpy(), points[:, 1].detach().cpu().numpy(), c='blue')
+    plt.scatter(points_array[:, 0], points_array[:, 1], c='blue')
     plt.title('Final Points After Optimization')
     plt.savefig(save_dir / (name + '.png'))
     plt.close()
@@ -393,9 +399,27 @@ TEST_CRYSTALS = {
         'material_ior': 1.2,
         'material_roughness': 1.5#0.01
     },
+    'cube_test': {
+        'lattice_unit_cell': [1, 1, 1],
+        'lattice_angles': [np.pi / 2, np.pi / 2, np.pi / 2],
+        'miller_indices': [(1, 0, 0), (0, 1, 0), (0, 0, 1)],
+        'point_group_symbol': '222',
+        'scale': 1,
+        'origin': [0.5, 0, 0],
+        'distances': [1.3, 1.0, 1.0],
+        'rotation': [0.0, 0.0, 0.0],
+        'material_ior': 1.2,
+        'material_roughness': 1.5#0.01
+    },
 }
 
 def run_cube():
+    # Create an output directory
+    save_dir = LOGS_PATH / f'{START_TIMESTAMP}'#_{args.image_path.name}'
+    rcf_dir = save_dir / 'rcf_featuremaps'
+    save_dir.mkdir(parents=True, exist_ok=True)
+    rcf_dir.mkdir(parents=True, exist_ok=True)
+    
     # first generate mesh with cube
     
     res = 400
@@ -449,14 +473,152 @@ def run_cube():
     )
     img_overlay = to_numpy(projector.image * 255).astype(np.uint8).squeeze().transpose(1, 2, 0)
     img_overlay[:, :, 3] = (img_overlay[:, :, 3] * 0.5).astype(np.uint8)
-    fig, ax = plt.subplots(figsize=(8, 8))
-    ax.imshow(img)
-    ax.imshow(img_overlay)
+    fig, axs = plt.subplots(2, 1, figsize=(8, 8))
+    axs[0].imshow(img)
+    axs[0].imshow(img_overlay)
+    
+    # get contour image
+    model_path = Path(ROOT_PATH / 'tmp' / 'bsds500_pascal_model.pth')
+    
+    rcf = load_rcf(model_path)
+    img = to_tensor(img).to(device)[None, ...]
+    feature_maps = rcf(img, apply_sigmoid=False)
+    #third one seems best for now
+    
+    
+    # Save the feature maps
+    for i, feature_map in enumerate(feature_maps):
+        feature_map = to_numpy(feature_map).squeeze()
+        feature_map = (feature_map - feature_map.min()) / (feature_map.max() - feature_map.min())
+        if i == len(feature_maps) - 1:
+            name = 'fused'
+        else:
+            name = f'feature_map_{i + 1}'
+        img = Image.fromarray((feature_map * 255).astype(np.uint8))
+        img.save(save_dir / 'rcf_featuremaps' / f'{name}.png')
 
+        # Save the distance transform
+        # feature_map[feature_map < 0.2] = 0
+        # img = img.resize((200, 200))
+        img = np.array(img).astype(np.float32)/255
+        img = (img - img.min()) / (img.max() - img.min())
+        thresh = 0.5
+        img[img < thresh] = 0
+        img[img >= thresh] = 1
+        dist = distance_transform_edt(1-img)  #, metric='taxicab')
+        dist = dist.astype(np.float32)
+        dist = (dist - dist.min()) / (dist.max() - dist.min())
+        Image.fromarray((dist * 255).astype(np.uint8)).save(save_dir / 'rcf_featuremaps' / f'dists_{name}.png')
+    
+    f_map = feature_maps[2]
+    
+    f_map_np = to_numpy(f_map).squeeze()
+    f_map_np = (f_map_np - f_map_np.min()) / (f_map_np.max() - f_map_np.min())
+    del rcf
+    torch.cuda.empty_cache() 
+    axs[1].imshow(f_map_np)
+    # get projector points
+    projector = ProjectorPoints(crystal,
+                                external_ior=1.333,
+                                image_size=f_map_np.shape,
+                                zoom=zoom)
+    points_tar = projector.project()
+    # convert points to same dimesnions as image
+    plot_2d_projection(points_tar,ax=axs[1])
 
     fig.tight_layout()
-    plt.show()
+    plt.savefig(save_dir / ('inital' + '.png'))
+    plt.close()
+    
+    # perterb known crystal by varying d
+    distance_image = torch.abs(f_map.squeeze().detach()) #distance_image.to(device)
+    crystal_target = crystal
+    
+    crystal_opt = Crystal(**TEST_CRYSTALS['cube_test'])
+    crystal_opt.scale.data= init_tensor(1.2, device=crystal_opt.scale.device)
+    crystal_opt.origin.data[:2] = torch.tensor([0, 0], device=crystal_opt.origin.device)
+    crystal_opt.origin.data[2] -= crystal_opt.vertices[:, 2].min()
+    v, f = crystal_opt.build_mesh()
+    crystal_opt.to(device)
+    
+    projector = ProjectorPoints(crystal_opt,
+                            external_ior=1.333,
+                            image_size=f_map_np.shape,
+                            zoom=zoom)
+    points = projector.project()
+    # points = p_and_ns.get_all_points_tensor()
+    plot(distance_image.clone(),points,save_dir,'before')
+    params = {
+        'distances': [crystal_opt.distances],
+        # 'origin': [crystal_opt.origin], # worry about these later
+        # 'rotvec': [crystal_opt.rotation],
+    }
+    
+    # Instantiate the loss function
+    contourloss = ContourDistanceNormalLoss(distance_image)
+    
+    # checking
+    # from torch.autograd import gradcheck
+    # input1 = (torch.randn(3, 3, dtype=torch.float64, requires_grad=True),)
+    # input2 = (torch.randn(3, 3, dtype=torch.float64, requires_grad=True),)
+    # inputs = (input1, input2)
+    # print(f"grad check {gradcheck(contourloss,inputs)}")
+    
+    # Define an optimizer to update the distances
+    lr = 0.1
+    optimizer = optim.Adam(params['distances'], lr=1.)
+    H = distance_image.shape[1]
+    W = distance_image.shape[0]
+    # Optimization loop
+    num_iterations = 10
+    for i in range(num_iterations):
+        def closure():
+            # crystal_opt.clamp_parameters()
+            optimizer.zero_grad()
+            crystal_opt.build_mesh() ## this need 
+            projector = ProjectorPoints(crystal_opt,
+                                    external_ior=1.333,
+                                    image_size=f_map_np.shape,
+                                    zoom=zoom)
+            p_and_ns = projector.project()
+            points = p_and_ns.get_all_points_tensor()
+            normals = p_and_ns.get_all_normals_tensor()
+            # Compute the loss
+            loss = contourloss(points, normals)
+            
+            # Print loss every 100 iterations
+            if i % 1 == 0:
+                # for name, param in loss_fn.named_parameters():
+                #     print(name, param.requires_grad)
+                for name, param in contourloss.named_parameters():
+                    print(f'{name}: {param.grad}')
+                
+                print(f"Iteration {i}, Loss: {loss.item()}")
+                print(f"Parameters: {crystal_opt.get_parameter('distances')}")
+                for name, param in contourloss.named_parameters():
+                    print(name, param.requires_grad)
+            # Backpropagate the loss and update the points
+            loss.backward()
+            print(f".grad {loss.grad}")
+            # Optional: Clamp points to keep them within the image bounds
+            # points.data.clamp_(0, max(H - 1, W - 1))
+        optimizer.step(closure)
+
+
         
+        if i % 1 == 0:
+            plot(distance_image.clone(),points,save_dir,'progress_' + str(i))
+
+    # Final points after optimization
+    print(f"Final Points:\n{points.detach().cpu().numpy()}")
+
+    # Visualize final points on the distance image
+    plot(distance_image,points,save_dir,'end')
+    
+    
+
+    
+            
 if __name__ == "__main__":
     # need a better way of loading image or atleast optionsd
     # image_path = "data\LGA_000239.jpg"
