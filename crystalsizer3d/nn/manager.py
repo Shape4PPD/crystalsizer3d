@@ -1350,6 +1350,10 @@ class Manager:
         cumulative_loss = 0.
         cumulative_stats = {k: 0. for k in self.metric_keys}
 
+        # Sinkhorn loss re-enables grad so disable and re-enable it manually
+        # https://github.com/jeanfeydy/geomloss/issues/57
+        prev_grad_enabled = torch.is_grad_enabled()
+
         with torch.no_grad():
             for i, data in enumerate(self.test_loader, 0):
                 if (i + 1) % log_freq == 0:
@@ -1357,6 +1361,9 @@ class Manager:
                 loss_total = 0.
                 outputs = {}
                 stats = {}
+
+                # todo: remove this when geomloss is fixed
+                torch.autograd.set_grad_enabled(False)
 
                 if self.dataset_args.train_predictor:
                     outputs_p, loss_p, stats_p = self._process_batch_predictor(data)
@@ -1402,6 +1409,9 @@ class Manager:
                         cumulative_stats[k] += stats[k]
                 cumulative_loss += loss_total
 
+        # todo: remove this when geomloss is fixed
+        torch.autograd.set_grad_enabled(prev_grad_enabled)
+
         test_loss = cumulative_loss / len(self.test_loader)
         test_stats = {k: v / len(self.test_loader) for k, v in cumulative_stats.items()}
 
@@ -1438,7 +1448,7 @@ class Manager:
         Y_pred = self.predict(X_target)
         loss, metrics, X_pred2 = self.calculate_predictor_losses(Y_pred, Y_target, X_target_clean)
         outputs = {
-            'Y_pred': Y_pred,
+            'Y_pred': {k: v.detach().cpu() for k, v in Y_pred.items()},
             'X_pred2': X_pred2.detach().cpu() if X_pred2 is not None else None
         }
 
