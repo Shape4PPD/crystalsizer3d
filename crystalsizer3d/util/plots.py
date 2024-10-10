@@ -797,9 +797,9 @@ def plot_training_samples(
 
         # Plot the (possibly augmented) input image, either clean or noisy
         if dsa.use_clean_images:
-            img = to_numpy(images_aug[idx]).squeeze()
-        else:
             img = to_numpy(images_clean_aug[idx]).squeeze()
+        else:
+            img = to_numpy(images_aug[idx]).squeeze()
         ax = fig.add_subplot(gs[row_idx, i])
         plot_image(ax, meta['image'].name, img)
         add_discriminator_value(ax, outputs, 'D_real', idx)
