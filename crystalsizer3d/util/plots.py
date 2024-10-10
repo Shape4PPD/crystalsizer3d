@@ -75,6 +75,10 @@ def plot_image(ax: Axes, title: str, img: np.ndarray, cmap: str = 'gray'):
     """
     ax.set_title(title)
     img = img.squeeze()
+    if img.dtype == np.uint8:
+        img = np.clip(img, 0, 255)
+    else:
+        img = np.clip(img, 0, 1)
     if img.ndim == 2:
         ax.imshow(img, cmap=cmap, vmin=0, vmax=1)
     else:
