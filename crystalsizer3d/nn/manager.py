@@ -1933,6 +1933,8 @@ class Manager:
         Take a batch of images and denoise them.
         """
         X = X.to(self.device)
+        assert X.ndim == 4 and X.shape[1] == 3, 'Input images must be in [B, 3, H, W] format.'
+        img_size = X.shape[-2:]
 
         # Resize images for input
         dn_size = self.dn_config.data.init_args.train.params.config.size
@@ -1943,8 +1945,8 @@ class Manager:
         X_denoised, l_codebook, l_breakdown = self.denoiser(X)
 
         # Resize for output
-        if restore_size:
-            X_denoised = F.interpolate(X_denoised, size=self.image_shape[-2:], mode='bilinear', align_corners=False)
+        if restore_size and img_size != X_denoised.shape[-2:]:
+            X_denoised = F.interpolate(X_denoised, size=img_size, mode='bilinear', align_corners=False)
 
         if return_losses:
             return X_denoised, l_codebook, l_breakdown
@@ -1977,7 +1979,7 @@ class Manager:
         keypoints = torch.sigmoid(keypoints)
 
         # Resize for output
-        if restore_size:
+        if restore_size and img_size != keypoints.shape[-2:]:
             keypoints = F.interpolate(keypoints, size=img_size, mode='bilinear', align_corners=False)
 
         # Split into keypoints heatmaps and wireframe

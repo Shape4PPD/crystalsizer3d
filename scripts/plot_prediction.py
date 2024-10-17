@@ -23,7 +23,7 @@ from crystalsizer3d.refiner.denoising import denoise_batch, stitch_image, tile_i
 from crystalsizer3d.scene_components.utils import orthographic_scale_factor
 from crystalsizer3d.util.plots import make_3d_digital_crystal_image, make_error_image, plot_distances, plot_light, \
     plot_material, plot_transformation
-from crystalsizer3d.util.utils import print_args, to_dict, to_numpy
+from crystalsizer3d.util.utils import print_args, str2bool, to_dict, to_numpy
 
 # Off-screen rendering
 mlab.options.offscreen = True
@@ -37,6 +37,8 @@ class RuntimeArgs(BaseArgs):
             image_path: Optional[Path] = None,
             ds_idx: int = 0,
             batch_size: int = 1,
+            dn_oversize_input: bool = True,
+            dn_max_img_size: int = 512,
 
             img_size_3d: int = 400,
             wireframe_r_factor: float = 0.2,
@@ -66,6 +68,8 @@ class RuntimeArgs(BaseArgs):
         self.image_path = image_path
         self.ds_idx = ds_idx
         self.batch_size = batch_size
+        self.dn_oversize_input = dn_oversize_input
+        self.dn_max_img_size = dn_max_img_size
 
         # Digital crystal image
         self.img_size_3d = img_size_3d
@@ -99,6 +103,11 @@ class RuntimeArgs(BaseArgs):
                            help='Index of the dataset entry to use.')
         group.add_argument('--batch-size', type=int, default=16,
                            help='Batch size for a noisy prediction batch.')
+        group.add_argument('--dn-oversize-input', type=str2bool, default=True,
+                           help='Send images to the denoiser at full (or reduced to max) resolution. '
+                                'Otherwise, downsample to the resolution the denoiser was trained at.')
+        group.add_argument('--dn-max-img-size', type=int, default=1024,
+                           help='Maximum image size for the denoiser.')
 
         # Digital crystal image
         group.add_argument('--img-size-3d', type=int, default=400,
@@ -182,6 +191,7 @@ def _init(args: Optional[RuntimeArgs], method: str):
         save_dir=save_dir
     )
     manager.enable_eval()  # Should be on as default, but set it just in case
+    torch.set_grad_enabled(False)
 
     # Load the input image (and parameters if loading from the dataset)
     if args.image_path is None:
@@ -454,41 +464,53 @@ def plot_denoised_patches(args: Optional[RuntimeArgs] = None):
     Try denoising the full-size image in patches... is it better?
     """
     args, manager, save_dir, X_target, Y_target, r_params_target = _init(args, 'denoised_patches')
+    resize_args = dict(mode='bilinear', align_corners=False)
 
     # Patch settings
     n_tiles = 9
     overlap = 0.05
+    img_size = args.dn_max_img_size if args.dn_oversize_input else manager.image_shape[-1]
 
     # Load the denoising model
     assert args.dn_model_path.exists(), f'DN model path does not exist: {args.dn_model_path}.'
     manager.load_network(args.dn_model_path, 'denoiser')
+    manager.denoiser_args.dn_resize_input = False  # We'll manually resize the images
 
     # Load the full-size image and make square
     X_target_og = to_tensor(Image.open(args.image_path))
     d = min(X_target_og.shape[-2:])
     X_target_og = crop(X_target_og, top=0, left=X_target_og.shape[-1] - d, height=d, width=d)
 
-    # Split it up into patches
+    # Tile it up into overlapping patches
     X_patches, patch_positions = tile_image(X_target_og, n_tiles=n_tiles, overlap=overlap)
 
-    # Resize the patches to the working image size
-    X_patches = F.interpolate(
-        X_patches,
-        size=manager.image_shape[-1],
-        mode='bilinear',
-        align_corners=False
-    ).to(manager.device)
-    X = torch.cat([X_target, X_patches])
+    # Denoise the full size image
+    logger.info('Denoising the complete image.')
+    restore_size = False
+    if args.dn_oversize_input and X_target_og.shape[-1] > img_size \
+            or not args.dn_oversize_input and X_target_og.shape[-1] != img_size:
+        restore_size = X_target_og.shape[-1]
+        X_target_og = F.interpolate(X_target_og[None, ...], size=img_size, **resize_args)[0]
+    X_target_denoised = manager.denoise(X_target_og[None, ...].to(manager.device))[0]
+    if restore_size:
+        X_target_og = F.interpolate(X_target_og[None, ...], size=restore_size, **resize_args)[0]
+        X_target_denoised = F.interpolate(X_target_denoised[None, ...], size=restore_size, **resize_args)[0]
 
     # Denoise the patches
     logger.info('Denoising the patches.')
-    X_denoised = denoise_batch(manager, X, batch_size=3)
-    X_target_denoised = X_denoised[0]
-    X_patches_denoised = X_denoised[1:]
+    restore_size = False
+    if args.dn_oversize_input and X_patches.shape[-1] > img_size \
+            or not args.dn_oversize_input and X_patches.shape[-1] != img_size:
+        restore_size = X_patches.shape[-1]
+        X_patches = F.interpolate(X_patches, size=img_size, **resize_args)
+    X_patches_denoised = denoise_batch(manager, X_patches.to(manager.device), batch_size=3)
+    if restore_size:
+        X_patches = F.interpolate(X_patches, size=restore_size, **resize_args)
+        X_patches_denoised = F.interpolate(X_patches_denoised, size=restore_size, **resize_args)
 
     # Plot the full denoising attempt
     logger.info('Plotting.')
-    img = to_numpy(X_target * 255).astype(np.uint8).squeeze().transpose(1, 2, 0)
+    img = to_numpy(X_target_og * 255).astype(np.uint8).squeeze().transpose(1, 2, 0)
     Image.fromarray(img).save(save_dir / f'target.png')
     img = to_numpy(X_target_denoised * 255).astype(np.uint8).squeeze().transpose(1, 2, 0)
     Image.fromarray(img).save(save_dir / f'target_denoised.png')
@@ -510,24 +532,14 @@ def plot_denoised_patches(args: Optional[RuntimeArgs] = None):
     img = to_numpy(X_denoised_stitched * 255).astype(np.uint8).squeeze().transpose(1, 2, 0)
     Image.fromarray(img).save(save_dir / f'target_denoised_stitched.png')
 
-    # Resize the reconstituted denoised image to the working image size
-    X_dns2 = F.interpolate(
-        X_denoised_stitched[None, ...],
-        size=manager.image_shape[-1],
-        mode='bilinear',
-        align_corners=False
-    )[0]
-    img = to_numpy(X_dns2 * 255).astype(np.uint8).squeeze().transpose(1, 2, 0)
-    Image.fromarray(img).save(save_dir / f'target_denoised_stitched2.png')
-
 
 if __name__ == '__main__':
     start_time = time.time()
 
     # plot_prediction()
     # plot_prediction_noise_batch()
-    plot_denoised_prediction()
-    # plot_denoised_patches()
+    # plot_denoised_prediction()
+    plot_denoised_patches()
 
     # # Iterate over all images in the image_path directory
     # args_ = parse_arguments()
