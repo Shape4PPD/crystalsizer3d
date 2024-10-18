@@ -73,6 +73,7 @@ class Point2DTorch:
         self.point = point#.clone().detach().requires_grad_(True)
         self.normal_pre = normal#.clone().detach().requires_grad_(True).to(device)
         self.normal = self.normal_pre/torch.norm(self.normal_pre)
+        self.distance = torch.zeros(2,device=device)
         # self.marker = marker.clone().detach()
         
         ## normalise the normal
@@ -81,7 +82,7 @@ class Point2DTorch:
         self.marker = torch.tensor(marker, dtype=torch.int,device=self.device) # 0 if external, 1 if refracted
     
     def __repr__(self):
-        return f"Point2DTorch(point={self.point}, normal={self.normal}, marker={self.marker})"
+        return f"Point2DTorch(point={self.point}, normal={self.normal}, marker={self.marker}, distance={self.distance})"
 
     def get_point(self):
         return self.point
@@ -91,6 +92,12 @@ class Point2DTorch:
     
     def get_marker(self):
         return self.marker
+    
+    def get_distance(self):
+        return self.distance
+    
+    def set_distance(self,tensor):
+        self.distance = tensor
         
 class PointCollection:
     def __init__(self,device):
@@ -153,11 +160,21 @@ class PointCollection:
         return grid
     
     def get_points_array(self):
-        point_array = np.zeros(shape=(180,2))
+        point_array = np.zeros(shape=(len(self.points),2))
         for i, point in enumerate(self.points):
             point_np = point.point.detach().cpu().numpy()
             point_array[i] = point_np
         return point_array
+    
+    def get_points_and_distances_array(self):
+        point_array = np.zeros(shape=(len(self.points),2))
+        distance_array = np.zeros(shape=(len(self.points),2))
+        for i, point in enumerate(self.points):
+            point_np = point.point.detach().cpu().numpy()
+            distance_np = point.distance.detach().cpu().numpy()
+            point_array[i] = point_np
+            distance_array[i] = distance_np
+        return point_array, distance_array
     
     def __len__(self):
         return len(self.points)
@@ -182,6 +199,7 @@ class ProjectorPoints(nn.Module):
             zoom: float = 1.,
             external_ior: float = 1.333,  # water
             image_size: Tuple[int, int] = (1000, 1000),
+            points_per_unit = 0.05
     ):
     
     ### this should essentially be the same as the projector class, except it gives points instead of lines
@@ -202,7 +220,7 @@ class ProjectorPoints(nn.Module):
         self.x_range = init_tensor([-self.aspect_ratio, self.aspect_ratio], device=self.device) / self.zoom
         self.y_range = init_tensor([-1, 1], device=self.device) / self.zoom
 
-        
+        self.points_per_unit = points_per_unit
         
     def project(self) -> torch.Tensor:
         """
@@ -233,13 +251,12 @@ class ProjectorPoints(nn.Module):
         """
         Project 3d vertices into 2d plane, while calculating refraction of back planes
         """
-        self.vertices_2d = self.project_to_2d(self.vertices)
-        print(self.vertices_2d)
+        self.vertices_2d = self._orthogonal_projection(self.vertices)
         normals = torch.ones(2,device=device)
         # self.visable_points = PointCollection(device=self.device) ##
+        self.vertices_2d_rel = self._to_relative_coords(self.vertices_2d)
         # self.point_collection.add_points(self.vertices_2d,normals,0)
-        
-        # return
+
         all_points = []
         # get non-refracted points first
         for face, face_normal, face_distance in zip(self.faces, self.face_normals, self.distances):
@@ -262,7 +279,7 @@ class ProjectorPoints(nn.Module):
                         self.point_collection.add_point(point,line_normal,0) # 0 for front facing
                     
             # for each from face, i.e. non-refracted face, calculate refraction through that face.
-            #self._calculate_refraction(face,face_normal, face_distance)
+            self._calculate_refraction(face,face_normal, face_distance)
             
                     
     def _calculate_refraction(self,front_face,front_normal,front_distance):
@@ -277,7 +294,7 @@ class ProjectorPoints(nn.Module):
         # this just gives the corners of the refracted faces
         
         # now we filter the ones we want
-        refracted_2d = self.project_to_2d(refracted_points) # testing
+        refracted_2d = self._orthogonal_projection(refracted_points) # testing
 
         # we want to calculate if any of the lines between verties cross the front face
         front_face_2d = self.vertices_2d[front_face]
@@ -340,6 +357,15 @@ class ProjectorPoints(nn.Module):
                 if torch.all(line_normal == 0) == False:
                     self.point_collection.add_points(points,line_normal,1)
     
+    def _to_relative_coords(self, coords: Tensor) -> Tensor:
+        """
+        Convert absolute coordinates to relative coordinates.
+        """
+        return torch.stack([
+            (coords[:, 0] / self.image_size[1] - 0.5) * 2,
+            (0.5 - coords[:, 1] / self.image_size[0]) * 2
+        ], dim=1)
+    
     def _line_face_intersection(self,vertices,test_edge):
         """Checks whether an edge crosses a face in 2d
 
@@ -366,9 +392,9 @@ class ProjectorPoints(nn.Module):
         for i in range(n):
             v1 = vertices[i]
             v2 = vertices[(i + 1) % n]
-            if torch.isclose(v1,test_edge[0]).all() and torch.isclose(v2,test_edge[1]).all():
+            if torch.isclose(v1,test_edge[0],atol=1e-1).all() and torch.isclose(v2,test_edge[1],atol=1e-1).all():
                 continue
-            if torch.isclose(v2,test_edge[0]).all() and torch.isclose(v1,test_edge[1]).all():
+            if torch.isclose(v2,test_edge[0],atol=1e-1).all() and torch.isclose(v1,test_edge[1],atol=1e-1).all():
                 continue
             intersection, intersect = self._line_intersection(test_edge,[v1,v2])
             if intersect:
@@ -449,8 +475,11 @@ class ProjectorPoints(nn.Module):
         return points[1:-1], normal_vector
     
     def _num_points(self,start_point,end_point):
+        distance = torch.norm(end_point - start_point)
+        num_points = self.points_per_unit * distance
+        return int(torch.ceil(num_points).item())
         #### update this function
-        return 100
+        # return 4
     
     def _extract_unique_edges(self,faces):
     # Initialize an empty set for edges
@@ -580,6 +609,28 @@ class ProjectorPoints(nn.Module):
         # Add distance to plane
         return points
 
+    def _orthogonal_projection(self, vertices: Tensor) -> Tensor:
+        """
+        Orthogonally project 3D vertices with custom x and y ranges.
+
+        Args:
+            vertices (Tensor): Tensor of shape (N, 3) representing 3D coordinates of vertices.
+
+        Returns:
+            Tensor: Tensor of shape (N, 2) representing 2D coordinates of projected vertices.
+        """
+        x_min, x_max = self.x_range
+        y_max, y_min = self.y_range  # Flip the y-axis to match the image coordinates
+
+        x_scale = (x_max - x_min) / self.image_size[1]
+        y_scale = (y_max - y_min) / self.image_size[0]
+
+        projected_vertices = vertices[:, :2].clone()
+        projected_vertices[:, 0] = (projected_vertices[:, 0] - x_min) / x_scale
+        projected_vertices[:, 1] = (projected_vertices[:, 1] - y_min) / y_scale
+
+        return projected_vertices
+
     def project_to_2d(self, points):  ### this isn't giving correct results
         # Normalize the view direction
         view_direction = self.view_axis / torch.norm(self.view_axis)
@@ -683,15 +734,20 @@ def plot_2d_projection(point_collections: PointCollection, plot_normals=False,ax
     for i, point_collection in enumerate(point_collections):
         if len(point_collection) == 0:
             continue
-        tensor = point_collection.get_points_and_normals_tensor()
+        try:
+            tensor = point_collection.get_points_and_normals_tensor()
+        except:
+            tensor = point_collection
         if tensor.dim() != 3 or tensor.size(1) != 2:
-            raise ValueError("Each tensor must be of shape (N, 2, 2) where N is the number of points.")
-        
-        pointx = tensor[:, 0, 0].detach().cpu().numpy()
-        pointy = tensor[:,0, 1].detach().cpu().numpy()
-        normalx = tensor[:, 1, 0].detach().cpu().numpy()
-        normaly = tensor[:, 1, 1].detach().cpu().numpy()
-        # Plot the points # plot_2d_projection.counter % 20
+            pointx = tensor[:, 0].detach().cpu().numpy()
+            pointy = tensor[:, 1].detach().cpu().numpy()
+            # raise ValueError("Each tensor must be of shape (N, 2, 2) where N is the number of points.")
+        else:
+            pointx = tensor[:, 0, 0].detach().cpu().numpy()
+            pointy = tensor[:,0, 1].detach().cpu().numpy()
+            normalx = tensor[:, 1, 0].detach().cpu().numpy()
+            normaly = tensor[:, 1, 1].detach().cpu().numpy()
+            # Plot the points # plot_2d_projection.counter % 20
         if ax == None:
             plt.scatter(pointx, pointy, color=colours(i), label=f'Tensor {i+1}',s=2)
             plt.xlabel('X')

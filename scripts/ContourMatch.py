@@ -8,7 +8,7 @@ from crystalsizer3d.util.utils import print_args, to_numpy, init_tensor
 import torch.nn.functional as F
 import torchvision.transforms as transforms
 from crystal_points import ProjectorPoints
-from plot_mesh import multiplot, overlay_plot
+from plot_mesh import multiplot, overlay_plot, plot_sampled_points_with_intensity
 import torch.optim as optim
 from crystalsizer3d.scene_components.scene import Scene
 import cv2
@@ -17,7 +17,14 @@ from crystalsizer3d.projector import Projector
 from edge_detection import load_rcf
 from scipy.ndimage import distance_transform_edt
 from torchvision.transforms.functional import to_tensor
-import matplotlib.pyplot as plt
+from scipy.ndimage import gaussian_filter
+
+from torch.utils.tensorboard import SummaryWriter
+import io
+
+# import matplotlib.pyplot as plt
+from PIL import Image
+
 if USE_CUDA:
     device = torch.device('cuda')
 else:
@@ -39,19 +46,24 @@ class ContourDistanceNormalLoss(nn.Module):
         
         # Initialize a tensor to accumulate the losses
         losses = []
+        distances = []
         
         for i in range(N):
             # Extract the point and the normal vector for this iteration
             ref_point = points.get_point(i)
             
-            line_points = self.sample_points_along_line_full_image(ref_point, 100, distance_image.shape[-2:])
+            line_points = self.sample_points_along_line_full_image(ref_point, 1000, distance_image.shape[-2:])
             
             
             # # sampled_values = self.sample_image_along_line(distance_image,line_points)
             reference_value = self.points_in_image(ref_point.point.unsqueeze(0), distance_image)
             
-            _, nearest_minimum_value = self.find_nearest_local_minimum(distance_image, line_points, ref_point.point)
-
+            nearest_minimum_posistion, nearest_minimum_value = self.find_nearest_local_minimum(distance_image, line_points, ref_point.point)
+            if nearest_minimum_value == None:
+                continue
+            # get the distance to the closest peak
+            distance = nearest_minimum_posistion - ref_point.point
+            ref_point.set_distance(distance)
             # # Compute the mean squared error between the sampled values and the reference value
             loss = F.mse_loss(nearest_minimum_value.squeeze(), reference_value.squeeze())
             # loss = F.mse_loss(reference_point, reference_point)
@@ -124,18 +136,18 @@ class ContourDistanceNormalLoss(nn.Module):
         # We need to find t such that p(t) lies on the image boundary
 
         # Handle intersections with left (x=0) and right (x=width-1) boundaries
-        if direction_vector[0] != 0:
+        if torch.isclose(direction_vector[0], torch.tensor(0.0),atol=1e-3):
+            t_left, t_right = -max_float, max_float
+        else:
             t_left = (0 - point[0]) / direction_vector[0]  # Intersection with left boundary
             t_right = (width - 1 - point[0]) / direction_vector[0]  # Intersection with right boundary
-        else:
-            t_left, t_right = -max_float, max_float
-
+        
         # Handle intersections with top (y=0) and bottom (y=height-1) boundaries
-        if direction_vector[1] != 0:
+        if torch.isclose(direction_vector[1], torch.tensor(0.0),atol=1e-3):
+            t_top, t_bottom = -max_float, max_float
+        else:
             t_top = (0 - point[1]) / direction_vector[1]  # Intersection with top boundary
             t_bottom = (height - 1 - point[1]) / direction_vector[1]  # Intersection with bottom boundary
-        else:
-            t_top, t_bottom = -max_float, max_float
 
         # Take the maximum of left/top and the minimum of right/bottom
         t_min = max(t_left, t_top)
@@ -185,7 +197,7 @@ class ContourDistanceNormalLoss(nn.Module):
         # self.plot_slice(image_values) # debug
         
         if local_minima_indices == None:
-            return None  # No local minima found
+            return None, None  # No local minima found
 
         # Calculate distances from the reference point to each local minimum
         distances = torch.norm(sampled_points[local_minima_indices] - reference_point)#, dim=1)
@@ -194,6 +206,7 @@ class ContourDistanceNormalLoss(nn.Module):
         nearest_minimum_index = torch.argmin(distances)
         nearest_minimum_position = sampled_points[local_minima_indices]
         nearest_minimum_value = image_values[local_minima_indices]
+        plot_sampled_points_with_intensity(image, sampled_points, image_values, reference_point, nearest_minimum_position)
         return nearest_minimum_position, nearest_minimum_value
     
     def find_local_minima(self,tensor):
@@ -318,49 +331,49 @@ class ContourDistanceNormalLoss(nn.Module):
         loss = torch.mean(min_distances_a_to_b) + torch.mean(min_distances_b_to_a)
         return loss
     
-    def plot_min_line(self, image, sampled_points, reference_point):
-        # Create a figure and axis
-        plt.figure(figsize=(6, 6))
+    # def plot_min_line(self, image, sampled_points, reference_point):
+    #     # Create a figure and axis
+    #     plt.figure(figsize=(6, 6))
         
-        plt.imshow(image.squeeze(0).squeeze(0).cpu().detach().numpy(), cmap='gray', alpha=0.5)
+    #     plt.imshow(image.squeeze(0).squeeze(0).cpu().detach().numpy(), cmap='gray', alpha=0.5)
 
-        # Plot the single point
-        plt.scatter(reference_point[0].detach().cpu().detach().numpy(), reference_point[1].cpu().detach().numpy(), color='red', label='Single Point', s=30)
+    #     # Plot the single point
+    #     plt.scatter(reference_point[0].detach().cpu().detach().numpy(), reference_point[1].cpu().detach().numpy(), color='red', label='Single Point', s=30)
 
-        # Plot the list of points
-        plt.scatter(sampled_points[:, 0].cpu().detach().numpy(), sampled_points[:, 1].cpu().detach().numpy(), color='blue', label='List of Points', s=10)
+    #     # Plot the list of points
+    #     plt.scatter(sampled_points[:, 0].cpu().detach().numpy(), sampled_points[:, 1].cpu().detach().numpy(), color='blue', label='List of Points', s=10)
 
-        # Add grid lines, labels, and a legend
-        plt.axhline(0, color='black',linewidth=0.5)
-        plt.axvline(0, color='black',linewidth=0.5)
-        # plt.xlim(-5, 5)
-        # plt.ylim(-5, 5)
-        plt.title("Tensor as Image, Single Point, and List of Points")
-        plt.colorbar(plt.imshow(image.squeeze(0).squeeze(0).cpu().detach().numpy(), cmap='gray', alpha=0.5), label="Image Intensity")
-        plt.legend()
+    #     # Add grid lines, labels, and a legend
+    #     plt.axhline(0, color='black',linewidth=0.5)
+    #     plt.axvline(0, color='black',linewidth=0.5)
+    #     # plt.xlim(-5, 5)
+    #     # plt.ylim(-5, 5)
+    #     plt.title("Tensor as Image, Single Point, and List of Points")
+    #     plt.colorbar(plt.imshow(image.squeeze(0).squeeze(0).cpu().detach().numpy(), cmap='gray', alpha=0.5), label="Image Intensity")
+    #     plt.legend()
 
-        # Show the plot
-        plt.show()
+    #     # Show the plot
+    #     plt.show()
     
-    def plot_slice(self,tensor_1d):
-        plt.figure(figsize=(6, 4))
+    # def plot_slice(self,tensor_1d):
+    #     plt.figure(figsize=(6, 4))
         
-        derivative = torch.diff(tensor_1d.squeeze(1))
-        derivative2n = torch.diff(derivative)
-        plt.plot(tensor_1d.cpu().detach().numpy(), marker='o', linestyle='-', color='b', label='1D Tensor')
+    #     derivative = torch.diff(tensor_1d.squeeze(1))
+    #     derivative2n = torch.diff(derivative)
+    #     plt.plot(tensor_1d.cpu().detach().numpy(), marker='o', linestyle='-', color='b', label='1D Tensor')
         
-        plt.plot(derivative.cpu().detach().numpy(), marker='o', linestyle='-', color='r', label='1D Tensor')
+    #     plt.plot(derivative.cpu().detach().numpy(), marker='o', linestyle='-', color='r', label='1D Tensor')
 
-        plt.plot(derivative2n.cpu().detach().numpy(), marker='o', linestyle='-', color='g', label='1D Tensor')
-        # Add title and labels
-        plt.title("Plot of 1D Tensor")
-        plt.xlabel("Index")
-        plt.ylabel("Value")
-        plt.grid(True)
-        plt.legend()
+    #     plt.plot(derivative2n.cpu().detach().numpy(), marker='o', linestyle='-', color='g', label='1D Tensor')
+    #     # Add title and labels
+    #     plt.title("Plot of 1D Tensor")
+    #     plt.xlabel("Index")
+    #     plt.ylabel("Value")
+    #     plt.grid(True)
+    #     plt.legend()
 
-        # Show the plot
-        plt.show()
+    #     # Show the plot
+    #     plt.show()
     
 TEST_CRYSTALS = {
     'cube': {
@@ -371,7 +384,7 @@ TEST_CRYSTALS = {
         'scale': 1,
         'origin': [0.5, 0, 0],
         'distances': [1., 1., 1.],
-        'rotation': [0.3, 0.3, 0.3],
+        'rotation': [0.2, 0.3, 0.3],
         'material_ior': 1.2,
         'material_roughness': 1.5#0.01
     },
@@ -383,7 +396,7 @@ TEST_CRYSTALS = {
         'scale': 1,
         'origin': [0.5, 0, 0],
         'distances': [1.3, 1.0, 1.0],
-        'rotation': [0.3, 0.3, 0.3],
+        'rotation': [0.2, 0.3, 0.3],
         'material_ior': 1.2,
         'material_roughness': 1.5#0.01
     },
@@ -409,7 +422,8 @@ TEST_CRYSTALS = {
         'lattice_angles': [np.pi / 2, np.pi / 2, np.pi / 2],
         'miller_indices': [(0, 0, 1), (0, 0, -1), (1, 1, 1), (1, 1, -1), (0, 1, 1), (0, 1, -1), (1, 0, 0)],
         'distances': [0.53, 0.50, 1.13, 1.04, 1.22, 1.00, 1.30],
-        'rotation': [0.3, 0.3, 0.3],
+        # 'rotation': [0.3, 0.3, 0.3],
+        'rotation': [0.0, 0.0, 0.0],
         'point_group_symbol': '222',
         'scale': 3.0,
     },
@@ -418,11 +432,21 @@ TEST_CRYSTALS = {
         'lattice_angles': [np.pi / 2, np.pi / 2, np.pi / 2],
         'miller_indices': [(0, 0, 1), (0, 0, -1), (1, 1, 1), (1, 1, -1), (0, 1, 1), (0, 1, -1), (1, 0, 0)],
         'distances': [0.6, 0.4, 1.0, 1.01, 1.28, 0.8, 1.00],
-        'rotation': [0.3, 0.3, 0.3],
+        # 'rotation': [0.3, 0.3, 0.3],
+        'rotation': [0.0, 0.0, 0.0],
         'point_group_symbol': '222',
         'scale': 3.0,
     },
 }
+
+def log_plot_to_tensorboard(writer, tag, figure, global_step):
+    buf = io.BytesIO()
+    figure.savefig(buf, format='png')
+    buf.seek(0)
+    image = Image.open(buf)
+    image = transforms.ToTensor()(image)
+    writer.add_image(tag, image, global_step)
+    buf.close()
 
 def generate_synthetic_crystal(
         crystal,
@@ -477,6 +501,8 @@ def generate_synthetic_crystal(
         image_size=(res, res),
         zoom=zoom,
         transparent_background=True,
+        colour_facing_towards= [1.0,1.0,1.0],
+        colour_facing_away = [1.0,1.0,1.0]
     )
     img_overlay = to_numpy(projector.image * 255).astype(np.uint8).squeeze().transpose(1, 2, 0)
     img_overlay[:, :, 3] = (img_overlay[:, :, 3] * 0.5).astype(np.uint8)
@@ -537,7 +563,8 @@ def run():
     rcf_dir = save_dir / 'rcf_featuremaps'
     save_dir.mkdir(parents=True, exist_ok=True)
     rcf_dir.mkdir(parents=True, exist_ok=True)
-    
+    writer = SummaryWriter(log_dir=str(save_dir / 'tensorboard_logs'))
+
     # crystal_tar = Crystal(**TEST_CRYSTALS['cube'])
     crystal_tar = Crystal(**TEST_CRYSTALS['alpha'])
     crystal_tar.scale.data= init_tensor(1.2, device=crystal_tar.scale.device)
@@ -551,8 +578,49 @@ def run():
         crystal_tar,
         save_dir,
     )
-    f_map = f_map.to(device)
-    dist_map = dist_map.to(device)
+    
+    #convert image overlay
+    overlay_pil = Image.fromarray(img_overlay.astype(np.uint8))
+    overlay_pil.save(save_dir / 'overlay_image.png')
+    
+    img_gray = np.dot(img_overlay[..., :3], [0.2989, 0.5870, 0.1140])
+
+    # Step 2: Invert the grayscale image
+    img_inverted = 255 - img_gray # dont invert #  
+
+    image_pil = Image.fromarray(img_inverted.astype(np.uint8))
+    image_pil.save(save_dir / 'inverted_image.png')
+
+    # Save the distance transform
+    # feature_map[feature_map < 0.2] = 0
+    # img = img.resize((200, 200))
+    img_inverted = np.array(img_inverted).astype(np.float32)/255
+    img_inverted = gaussian_filter(img_inverted,sigma=2)
+    img_inverted = (img_inverted - img_inverted.min()) / (img_inverted.max() - img_inverted.min())
+    image_pil = Image.fromarray((img_inverted*255).astype(np.uint8))
+    image_pil.save(save_dir / 'inverted__step_image.png')
+    thresh = 0.95
+    img_inverted[img_inverted < thresh] = 0
+    img_inverted[img_inverted >= thresh] = 1
+    dist = distance_transform_edt(1-img_inverted)  #, metric='taxicab')
+    dist = dist.astype(np.float32)
+    dist = (dist - dist.min()) / (dist.max() - dist.min())
+    dist = 1-dist # invert again
+    distance_map_tensor = to_tensor(dist).squeeze(0)
+    Image.fromarray((dist * 255).astype(np.uint8)).save(save_dir / 'distance_map.png')
+    dist_map = dist
+
+
+
+    # Step 3: Convert to tensor
+    img_tensor = distance_map_tensor
+
+
+    # Normalize the tensor to the range [0, 1] if needed
+    img_tensor = img_tensor / 255.0
+    img_tensor = img_tensor.unsqueeze(0).unsqueeze(0).to(device)
+    # f_map = f_map.to(device)
+    # dist_map = dist_map.to(device)
     
     projector_tar = ProjectorPoints(crystal_tar,
                                 external_ior=1.333,
@@ -562,13 +630,22 @@ def run():
     points_tar = projector_tar.project()
 
 
-    
     # crystal_opt = Crystal(**TEST_CRYSTALS['cube_test'])
-    crystal_opt = Crystal(**TEST_CRYSTALS['alpha_test'])
+    # crystal_opt = Crystal(**TEST_CRYSTALS['alpha_test'])
+    crystal_opt = crystal_tar.clone()
     crystal_opt.scale.data= init_tensor(1.2, device=crystal_opt.scale.device)
     crystal_opt.origin.data[:2] = torch.tensor([0, 0], device=crystal_opt.origin.device)
     crystal_opt.origin.data[2] -= crystal_opt.vertices[:, 2].min()
-    v, f = crystal_opt.build_mesh()
+    crystal_tar_distances = crystal_tar.distances
+    # Define the percentage range (e.g., ±5%)
+    percentage = 0.05
+    # Generate random values in the range [-percentage, +percentage]
+    random_factors = torch.randn_like(crystal_opt.distances,device=crystal_opt.scale.device)  * percentage
+    # Add the random amount to each value in the tensor
+    modified_distances = crystal_tar_distances * (1 + random_factors)
+    crystal_opt.distances.data = init_tensor(modified_distances, device=crystal_opt.scale.device)
+    # crystal_opt.distances = modified_distances
+    v, f = crystal_opt.build_mesh(distances=crystal_opt.distances)
     crystal_opt.to(device)
 
     projector_opt = ProjectorPoints(crystal_opt,
@@ -585,63 +662,70 @@ def run():
     model = ContourDistanceNormalLoss()
     model.to(device)
 
-    optimizer = optim.Adam(params['distances'], lr=0.01)
+    #inital 
+    img_int = img_tensor.squeeze(0).squeeze(0).detach().cpu().numpy()
+    multiplot(img_int,points_opt,save_dir,'inital')
+
+    optimizer = optim.Adam(params['distances'], lr=1e-2)
     target_dist = crystal_tar.distances
     # prev_dist = crystal_opt.distances
     # Training loop
-    with torch.autograd.detect_anomaly():
-        for step in range(100):  # Run for 100 iterations
-            print(f"Step {step}")
-            # step.to(device)
-            optimizer.zero_grad()  # Zero the gradients
-            
-            # Convert polar to Cartesian coordinates
-            v, f = crystal_opt.build_mesh()
-            
-            projector_opt = ProjectorPoints(crystal_opt,
-                                zoom = zoom,
-                                image_size=f_map.shape[-2:],
-                                external_ior=1.333,)
-            points_opt = projector_opt.project()
-            
-            dist = crystal_opt.distances
-            # a = points_opt.get_all_points_tensor()
-            
-            # Forward pass: get the pixel value at the current point (x, y)
-            loss = model(points_opt, dist_map)  # Call model's forward method with Cartesian coordinates
-            # Perform backpropagation (minimize the pixel value)
-            
-            loss.backward(retain_graph=True)
+    # with torch.autograd.detect_anomaly(False):
+    for step in range(100):  # Run for 100 iterations
+        print(f"Step {step}")
+        # step.to(device)
+        optimizer.zero_grad()  # Zero the gradients
+        
+        # Convert polar to Cartesian coordinates
+        v, f = crystal_opt.build_mesh()
+        
+        projector_opt = ProjectorPoints(crystal_opt,
+                            zoom = zoom,
+                            image_size=f_map.shape[-2:],
+                            external_ior=1.333,)
+        points_opt = projector_opt.project()
+        
+        dist = crystal_opt.distances
+        # a = points_opt.get_all_points_tensor()
+        # print(f"points tensor {a}")
+        # Forward pass: get the pixel value at the current point (x, y)
+        loss = model(points_opt, img_tensor)  # Call model's forward method with Cartesian coordinates
+        # Perform backpropagation (minimize the pixel value)
+        
+        loss.backward(retain_graph=True)
 
-            # Check if the gradients for r and theta are non-zero
-            print(f"Step {step}: {projector_opt.distances}")
+        # Check if the gradients for r and theta are non-zero
+        print(f"Step {step}: {projector_opt.distances}")
+        
+        # Check if gradients are non-zero before optimizer step
+        # if dist.grad.abs() < 1e-6:
+        #     print(f"Warning: One of the gradients is very small at step {step}")
+        
+        # Update the radial parameters
+        for group in optimizer.param_groups:
+            print(group)
             
-            # Check if gradients are non-zero before optimizer step
-            # if dist.grad.abs() < 1e-6:
-            #     print(f"Warning: One of the gradients is very small at step {step}")
-            
-            # Update the radial parameters
-            for group in optimizer.param_groups:
-                print(group)
-                
-            if step % 10 == 0:
-                # projector = Projector(
-                #     crystal=crystal_opt,
-                #     external_ior=1.333,
-                #     image_size=f_map.shape[-2:],
-                #     zoom=zoom,
-                #     transparent_background=True,
-                #     multi_line=True,
-                # )
-                # img_overlay = to_numpy(projector.image * 255).astype(np.uint8).squeeze().transpose(1, 2, 0)
-                # img_overlay[:, :, 3] = (img_overlay[:, :, 3] * 0.5).astype(np.uint8)
-                # overlay_plot(img,points_opt,save_dir,'progress_' + str(step))
-                multiplot(img,points_opt,save_dir,'progress_' + str(step))
-            
-            optimizer.step()
+        if step % 1 == 0:
+            print("plotting")
+            # projector = Projector(
+            #     crystal=crystal_opt,
+            #     external_ior=1.333,
+            #     image_size=f_map.shape[-2:],
+            #     zoom=zoom,
+            #     transparent_background=True,
+            #     multi_line=True,
+            # )
+            # img_overlay = to_numpy(projector.image * 255).astype(np.uint8).squeeze().transpose(1, 2, 0)
+            # img_overlay[:, :, 3] = (img_overlay[:, :, 3] * 0.5).astype(np.uint8)
+            # overlay_plot(img,points_opt,save_dir,'progress_' + str(step))
+            multiplot(img_overlay,points_opt,save_dir,'progress_' + str(step).zfill(3),plot_loss_dist=True, writer=writer,global_step=step)
+        
+        optimizer.step()
 
-            # Print the updated polar coordinates and the current loss
-            print(f"Step {step}: loss: {loss}")
+        # Log the loss value
+        writer.add_scalar('Loss', loss.item(), step)
+        # Print the updated polar coordinates and the current loss
+        print(f"Step {step}: loss: {loss}")
 
 
 if __name__ == "__main__":
