@@ -42,8 +42,11 @@ from crystalsizer3d.nn.manager import Manager
 from crystalsizer3d.nn.models.rcf import RCF
 from crystalsizer3d.projector import ProjectedVertexKey, Projector
 from crystalsizer3d.refiner.denoising import denoise_image
+from crystalsizer3d.refiner.keypoint_detection import find_keypoints, to_absolute_coordinates
 from crystalsizer3d.scene_components.scene import Scene
 from crystalsizer3d.scene_components.utils import orthographic_scale_factor
+from crystalsizer3d.util.convergence_detector import ConvergenceDetector
+from crystalsizer3d.util.image_helpers import save_img, save_img_grid, save_img_with_keypoint_markers
 from crystalsizer3d.util.plots import _add_bars, plot_material, plot_transformation
 from crystalsizer3d.util.utils import get_seed, gumbel_sigmoid, hash_data, init_tensor, is_bad, set_seed, to_multiscale, \
     to_numpy
@@ -62,10 +65,11 @@ class Refiner:
     loss: float = 0.
 
     X_target: Union[Tensor, List[Tensor]]
+    X_target_wis: Union[Tensor, List[Tensor]]
     X_target_denoised: Optional[Union[Tensor, List[Tensor]]]
+    X_target_denoised_wis: Optional[Union[Tensor, List[Tensor]]]
     X_target_aug: Union[Tensor, List[Tensor]]
     X_target_patches: Optional[Tensor]
-    X_target_keypoints: Optional[Tensor] = None
 
     X_pred: Tensor = None
     X_pred_patches: Optional[Tensor] = None
@@ -85,10 +89,17 @@ class Refiner:
     rcf_feats_og: Optional[List[Tensor]]
     rcf_feats: Optional[List[Tensor]]
 
+    convergence_detector: ConvergenceDetector
+
     def __init__(
             self,
             args: RefinerArgs,
-            output_dir: Optional[Path] = None,
+            output_dir: Path | None = None,
+            output_dir_base: Path | None = None,
+            destroy_denoiser: bool = True,
+            destroy_keypoint_detector: bool = True,
+            destroy_predictor: bool = True,
+            do_init: bool = True
     ):
         self.args = args
 
@@ -97,19 +108,25 @@ class Refiner:
             set_seed(self.args.seed)
 
         # Set up the log directory
-        self._init_save_dir(output_dir)
+        self.init_save_dir(output_dir, output_dir_base)
+
+        # Whether to destroy the models after use
+        self.destroy_denoiser = destroy_denoiser
+        self.destroy_keypoint_detector = destroy_keypoint_detector
+        self.destroy_predictor = destroy_predictor
 
         # Load the optimisation targets
-        self._init_X_target()
-        self._init_X_target_denoised()
-        self._init_Y_target()
+        if do_init:
+            self.init_X_target()
+            self.init_X_target_denoised()
+            self._init_Y_target()
 
     def __getattr__(self, name: str):
         """
         Lazy loading of the components.
         """
         if name == 'save_dir':
-            self._init_save_dir()
+            self.init_save_dir()
             return self.save_dir
         elif name == 'manager':
             self._init_manager()
@@ -139,7 +156,7 @@ class Refiner:
             self.metric_keys = self._init_metrics()
             return self.metric_keys
         elif name == 'tb_logger':
-            self._init_tb_logger()
+            self.init_tb_logger()
             return self.tb_logger
         elif name == 'device':
             self.device = self.manager.device
@@ -152,52 +169,76 @@ class Refiner:
             return getattr(self, name)
         raise AttributeError(f"'{self.__class__.__name__}' object has no attribute '{name}'")
 
-    def _init_save_dir(self, output_dir: Optional[Path] = None):
+    def get_parameter_vector(self) -> Tensor:
+        """
+        Return a vector of the parameters.
+        """
+        return torch.concatenate([
+            self.crystal.distances.detach().cpu(),
+            self.crystal.origin.detach().cpu(),
+            self.crystal.scale[None, ...].detach().cpu(),
+            self.crystal.rotation.detach().cpu(),
+            self.crystal.material_roughness[None, ...].detach().cpu(),
+            self.crystal.material_ior[None, ...].detach().cpu(),
+            self.scene.light_radiance.detach().cpu(),
+            self.conj_switch_probs.detach().cpu()
+        ])
+
+    def init_save_dir(self, output_dir: Path | None = None, output_dir_base: Path | None = None):
         """
         Set up the output directory.
         """
         logger.info('Initialising output directory.')
-
-        if self.args.image_path is None:
-            target_str = str(self.args.ds_idx)
-        else:
-            target_str = self.args.image_path.stem
-        model_str = self.args.predictor_model_path.stem[:4] + \
-                    (f'_{self.args.denoiser_model_path.stem[:4]}'
-                     if self.args.denoiser_model_path is not None else '') + \
-                    (f'_{self.args.keypoints_model_path.stem[:4]}'
-                     if self.args.keypoints_model_path is not None and self.args.use_keypoints else '')
-        base_params_str = (f'spp{self.args.spp}' +
-                           f'_res{self.args.working_image_size}' +
-                           (f'_ms' if self.args.multiscale else '') +
-                           f'_{self.args.opt_algorithm}')
-        if output_dir is None:
-            base_dir = LOGS_PATH
-        else:
-            base_dir = output_dir
-        base_dir = base_dir / model_str / target_str / base_params_str
-        dir_name = hash_data(self.args.to_dict())
-
-        # Check for existing directory
+        assert not (output_dir is not None and output_dir_base is not None), \
+            'Can\'t set both the output_dir and the output_dir_base.'
         copy_dirs = ['cache', 'initial_prediction', 'denoise_patches', 'keypoints']
-        if base_dir.exists():
-            pattern = re.compile(rf'{dir_name}.*')
-            existing_dirs = [d for d in base_dir.iterdir() if pattern.match(d.name)]
-            if len(existing_dirs) > 0:
-                logger.warning(f'Found existing directory: {existing_dirs[0]}. Overwriting.')
-                for d in copy_dirs:
-                    if (existing_dirs[0] / d).exists():
-                        shutil.move(existing_dirs[0] / d, base_dir / f'{d}_tmp')
-                shutil.rmtree(existing_dirs[0])
 
-        # Make the new save directory
-        self.save_dir = base_dir / (dir_name + f'_{START_TIMESTAMP}')
-        self.save_dir.mkdir(parents=True, exist_ok=True)
-        for d in copy_dirs:
-            if (base_dir / f'{d}_tmp').exists():
-                shutil.move(base_dir / f'{d}_tmp', self.save_dir / d)
+        if output_dir is None:
+            if self.args.image_path is None:
+                target_str = str(self.args.ds_idx)
             else:
-                (self.save_dir / d).mkdir()
+                target_str = self.args.image_path.stem
+            model_str = self.args.predictor_model_path.stem[:4] + \
+                        (f'_{self.args.denoiser_model_path.stem[:4]}'
+                         if self.args.denoiser_model_path is not None else '') + \
+                        (f'_{self.args.keypoints_model_path.stem[:4]}'
+                         if self.args.keypoints_model_path is not None and self.args.use_keypoints else '')
+            base_params_str = (f'spp{self.args.spp}' +
+                               f'_res{self.args.rendering_size}' +
+                               (f'_ms' if self.args.multiscale else '') +
+                               f'_{self.args.opt_algorithm}')
+            if output_dir_base is None:
+                base_dir = LOGS_PATH
+            else:
+                base_dir = output_dir_base
+            base_dir = base_dir / model_str / target_str / base_params_str
+            dir_name = hash_data(self.args.to_dict())
+
+            # Check for existing directory
+            if base_dir.exists():
+                pattern = re.compile(rf'{dir_name}.*')
+                existing_dirs = [d for d in base_dir.iterdir() if pattern.match(d.name)]
+                if len(existing_dirs) > 0:
+                    logger.warning(f'Found existing directory: {existing_dirs[0]}. Overwriting.')
+                    for d in copy_dirs:
+                        if (existing_dirs[0] / d).exists():
+                            shutil.move(existing_dirs[0] / d, base_dir / f'{d}_tmp')
+                    shutil.rmtree(existing_dirs[0])
+
+            # Make the new save directory
+            self.save_dir = base_dir / (dir_name + f'_{START_TIMESTAMP}')
+            self.save_dir.mkdir(parents=True, exist_ok=True)
+            for d in copy_dirs:
+                if (base_dir / f'{d}_tmp').exists():
+                    shutil.move(base_dir / f'{d}_tmp', self.save_dir / d)
+                else:
+                    (self.save_dir / d).mkdir()
+
+        else:
+            self.save_dir = output_dir
+            self.save_dir.mkdir(parents=True, exist_ok=True)
+            for d in copy_dirs:
+                (self.save_dir / d).mkdir(exist_ok=True)
 
         # Save arguments to yml file
         with open(self.save_dir / 'args.yml', 'w') as f:
@@ -227,7 +268,7 @@ class Refiner:
         """
         self.projector = Projector(
             crystal=self.crystal,
-            image_size=(self.args.working_image_size, self.args.working_image_size),
+            image_size=(self.args.rendering_size, self.args.rendering_size),
             zoom=orthographic_scale_factor(self.scene),
             multi_line=True,
             rtol=1e-2
@@ -346,28 +387,28 @@ class Refiner:
         if self.rcf is None:
             self.rcf_feats_og = None
         else:
-            model_input = self.X_target[None, ...].permute(0, 3, 1, 2)
+            model_input = self.X_target_wis[None, ...].permute(0, 3, 1, 2)
             self.rcf_feats_og = self.rcf(model_input, apply_sigmoid=False)
 
-    def _init_keypoints_model(self):
+    def _init_convergence_detector(self):
         """
-        Initialise the keypoints model.
+        Initialise the convergence detector.
         """
-        if self.args.use_keypoints:
-            assert self.args.keypoints_model_path.exists(), 'Keypoints model path does not exist!'
-        else:
-            self.keypoints_model = None
-            return
+        convergence_detector = ConvergenceDetector(
+            shape=(1 + len(self.get_parameter_vector()),),
+            tau_fast=self.args.convergence_tau_fast,
+            tau_slow=self.args.convergence_tau_slow,
+            threshold=self.args.convergence_threshold,
+            patience=self.args.convergence_patience
+        )
+        self.convergence_detector = convergence_detector
 
-        # Load the keypoints model
-        self.manager.load_network(self.args.keypoints_model_path, 'keypointdetector')
-
-        self.keypoints_model
-
-    def _resize_to_wis(self, X: Tensor) -> Tensor:
+    def _resize(self, X: Tensor, size: int | None = None) -> Tensor:
         """
         Resize the image to the working image size.
         """
+        if size is None:
+            size = self.args.rendering_size
         trim_channel_dim = False
         trim_batch_dim = False
         if X.ndim == 2:
@@ -382,8 +423,8 @@ class Refiner:
         if X.shape[-1] == 3:  # HWC
             X = X.permute(0, 3, 1, 2)
             out_hwc = True
-        if X.shape[-1] != self.args.working_image_size:
-            wis = (self.args.working_image_size, self.args.working_image_size)
+        if X.shape[-1] != size:
+            wis = (size, size)
             X = F.interpolate(
                 X,
                 size=wis,
@@ -398,7 +439,7 @@ class Refiner:
             X = X[0]
         return X
 
-    def _init_X_target(self):
+    def init_X_target(self):
         """
         Load the input image.
         """
@@ -406,8 +447,8 @@ class Refiner:
         if cache_path.exists():
             try:
                 X_target = torch.load(cache_path, weights_only=True)
-                X_target = self._resize_to_wis(X_target)
                 self.X_target = X_target.to(self.device)
+                self.X_target_wis = self._resize(self.X_target)
                 logger.info('Loaded target image.')
                 return
             except Exception as e:
@@ -415,11 +456,8 @@ class Refiner:
                 cache_path.unlink()
 
         if self.args.image_path is None:
-            metas, image, image_clean, Y_target = self.manager.ds.load_item(self.args.ds_idx)
-            if self.manager.dataset_args.use_clean_images:
-                X_target = to_tensor(image_clean)
-            else:
-                X_target = to_tensor(image)
+            metas, X_target, Y_target = self.manager.ds.load_item(self.args.ds_idx)
+            X_target = to_tensor(X_target)
 
         else:
             X_target = to_tensor(Image.open(self.args.image_path))
@@ -429,32 +467,31 @@ class Refiner:
             X_target = center_crop(X_target, min(X_target.shape[-2:]))
 
         # Resize target image to the working image size for inverse rendering
-        X_target = X_target.to(self.device)
-        wis = (self.args.working_image_size, self.args.working_image_size)
-        X_target = self._resize_to_wis(X_target)
         X_target = X_target.permute(1, 2, 0)  # HWC
+        self.X_target = X_target.to(self.device)
+        self.X_target_wis = self._resize(self.X_target)
 
         # Multiscale
         if self.args.multiscale:
+            raise NotImplementedError('Multiscale not implemented.')
             X_target = to_multiscale(X_target, self.blur)
             resolution_pyramid = [t.shape[0] for t in X_target[::-1]]
             logger.info(f'Resolution pyramid has {len(X_target)} levels: '
                         f'{", ".join([str(res) for res in resolution_pyramid])}')
 
         # Save the target image
-        torch.save(X_target, cache_path)
-        self.X_target = X_target
+        torch.save(self.X_target, cache_path)
 
-    def _init_X_target_denoised(self):
+    def init_X_target_denoised(self):
         """
         Generate or load the denoised target.
         """
         cache_path = self.save_dir / 'cache' / 'X_target_denoised.pt'
         if cache_path.exists():
             try:
-                X_target_denoised = torch.load(cache_path, weights_only=True)
-                X_target_denoised = self._resize_to_wis(X_target_denoised)
-                self.X_target_denoised = X_target_denoised.to(self.device)
+                X_target_dn = torch.load(cache_path, weights_only=True)
+                self.X_target_denoised = X_target_dn.to(self.device)
+                self.X_target_denoised_wis = self._resize(self.X_target_denoised)
                 logger.info('Loaded denoised target image.')
                 return
             except Exception as e:
@@ -470,7 +507,6 @@ class Refiner:
 
         # If no denoiser is set, return here
         if self.manager.denoiser is None:
-            assert self.args.initial_pred_from != 'denoised', 'No denoiser set, so can\'t predict using a denoised image'
             return None
 
         # Denoise the input image if a denoiser is available
@@ -481,31 +517,28 @@ class Refiner:
                 X=self.X_target.permute(2, 0, 1),
                 n_tiles=self.args.denoiser_n_tiles,
                 overlap=self.args.denoiser_tile_overlap,
+                oversize_input=self.args.denoiser_oversize_input,
+                max_img_size=self.args.denoiser_max_img_size,
                 batch_size=self.args.denoiser_batch_size,
                 return_patches=True
             )
 
             # Resize target image to the working image size for inverse rendering
-            X_denoised = self._resize_to_wis(X_denoised)
             X_denoised = X_denoised.permute(1, 2, 0)
+            X_denoised_wis = self._resize(X_denoised)
 
         # Save the denoiser output (and input)
-        X_img = Image.fromarray(to_numpy(self.X_target * 255).astype(np.uint8))
-        X_img.save(save_dir / 'X_original.png')
-        X_denoised_img = Image.fromarray(to_numpy(X_denoised * 255).astype(np.uint8))
-        X_denoised_img.save(save_dir / 'X_denoised.png')
-        for i, (patch, patch_denoised, (x, y)) in enumerate(zip(X_patches, X_patches_denoised, patch_positions)):
-            patch_img = Image.fromarray(to_numpy(patch.permute(1, 2, 0) * 255).astype(np.uint8))
-            patch_img.save(save_dir / f'{i:02d}_x={x}_y={y}.png')
-            patch_denoised_img = Image.fromarray(to_numpy(patch_denoised.permute(1, 2, 0) * 255).astype(np.uint8))
-            patch_denoised_img.save(save_dir / f'{i:02d}_x={x}_y={y}_denoised.png')
+        save_img(self.X_target, 'X_original', save_dir)
+        save_img(X_denoised, 'X_denoised', save_dir)
+        save_img_grid(X_patches, 'X_patches_original', save_dir)
+        save_img_grid(X_patches_denoised, 'X_patches_denoised', save_dir)
 
         # Destroy the denoiser to free up space
-        logger.info('Destroying denoiser to free up space.')
-        self.manager.denoiser = None
-        del self.manager.denoiser
-        torch.cuda.empty_cache()
-        gc.collect()
+        if self.destroy_denoiser:
+            logger.info('Destroying denoiser to free up space.')
+            self.manager.denoiser = None
+            torch.cuda.empty_cache()
+            gc.collect()
 
         # Multiscale
         if self.args.multiscale:
@@ -514,57 +547,7 @@ class Refiner:
         # Save the denoised target
         torch.save(X_denoised, cache_path)
         self.X_target_denoised = X_denoised
-
-    def _init_X_target_keypoints(self):
-        """
-        Generate or load the keypoints target.
-        """
-        if not self.args.use_keypoints:
-            self.X_target_keypoints = None
-            return
-
-        # Try to load the keypoints image from cache
-        cache_path = self.save_dir / 'cache' / f'X_keypoints_from_{self.args.keypoints_pred_from}.pt'
-        if cache_path.exists():
-            try:
-                X_kp = torch.load(cache_path, weights_only=True)
-                X_kp = self._resize_to_wis(X_kp)
-                self.X_target_keypoints = X_kp.to(self.device)
-                logger.info(f'Loaded target keypoints image from {cache_path}')
-                return
-            except Exception as e:
-                logger.warning(f'Failed to load cached keypoints image: {e}')
-                cache_path.unlink()
-
-        # Load the keypoint detector
-        self.manager.load_network(self.args.keypoints_model_path, 'keypointdetector')
-        assert self.manager.keypoint_detector is not None, 'No keypoints model loaded, so can\'t predict keypoints.'
-
-        # Predict the keypoints from the input image
-        logger.info('Predicting keypoints.')
-        X_target = self.X_target if self.args.keypoints_pred_from == 'original' else self.X_target_denoised
-        with torch.no_grad():
-            X_target = X_target.permute(2, 0, 1)[None, ...]  # (b, c, h, w)
-            kp_heatmap, wireframe = self.manager.detect_keypoints(X_target)
-
-        # Destroy the keypoint detector to free up space
-        logger.info('Destroying keypoint detector to free up space.')
-        self.manager.keypoint_detector = None
-        del self.manager.keypoint_detector
-        torch.cuda.empty_cache()
-        gc.collect()
-
-        # Resize keypoints image to the working image size for inverse rendering
-        X_kp = self._resize_to_wis(kp_heatmap)
-        X_kp = X_kp.squeeze()  # (h, w)
-
-        # Save the keypoints heatmap image
-        save_dir = self.save_dir / 'keypoints'
-        save_dir.mkdir(parents=True, exist_ok=True)
-        kp_img = Image.fromarray(to_numpy(X_kp * 255).astype(np.uint8))
-        kp_img.save(save_dir / f'heatmap_from_{self.args.keypoints_pred_from}.png')
-        torch.save(X_kp, cache_path)
-        self.X_target_keypoints = X_kp
+        self.X_target_denoised_wis = X_denoised_wis
 
     def _init_Y_target(self):
         """
@@ -614,56 +597,85 @@ class Refiner:
             requires_grad=True
         )
 
-    def _init_keypoint_targets(self):
+    def init_keypoint_targets(self):
         """
         Initialise the keypoint targets.
         """
         if not self.args.use_keypoints:
             self.keypoint_targets = None
             return
-        if self.X_target_keypoints is None:
-            self._init_X_target_keypoints()
 
-        # Find the peaks in the keypoints image
-        heatmap = to_numpy(self.X_target_keypoints)
-        coords = peak_local_max(
-            heatmap,
-            min_distance=self.args.keypoints_min_distance,
-            threshold_abs=self.args.keypoints_threshold,
-        )
-        coords = coords[:, ::-1].copy()  # Flip the coordinates to (y, x) to match the projector
+        # Try to load the keypoints data from cache
+        res = None
+        cache_path = self.save_dir / 'cache' / 'keypoints.pt'
+        if cache_path.exists():
+            try:
+                res = torch.load(cache_path, weights_only=True)
+                logger.info(f'Loaded target keypoints data from {cache_path}')
+            except Exception as e:
+                logger.warning(f'Failed to load cached keypoints data: {e}')
+                cache_path.unlink()
+
+        if res is None:
+            logger.info('No cached keypoints data found. Finding keypoints.')
+
+            # Load the keypoint detector
+            self.manager.load_network(self.args.keypoints_model_path, 'keypointdetector')
+            assert self.manager.keypoint_detector is not None, 'No keypoints model loaded, so can\'t predict keypoints.'
+
+            # Predict the keypoints from the input image
+            res = find_keypoints(
+                X_target=self.X_target,
+                X_target_denoised=self.X_target_denoised,
+                manager=self.manager,
+                oversize_input=self.args.keypoints_oversize_input,
+                max_img_size=self.args.keypoints_max_img_size,
+                batch_size=self.args.keypoints_batch_size,
+                min_distance=self.args.keypoints_min_distance,
+                threshold=self.args.keypoints_threshold,
+                exclude_border=self.args.keypoints_exclude_border,
+                blur_kernel_relative_size=self.args.keypoints_blur_kernel_relative_size,
+                n_patches=self.args.keypoints_n_patches,
+                patch_size=self.args.keypoints_patch_size,
+                patch_search_res=self.args.keypoints_patch_search_res,
+                attenuation_sigma=self.args.keypoints_attenuation_sigma,
+                max_attenuation_factor=self.args.keypoints_max_attenuation_factor,
+                low_res_catchment_distance=self.args.keypoints_low_res_catchment_distance,
+                return_everything=True,
+            )
+
+            # Save the keypoints data to cache
+            torch.save(res, cache_path)
+
+            # Destroy the keypoint detector to free up space
+            if self.destroy_keypoint_detector:
+                logger.info('Destroying keypoint detector to free up space.')
+                self.manager.keypoint_detector = None
+                torch.cuda.empty_cache()
+                gc.collect()
+
+        # Save the images and heatmaps
+        save_dir = self.save_dir / 'keypoints'
+        kp_img_args = dict(save_dir=save_dir, marker_type='o', suffix='')
+        save_img(res['X_lr_kp'], 'kp_low_res', save_dir)
+        save_img_with_keypoint_markers(self.X_target, res['Y_lr'], 'original_lowres_markers', **kp_img_args)
+        save_img_with_keypoint_markers(res['X_lr'], res['Y_lr'], 'denoised_lowres_markers', **kp_img_args)
+
+        # Save the patches as a grid
+        save_img_grid(res['X_patches'], 'patches_og', save_dir, coords=res['Y_patches'])
+        save_img_grid(res['X_patches_kp'], 'patches_og_kp', save_dir)
+        save_img_grid(res['X_patches_dn'], 'patches_dn', save_dir, coords=res['Y_patches_dn'])
+        save_img_grid(res['X_patches_dn_kp'], 'patches_dn_kp', save_dir)
+
+        # Plot the combined keypoints
+        save_img_with_keypoint_markers(self.X_target, res['Y_candidates_all'], 'Y_candidates_0_all', **kp_img_args)
+        save_img_with_keypoint_markers(self.X_target, res['Y_candidates_merged'], 'Y_candidates_1_merged',
+                                       **kp_img_args)
+        save_img_with_keypoint_markers(self.X_target, res['Y_candidates_final'], 'Y_candidates_2_final', **kp_img_args)
 
         # Save the keypoint targets
-        self.keypoint_targets = torch.from_numpy(coords).to(torch.float32) #.to(self.device)
-        logger.info(f'Found {len(coords)} keypoints in image.')
-
-        # Save the scaled keypoints image
-        save_dir = self.save_dir / 'keypoints'
-        heatmap_thresholded = heatmap.copy()
-        heatmap_thresholded[heatmap < self.args.keypoints_threshold] = 0
-        kp_img = Image.fromarray((heatmap_thresholded * 255).astype(np.uint8))
-        kp_img.save(save_dir / f'heatmap_thesh={self.args.keypoints_threshold}.png')
-
-        # Mark the detected keypoint locations on the image
-        for lbl, X in zip(
-                ['heatmap', 'X', 'X_denoised'],
-                [heatmap_thresholded, self.X_target, self.X_target_denoised]
-        ):
-            if X is None:
-                continue
-            if isinstance(X, Tensor):
-                img = to_numpy(X)
-            else:
-                img = X
-            fig, ax = plt.subplots()
-            ax.imshow(img)
-            ax.scatter(coords[:, 0], coords[:, 1], c='r', s=75, marker='x', linewidths=1)
-            ax.set_axis_off()
-            fig.savefig(
-                save_dir / f'{lbl}_keypoints_thesh={self.args.keypoints_threshold}_d={self.args.keypoints_min_distance}.png',
-                bbox_inches='tight', pad_inches=0
-            )
-            plt.close(fig)
+        self.keypoint_targets = res['Y_candidates_final_rel']
+        logger.info(f'Found {len(self.keypoint_targets)} keypoints in image.')
 
     def _init_optimiser(self):
         """
@@ -739,7 +751,7 @@ class Refiner:
 
         return metric_keys
 
-    def _init_tb_logger(self):
+    def init_tb_logger(self):
         """Initialise the tensorboard writer."""
         self.tb_logger = SummaryWriter(self.save_dir, flush_secs=5)
 
@@ -776,7 +788,7 @@ class Refiner:
             X_pred = torch.from_numpy(X_pred).permute(2, 0, 1).to(self.device)
             X_pred = F.interpolate(
                 X_pred[None, ...],
-                size=self.args.working_image_size,
+                size=self.args.rendering_size,
                 mode='bilinear',
                 align_corners=False
             )[0].permute(1, 2, 0)
@@ -810,29 +822,28 @@ class Refiner:
                 logger.warning(f'Failed to load cached initial prediction: {e}')
                 scene_path.unlink()
                 X_pred_path.unlink()
-
-        # Use either the original or denoised image as input
         logger.info('Predicting parameters.')
-        if self.args.initial_pred_from == 'original':
-            X_target = self.X_target
-        elif self.args.initial_pred_from == 'denoised':
-            assert self.X_target_denoised is not None, 'Denoised image not available.'
-            X_target = self.X_target_denoised
-        else:
-            raise ValueError(f'Invalid initial_pred_from: {self.args.initial_pred_from}')
 
-        # Convert to greyscale
-        X_target = X_target.mean(dim=-1, keepdim=True)
-        X_target = X_target.expand(-1, -1, 3)
+        # Use both the original and denoised image as inputs
+        X_target = torch.stack([self.X_target, self.X_target_denoised]).permute(0, 3, 1, 2)
 
-        # Set the target image
-        self.X_target_aug = X_target
-        if isinstance(X_target, list):
-            X_target = X_target[0]
+        # Set up the resizing
+        resize_args = dict(mode='bilinear', align_corners=False)
+        resize_input_old = self.manager.predictor.resize_input
+        self.manager.predictor.resize_input = False
+        oversize_input = self.args.initial_pred_oversize_input
+        img_size = self.args.initial_pred_max_img_size if oversize_input else self.manager.image_shape[-1]
+
+        # Resize the input if needed
+        restore_size = False
+        if oversize_input and X_target.shape[-1] > img_size \
+                or not oversize_input and X_target.shape[-1] != img_size:
+            restore_size = X_target.shape[-1]
+            X_target = F.interpolate(X_target, size=img_size, **resize_args)
 
         # Create a batch
-        bs = self.args.initial_pred_batch_size
-        X_target_batch = X_target.permute(2, 0, 1).repeat(bs, 1, 1, 1)
+        bs = self.args.initial_pred_batch_size // 2
+        X_target_batch = X_target[None, ...].repeat(bs, 1, 1, 1, 1)
 
         # Add some noise to the batch
         noise_scale = torch.linspace(
@@ -841,17 +852,27 @@ class Refiner:
             bs,
             device=self.device
         )
-        X_target_batch += torch.randn_like(X_target_batch) * noise_scale[:, None, None, None]
+        X_target_batch += torch.randn_like(X_target_batch) * noise_scale[:, None, None, None, None]
+
+        # Reshape so the first half of the batch is the original images and the second half is the denoised images
+        X_target_batch = torch.cat([X_target_batch[:, 0], X_target_batch[:, 1]])
 
         # Predict the parameters
         Y_pred_batch = self.manager.predict(X_target_batch)
 
+        # Restore the resize input setting
+        self.manager.predictor.resize_input = resize_input_old
+
         # Destroy the predictor to free up space
-        logger.info('Destroying predictor to free up space.')
-        self.manager.predictor = None
-        del self.manager.predictor
-        torch.cuda.empty_cache()
-        gc.collect()
+        if self.destroy_predictor:
+            logger.info('Destroying predictor to free up space.')
+            self.manager.predictor = None
+            torch.cuda.empty_cache()
+            gc.collect()
+
+        # Set the target image for loss calculations
+        render_size = self.manager.crystal_renderer.dataset_args.image_size  # Use the rendering size the predictor was trained on
+        self.X_target_aug = self._resize(self.X_target_denoised, render_size)
 
         # Ensure the inverse rendering losses are turned on
         use_inverse_rendering = self.args.use_inverse_rendering
@@ -868,24 +889,12 @@ class Refiner:
         for i in range(bs):
             # Render the image
             r_params = self.manager.ds.denormalise_rendering_params(Y_pred_batch, idx=i)
-            # r_params['crystal']['rotation'] = (-np.array(r_params['crystal']['rotation'])).tolist()
             X_pred_i, scene_i = self.manager.crystal_renderer.render_from_parameters(r_params, return_scene=True)
             scene_batch.append(scene_i)
 
-            # Resize the image to the working image size
-            X_pred_i = X_pred_i.astype(np.float32) / 255.
-            X_pred_i = torch.from_numpy(X_pred_i).permute(2, 0, 1).to(self.device)
-            X_pred_i = F.interpolate(
-                X_pred_i[None, ...],
-                size=self.args.working_image_size,
-                mode='bilinear',
-                align_corners=False
-            )[0].permute(1, 2, 0)
-
-            # Convert to greyscale
-            X_pred_i = X_pred_i.mean(dim=-1, keepdim=True).expand(-1, -1, 3)
-
             # Add the image to the batch
+            X_pred_i = X_pred_i.astype(np.float32) / 255.
+            X_pred_i = torch.from_numpy(X_pred_i).to(self.device)
             X_pred_batch.append(X_pred_i)
 
             # Multiscale
@@ -928,7 +937,7 @@ class Refiner:
         img.save(save_dir / f'best_idx={best_idx}.png')
 
         # Update the scene rendering parameters for optimisation
-        wis = (self.args.working_image_size, self.args.working_image_size)
+        wis = (self.args.rendering_size, self.args.rendering_size)
         scene.res = wis[0]
         scene.spp = self.args.spp
         scene.integrator_max_depth = self.args.integrator_max_depth
@@ -954,25 +963,28 @@ class Refiner:
         self.scene = scene
         self.scene_params = scene_params
         self.crystal = scene.crystal
+        self._init_projector()
 
     def train(self, callback: Optional[callable] = None):
         """
         Train the parameters for a number of steps.
         """
         if self.args.use_keypoints and self.keypoint_targets is None:
-            self._init_keypoint_targets()
+            self.init_keypoint_targets()
         if self.scene is None:
             self.make_initial_prediction()
-        self.crystal.rotation.data = torch.tensor([0,0,-1.5])
         n_steps = self.args.max_steps
         start_step = self.step
         end_step = start_step + n_steps
-        logger.info(f'Training for {n_steps} steps. Starting at step {start_step}.')
+        logger.info(f'Training for max {n_steps} steps. Starting at step {start_step}.')
         logger.info(f'Logs path: {self.save_dir}.')
         log_freq = self.args.log_every_n_steps
         running_loss = 0.
         running_metrics = {k: 0. for k in self.metric_keys}
         running_tps = 0
+
+        # (Re-)initialise the convergence detector
+        self._init_convergence_detector()
 
         # Plot initial prediction
         self.step = start_step - 1
@@ -1009,8 +1021,7 @@ class Refiner:
 
             # Log statistics every X steps
             if (step + 1) % log_freq == 0:
-                log_msg = f'[{step + 1}/{n_steps}]' \
-                          f'\tLoss: {running_loss / log_freq:.4E}'
+                log_msg = f'[{step + 1}/{n_steps}]\tLoss: {running_loss / log_freq:.4E}'
                 for k, v in running_metrics.items():
                     k = k.replace('losses/', '')
                     log_msg += f'\t{k}: {v / log_freq:.4E}'
@@ -1023,14 +1034,21 @@ class Refiner:
                     str(timedelta(seconds=seconds_left))))
 
             # Plots
-            self._make_plots(force=step == 0)
+            self._make_plots()
 
             # Callback
             if callback is not None:
-                continue_signal = callback(step)
+                continue_signal = callback(step, loss, stats)
                 if continue_signal is False:
                     logger.info('Received stop signal. Stopping training.')
                     break
+
+            # Check for convergence
+            check_vals = torch.cat([loss.detach().cpu()[None, ...], self.get_parameter_vector()])
+            self.convergence_detector.forward(check_vals, first_val=step == 0)
+            if self.convergence_detector.converged.all():
+                logger.info(f'Converged after {step + 1} iterations.')
+                break
 
         # Final plots
         self._make_plots(force=True)
@@ -1050,14 +1068,13 @@ class Refiner:
         if (self.step + 1) % self.args.acc_grad_steps == 0:
             if self.args.clip_grad_norm > 0:
                 nn.utils.clip_grad_norm_([self.crystal.distances], max_norm=self.args.clip_grad_norm)
+                nn.utils.clip_grad_norm_([self.crystal.rotation], max_norm=self.args.clip_grad_norm)
             for group in self.optimiser.param_groups:
                 for param in group['params']:
                     if param.grad is not None:
                         if is_bad(param.grad):
                             logger.warning('Bad gradients detected!')
                             param.grad.zero_()
-            self.crystal.rotation.grad.data[0] = 0
-            self.crystal.rotation.grad.data[1] = 0
             self.optimiser.step()
             self.optimiser.zero_grad()
             self.crystal.clamp_parameters(rescale=False)
@@ -1276,8 +1293,8 @@ class Refiner:
                 X_target = X_target[None, ...].expand_as(X_pred)
             else:
                 assert X_target.ndim == 4, f'Image shapes do not match: {X_target.shape} != {X_pred.shape}'
-                assert len(
-                    X_target) == 1, f'Target image must be a single image, not a batch. {len(X_target)} received.'
+                assert len(X_target) == 1, \
+                    f'Target image must be a single image, not a batch. {len(X_target)} received.'
                 X_target = X_target.expand_as(X_pred[0])
 
         # Multiscale losses
@@ -1488,7 +1505,7 @@ class Refiner:
 
         ps = self.args.patch_size
         ps2 = ps // 2
-        wis = self.args.working_image_size
+        wis = self.args.rendering_size
 
         # If multiscale, just use the first (largest) image
         X_target_og = self.X_target_aug
@@ -1588,26 +1605,24 @@ class Refiner:
         if not self.args.use_keypoints or self.keypoint_targets is None or len(self.keypoint_targets) == 0:
             return loss, stats
 
-        # Normalise the keypoint coordinates by the image size
-        projector_keypoints = self.projector.keypoints / self.args.working_image_size
-        target_keypoints = self.keypoint_targets / self.args.working_image_size
-
         # Calculate the closest distances between the projected keypoints and the detected targets
+        k_pred = self.projector.keypoints_rel
+        k_target = self.keypoint_targets
         if self.args.keypoints_loss_type == 'mindists':
-            distances = torch.cdist(projector_keypoints, target_keypoints)
-            d_target_to_projector = distances.amin(dim=0)
-            d_projector_to_target = distances.amin(dim=1)
-            loss = d_target_to_projector.mean() + d_projector_to_target.mean()
+            distances = torch.cdist(k_pred, k_target)
+            d_target_to_pred = distances.amin(dim=0)
+            d_pred_to_target = distances.amin(dim=1)
+            loss = d_target_to_pred.mean() + d_pred_to_target.mean()
 
         # Calculate the sinkhorn loss
         elif self.args.keypoints_loss_type == 'sinkhorn':
-            loss_mod = SamplesLoss('sinkhorn', p=2, blur=0.01)
-            loss = loss_mod(projector_keypoints, target_keypoints)
+            loss_mod = SamplesLoss('sinkhorn', p=2, blur=0.0001, reach=0.1)
+            loss = loss_mod(k_pred, k_target)
 
-        # Calculate the sinkhorn loss
+        # Calculate the hausdorff loss
         elif self.args.keypoints_loss_type == 'hausdorff':
             loss_mod = SamplesLoss('hausdorff', p=2, blur=0.01)
-            loss = loss_mod(projector_keypoints, target_keypoints)
+            loss = loss_mod(k_pred, k_target)
 
         else:
             raise RuntimeError(f'Unknown keypoints loss type: {self.args.keypoints_loss_type}.')
@@ -1688,7 +1703,7 @@ class Refiner:
             X_pred = [self.X_pred] if isinstance(self.X_pred, Tensor) else self.X_pred
             Xs.extend(X_pred)
         if self.args.use_keypoints:
-            Xs.append(self.X_target_keypoints)
+            Xs.append(X_target_aug)
         n_cols = len(Xs)
 
         n_rows = 3
@@ -1722,19 +1737,38 @@ class Refiner:
                                      linestyle='--')
                     ax.add_patch(rect)
 
-            # Show the keypoints
+            # Show the target and predicted keypoints
             if self.args.use_keypoints and i == len(Xs) - 1 and self.keypoint_targets is not None:
-                keypoints = to_numpy(self.keypoint_targets)
-                ax.scatter(keypoints[:, 0], keypoints[:, 1], c='r', s=50, marker='x', linewidth=0.5)
+                kp_target_abs = to_numpy(to_absolute_coordinates(self.keypoint_targets, img.shape[0]))
+                kp_pred_abs = to_numpy(to_absolute_coordinates(self.projector.keypoints_rel, img.shape[0]))
+                ax.scatter(*kp_target_abs.T,
+                           facecolors=(0, 0.7, 0, 0.2),
+                           edgecolors=(0, 0.7, 0, 0.5),
+                           linewidths=0.5, s=25)
+                ax.scatter(*kp_target_abs.T, marker='x', c='g', s=0.2, alpha=0.5)
+                ax.scatter(*kp_pred_abs.T,
+                           facecolors=(1, 0, 0, 0.2),
+                           edgecolors=(1, 0, 0, 0.5),
+                           linewidths=0.5, s=25)
+                ax.scatter(*kp_pred_abs.T, marker='x', c='r', s=0.2, alpha=0.5)
 
             # Add wireframe overlay
             ax = axes[1, i]
             if img.ndim == 2:
                 img = np.stack([img] * 3, axis=-1)
             self.projector.set_background(img)
-            img_overlay = to_numpy(self.projector.project() * 255).astype(np.uint8).squeeze().transpose(1, 2, 0)
+            img_overlay = to_numpy(self.projector.generate_image() * 255).astype(np.uint8).squeeze().transpose(1, 2, 0)
             ax.imshow(img_overlay)
             ax.axis('off')
+
+            # Show the target keypoints
+            if self.args.use_keypoints and i == len(Xs) - 1 and self.keypoint_targets is not None:
+                kp_target_abs = to_numpy(to_absolute_coordinates(self.keypoint_targets, img_overlay.shape[0]))
+                ax.scatter(*kp_target_abs.T,
+                           facecolors=(0, 0.7, 0, 0.2),
+                           edgecolors=(0, 0.7, 0, 0.5),
+                           linewidths=0.5, s=25)
+                ax.scatter(*kp_target_abs.T, marker='x', c='g', s=0.2, alpha=0.5)
 
             # RCF features
             if rcf_feats is not None:

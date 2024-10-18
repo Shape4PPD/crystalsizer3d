@@ -104,10 +104,12 @@ def init_tensor(
     return tensor
 
 
-class NumpyCompatibleJSONEncoder(JSONEncoder):
+class FlexibleJSONEncoder(JSONEncoder):
     def default(self, obj):
         if isinstance(obj, np.generic) or isinstance(obj, np.ndarray):
             return obj.tolist()
+        if isinstance(obj, Path):
+            return str(obj)
         return JSONEncoder.default(self, obj)
 
 
@@ -122,7 +124,7 @@ class ArgsCompatibleJSONEncoder(JSONEncoder):
 def hash_data(data) -> str:
     """Generates a generic md5 hash string for arbitrary data."""
     return hashlib.md5(
-        json.dumps(data, sort_keys=True, cls=NumpyCompatibleJSONEncoder).encode('utf-8')
+        json.dumps(data, sort_keys=True, cls=FlexibleJSONEncoder).encode('utf-8')
     ).hexdigest()
 
 

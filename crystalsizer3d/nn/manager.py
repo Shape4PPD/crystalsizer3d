@@ -1966,7 +1966,7 @@ class Manager:
         Take a batch of images and detect the keypoints.
         """
         X = X.to(self.device)
-        assert X.ndim == 4 and X.shape[1] == 3, 'Input images must be in [B, 3, H, W] format.'
+        assert X.ndim == 4 and X.shape[1] == 3, f'Input images must be in [B, 3, H, W] format, got {X.shape}.'
         img_size = X.shape[-2:]
 
         # Resize images for input

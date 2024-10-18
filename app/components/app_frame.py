@@ -331,7 +331,7 @@ class AppFrame(wx.Frame):
 
         # Check that the scene args are consistent with the refiner args
         args_hash = hash_data(args)
-        args['res'] = self.refiner_args.working_image_size
+        args['res'] = self.refiner_args.rendering_size
         args['spp'] = self.refiner_args.spp
         args['integrator_max_depth'] = self.refiner_args.integrator_max_depth
         args['integrator_rr_depth'] = self.refiner_args.integrator_rr_depth

@@ -18,19 +18,32 @@ class RefinerArgs(BaseArgs):
             denoiser_model_path: Optional[Path] = None,
             denoiser_n_tiles: int = 4,
             denoiser_tile_overlap: float = 0.1,
+            denoiser_oversize_input: bool = True,
+            denoiser_max_img_size: int = 512,
             denoiser_batch_size: int = 4,
 
             # Initial prediction settings
-            initial_pred_from: str = 'denoised',
             initial_pred_batch_size: int = 16,
             initial_pred_noise_min: float = 0.0,
             initial_pred_noise_max: float = 0.2,
+            initial_pred_oversize_input: bool = True,
+            initial_pred_max_img_size: int = 512,
 
             # Keypoint detection settings
             keypoints_model_path: Optional[Path] = None,
-            keypoints_pred_from: str = 'denoised',
+            keypoints_oversize_input: bool = False,
+            keypoints_max_img_size: int = 1024,
+            keypoints_batch_size: int = 4,
             keypoints_min_distance: int = 5,
             keypoints_threshold: float = 0.5,
+            keypoints_exclude_border: float = 0.05,
+            keypoints_blur_kernel_relative_size: float = 0.01,
+            keypoints_n_patches: int = 16,
+            keypoints_patch_size: int = 700,
+            keypoints_patch_search_res: int = 256,
+            keypoints_attenuation_sigma: float = 0.5,
+            keypoints_max_attenuation_factor: float = 1.5,
+            keypoints_low_res_catchment_distance: int = 100,
             keypoints_loss_type: str = 'mindists',
 
             # Refining settings
@@ -41,7 +54,7 @@ class RefinerArgs(BaseArgs):
             use_keypoints: bool = False,
 
             # Rendering settings
-            working_image_size: int = 200,
+            rendering_size: int = 200,
             spp: int = 64,
             integrator_max_depth: int = 16,
             integrator_rr_depth: int = 5,
@@ -57,6 +70,13 @@ class RefinerArgs(BaseArgs):
             acc_grad_steps: int = 1,
             clip_grad_norm: float = 0.0,
             opt_algorithm: str = 'sgd',
+
+            # Convergence detector settings
+            convergence_tau_fast: int = 20,
+            convergence_tau_slow: int = 100,
+            convergence_threshold: float = 0.05,
+            convergence_patience: int = 100,
+            convergence_loss_target: float = 50.,
 
             # Noise
             image_noise_std: float = 0.0,
@@ -184,21 +204,34 @@ class RefinerArgs(BaseArgs):
         self.denoiser_model_path = denoiser_model_path
         self.denoiser_n_tiles = denoiser_n_tiles
         self.denoiser_tile_overlap = denoiser_tile_overlap
+        self.denoiser_oversize_input = denoiser_oversize_input
+        self.denoiser_max_img_size = denoiser_max_img_size
         self.denoiser_batch_size = denoiser_batch_size
 
         # Initial prediction settings
-        self.initial_pred_from = initial_pred_from
         self.initial_pred_batch_size = initial_pred_batch_size
         self.initial_pred_noise_min = initial_pred_noise_min
         self.initial_pred_noise_max = initial_pred_noise_max
+        self.initial_pred_oversize_input = initial_pred_oversize_input
+        self.initial_pred_max_img_size = initial_pred_max_img_size
 
         # Keypoint detection settings
         if keypoints_model_path is not None:
             assert keypoints_model_path.exists(), f'Keypoints model path does not exist: {keypoints_model_path}'
         self.keypoints_model_path = keypoints_model_path
-        self.keypoints_pred_from = keypoints_pred_from
+        self.keypoints_oversize_input = keypoints_oversize_input
+        self.keypoints_max_img_size = keypoints_max_img_size
+        self.keypoints_batch_size = keypoints_batch_size
         self.keypoints_min_distance = keypoints_min_distance
         self.keypoints_threshold = keypoints_threshold
+        self.keypoints_exclude_border = keypoints_exclude_border
+        self.keypoints_blur_kernel_relative_size = keypoints_blur_kernel_relative_size
+        self.keypoints_n_patches = keypoints_n_patches
+        self.keypoints_patch_size = keypoints_patch_size
+        self.keypoints_patch_search_res = keypoints_patch_search_res
+        self.keypoints_attenuation_sigma = keypoints_attenuation_sigma
+        self.keypoints_max_attenuation_factor = keypoints_max_attenuation_factor
+        self.keypoints_low_res_catchment_distance = keypoints_low_res_catchment_distance
         self.keypoints_loss_type = keypoints_loss_type
 
         # Refining settings
@@ -209,7 +242,7 @@ class RefinerArgs(BaseArgs):
         self.use_keypoints = use_keypoints
 
         # Rendering settings
-        self.working_image_size = working_image_size
+        self.rendering_size = rendering_size
         self.spp = spp
         self.integrator_max_depth = integrator_max_depth
         self.integrator_rr_depth = integrator_rr_depth
@@ -225,6 +258,13 @@ class RefinerArgs(BaseArgs):
         self.acc_grad_steps = acc_grad_steps
         self.clip_grad_norm = clip_grad_norm
         self.opt_algorithm = opt_algorithm
+
+        # Convergence detector settings
+        self.convergence_tau_fast = convergence_tau_fast
+        self.convergence_tau_slow = convergence_tau_slow
+        self.convergence_threshold = convergence_threshold
+        self.convergence_patience = convergence_patience
+        self.convergence_loss_target = convergence_loss_target
 
         # Noise
         self.image_noise_std = image_noise_std
@@ -344,28 +384,54 @@ class RefinerArgs(BaseArgs):
                            help='Number of tiles to split the image into for denoising.')
         group.add_argument('--denoiser-tile-overlap', type=float, default=0.05,
                            help='Ratio of overlap between tiles for denoising.')
+        group.add_argument('--denoiser-oversize-input', type=str2bool, default=True,
+                           help='Whether to resize the input images to the training dataset image size.')
+        group.add_argument('--denoiser-max-img-size', type=int, default=512,
+                           help='Maximum image size for denoising.')
         group.add_argument('--denoiser-batch-size', type=int, default=3,
                            help='Number of tiles to denoise at a time.')
 
         # Initial prediction settings
-        group.add_argument('--initial-pred-from', type=str, default='denoised', choices=['denoised', 'original'],
-                           help='Calculate the initial prediction from either the original or denoised image.')
         group.add_argument('--initial-pred-batch-size', type=int, default=8,
                            help='Batch size for the initial prediction.')
         group.add_argument('--initial-pred-noise-min', type=float, default=0.0,
                            help='Minimum amount of noise to add to the batch of images used to generate the initial prediction.')
         group.add_argument('--initial-pred-noise-max', type=float, default=0.1,
                            help='Minimum amount of noise to add to the batch of images used to generate the initial prediction.')
+        group.add_argument('--initial-pred-oversize-input', type=str2bool, default=True,
+                           help='Whether to resize the input images to the training dataset image size.')
+        group.add_argument('--initial-pred-max-img-size', type=int, default=512,
+                           help='Maximum image size for initial prediction.')
 
         # Keypoint detection settings
         group.add_argument('--keypoints-model-path', type=Path,
                            help='Path to the keypoints model checkpoint.')
-        group.add_argument('--keypoints-pred-from', type=str, default='denoised', choices=['denoised', 'original'],
-                           help='Calculate the keypoints from either the original or denoised image.')
+        group.add_argument('--keypoints-oversize-input', type=str2bool, default=False,
+                           help='Whether to resize the input images to the training dataset image size.')
+        group.add_argument('--keypoints-max-img-size', type=int, default=1024,
+                           help='Maximum image size for keypoint detection.')
+        group.add_argument('--keypoints-batch-size', type=int, default=3,
+                           help='Number of tiles to detect keypoints at a time.')
         group.add_argument('--keypoints-min-distance', type=int, default=5,
                            help='Minimum pixel distance between keypoints.')
         group.add_argument('--keypoints-threshold', type=float, default=0.5,
                            help='Threshold for keypoints detection.')
+        group.add_argument('--keypoints-exclude-border', type=float, default=0.05,
+                           help='Exclude keypoints within this ratio of the border.')
+        group.add_argument('--keypoints-blur-kernel-relative-size', type=float, default=0.01,
+                           help='Relative size of the blur kernel for initial keypoints detection from low res, denoised image.')
+        group.add_argument('--keypoints-n-patches', type=int, default=16,
+                           help='Number of patches to crop from the image for high res keypoints detection.')
+        group.add_argument('--keypoints-patch-size', type=int, default=700,
+                           help='Size of the crop patches.')
+        group.add_argument('--keypoints-patch-search-res', type=int, default=256,
+                           help='Resolution of the low-res keypoints heatmap to use for determining where to crop the patches.')
+        group.add_argument('--keypoints-attenuation-sigma', type=float, default=0.5,
+                           help='Sigma parameter for the Gaussian blob used to iteratively attenuate the keypoints heatmap.')
+        group.add_argument('--keypoints-max-attenuation-factor', type=float, default=1.5,
+                           help='Maximum Gaussian peak height used for the attenuation function.')
+        group.add_argument('--keypoints-low-res-catchment-distance', type=int, default=100,
+                           help='Catchment distance (in pixels) for high res keypoints from the original low res keypoints.')
         group.add_argument('--keypoints-loss-type', type=str, default='mindists',
                            choices=['mindists', 'sinkhorn', 'hausdorff'],
                            help='Type of loss to use for keypoints refinement.')
@@ -383,7 +449,7 @@ class RefinerArgs(BaseArgs):
                            help='Use the keypoints detection method.')
 
         # Rendering settings
-        group.add_argument('--working-image-size', type=int, default=300,
+        group.add_argument('--rendering-size', type=int, default=300,
                            help='Resolution of the (square) rendered image in pixels. '
                                 'Larger images are slower to render and use more resources, but may be more accurate.')
         group.add_argument('--spp', type=int, default=32,
@@ -412,6 +478,18 @@ class RefinerArgs(BaseArgs):
                            help='Clip the gradient norm of the distances to this value.')
         group.add_argument('--opt-algorithm', type=str, default='adabelief',
                            help='Optimisation algorithm to use.')
+
+        # Convergence detector settings
+        group.add_argument('--convergence-tau-fast', type=int, default=20,
+                           help='Fast convergence detector time constant.')
+        group.add_argument('--convergence-tau-slow', type=int, default=100,
+                           help='Slow convergence detector time constant.')
+        group.add_argument('--convergence-threshold', type=float, default=0.05,
+                           help='Convergence threshold.')
+        group.add_argument('--convergence-patience', type=int, default=100,
+                           help='Convergence patience.')
+        group.add_argument('--convergence-loss-target', type=float, default=50.,
+                           help='Convergence loss target.')
 
         # Noise
         group.add_argument('--image-noise-std', type=float, default=0.0,

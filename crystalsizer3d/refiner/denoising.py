@@ -44,8 +44,8 @@ def denoise_image(
     assert X.shape[-1] == X.shape[-2], 'Image must be square.'
 
     # Set up the resizing
-    resize_input_old = manager.keypoint_detector_args.dn_resize_input
-    manager.keypoint_detector_args.dn_resize_input = False
+    resize_input_old = manager.denoiser_args.dn_resize_input
+    manager.denoiser_args.dn_resize_input = False
     img_size = max_img_size if oversize_input else manager.image_shape[-1]
 
     # Split it up into patches
@@ -66,7 +66,7 @@ def denoise_image(
     X_denoised = F.interpolate(X_stitched[None, ...], size=X.shape[-1], **resize_args)[0]
 
     # Reset the resizing
-    manager.keypoint_detector_args.dn_resize_input = resize_input_old
+    manager.denoiser_args.dn_resize_input = resize_input_old
 
     if return_patches:
         return X_denoised, X_patches, X_patches_denoised, patch_positions

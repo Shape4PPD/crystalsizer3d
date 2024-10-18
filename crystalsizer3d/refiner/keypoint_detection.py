@@ -17,6 +17,26 @@ from crystalsizer3d.util.utils import to_numpy
 resize_args = dict(mode='bilinear', align_corners=False)
 
 
+def to_relative_coordinates(coords: Tensor, image_size: int) -> Tensor:
+    """
+    Convert absolute coordinates to relative coordinates.
+    """
+    return torch.stack([
+        (coords[:, 0] / image_size - 0.5) * 2,
+        (0.5 - coords[:, 1] / image_size) * 2
+    ], dim=1)
+
+
+def to_absolute_coordinates(coords: Tensor, image_size: int) -> Tensor:
+    """
+    Convert relative coordinates to absolute coordinates.
+    """
+    return torch.stack([
+        (coords[:, 0] * 0.5 + 0.5) * image_size,
+        (0.5 - coords[:, 1] * 0.5) * image_size
+    ], dim=1)
+
+
 def calculate_keypoint_heatmaps(
         X: Tensor,
         manager: Manager,
@@ -94,6 +114,7 @@ def get_keypoint_coordinates(
         exclude_border=exclude_border,
     )
     coords = coords[:, ::-1].copy()  # Flip the coordinates to (y, x) to match the projector
+
     return torch.from_numpy(coords)
 
 
@@ -123,6 +144,7 @@ def generate_attention_patches(
         X_kp = F.interpolate(X_kp, size=patch_search_res, **resize_args)
 
     # Sizes
+    patch_size = min(patch_size, X.shape[-1] - 20)  # Ensure the patch size is not too large
     wis = X_kp.shape[-1]
     ps = round(patch_size / sf)
     ps2 = round(ps / 2)
@@ -218,9 +240,18 @@ def find_keypoints(
         if not quiet:
             logger.info(msg)
 
+    # Check the input shapes and ensure (C, H, W) format
+    assert X_target.ndim == 3 and X_target_denoised.ndim == 3, 'Input images must have 3 dimensions.'
+    if X_target.shape[-1] == 3:
+        X_target = X_target.permute(2, 0, 1)
+    if X_target_denoised.shape[-1] == 3:
+        X_target_denoised = X_target_denoised.permute(2, 0, 1)
+    assert X_target.shape == X_target_denoised.shape, 'Input images must have the same shape.'
+    image_size = X_target.shape[-1]
+
     # First we take the denoised image, blur it and detect keypoints
     quiet_log('Detecting initial keypoints in the blurred denoised image.')
-    ks = round(X_target_denoised.shape[-1] * blur_kernel_relative_size)
+    ks = round(image_size * blur_kernel_relative_size)
     if ks % 2 == 0:
         ks += 1
     X_lr = gaussian_blur(X_target_denoised, kernel_size=[ks, ks])
@@ -269,6 +300,7 @@ def find_keypoints(
     quiet_log('Discarding keypoints which are too far from the low-res keypoints.')
     Ylr_Yc_dist = torch.cdist(Y_lr.to(torch.float32), Y_candidates_merged)
     Y_candidates_final = Y_candidates_merged[Ylr_Yc_dist.amin(dim=0) < low_res_catchment_distance]
+    Y_candidates_final_rel = to_relative_coordinates(Y_candidates_final, image_size)
 
     if return_everything:
         return {
@@ -284,6 +316,7 @@ def find_keypoints(
             'Y_candidates_all': Y_candidates_all,
             'Y_candidates_merged': Y_candidates_merged,
             'Y_candidates_final': Y_candidates_final,
+            'Y_candidates_final_rel': Y_candidates_final_rel,
         }
 
     return Y_candidates_final

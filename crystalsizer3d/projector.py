@@ -81,6 +81,9 @@ class Projector:
     rear_edges: Tensor
     front_edges: Tensor
     edge_segments: Dict[Union[str, int], Tensor]
+    edge_segments_rel: Dict[Union[str, int], Tensor]
+    keypoints: Tensor
+    keypoints_rel: Tensor
     image: Tensor
 
     def __init__(
@@ -242,7 +245,7 @@ class Projector:
 
         # Generate the refracted wireframe image
         if generate_image:
-            self.image = self._generate_image()
+            self.image = self.generate_image()
 
             return self.image
 
@@ -430,6 +433,7 @@ class Projector:
             segments['facing'] = torch.stack(facing_edges)
 
         self.edge_segments = segments
+        self.edge_segments_rel = {k: self._to_relative_coords(v) for k, v in segments.items()}
 
     def _collate_keypoints(self):
         """
@@ -447,8 +451,9 @@ class Projector:
         keypoints = torch.stack(keypoints)
         keypoints, _ = merge_vertices(keypoints, epsilon=self.tol_2d)
         self.keypoints = keypoints
+        self.keypoints_rel = self._to_relative_coords(keypoints)
 
-    def _generate_image(self) -> Tensor:
+    def generate_image(self) -> Tensor:
         """
         Generate the projected wireframe image including all refractions.
         """
