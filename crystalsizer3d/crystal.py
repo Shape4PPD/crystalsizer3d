@@ -12,7 +12,7 @@ from torch import Tensor, nn
 
 from crystalsizer3d import logger
 from crystalsizer3d.scene_components.textures import NoiseTexture
-from crystalsizer3d.util.geometry import align_points_to_xy_plane, calculate_relative_angles, merge_vertices, normalise, \
+from crystalsizer3d.util.geometry import align_points_to_xy_plane, merge_vertices, normalise, \
     rotate_2d_points_to_square, sort_face_vertices
 from crystalsizer3d.util.utils import init_tensor
 
@@ -359,7 +359,7 @@ class Crystal(nn.Module):
             if self.rotation_mode == ROTATION_MODE_AXISANGLE:
                 rv_norm = self.rotation.norm()
                 if rv_norm > 2 * torch.pi:
-                    rv_norm2 = torch.remainder(self.rotation.norm(), 2 * torch.pi)
+                    rv_norm2 = torch.remainder(rv_norm, 2 * torch.pi)
                     self.rotation.data = self.rotation / rv_norm * rv_norm2
             elif self.rotation_mode == ROTATION_MODE_QUATERNION:
                 rv_norm = self.rotation.norm()
@@ -369,6 +369,32 @@ class Crystal(nn.Module):
 
             self.material_roughness.data = torch.clamp(self.material_roughness, 1e-4, None)
             self.material_ior.data = torch.clamp(self.material_ior, 1. + 1e-4, None)
+
+    def canonicalise(self):
+        """
+        Canonicalise the crystal morphology by ensuring all distances are minimal and the maximum distance is 1.
+        """
+        with torch.no_grad():
+            # Recalculate the basic vertices
+            all_distances = self.distances[self.symmetry_idx]
+            all_combinations = list(combinations(range(len(self.N)), 3))
+            intersection_points = []
+            for i, combo in enumerate(all_combinations):
+                point = self._plane_intersection(*combo)
+                if point is not None:
+                    intersection_points.append(point)
+            intersection_points = torch.stack(intersection_points)
+            T = intersection_points @ self.N.T
+            R = torch.all(T <= all_distances + 1e-3, dim=1)
+            vertices = intersection_points[R]
+
+            # Calculate the minimum distances for each face
+            distances_min = (self.N @ vertices.T).amax(dim=1)[:len(self.miller_indices)]
+
+            # Update the distances and scale
+            d_max = distances_min.amax()
+            self.distances.data = distances_min / d_max
+            self.scale.data = self.scale * d_max
 
     def _init(self):
         """
