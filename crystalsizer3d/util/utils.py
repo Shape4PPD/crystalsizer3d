@@ -201,3 +201,13 @@ def gumbel_sigmoid(logits: Tensor, temperature: float = 1.0) -> Tensor:
 def is_main_thread():
     """Check if the current thread is the main thread."""
     return threading.current_thread().name == 'MainThread'
+
+
+def smooth_signal(x: np.ndarray, window_size: int = 11) -> np.ndarray:
+    """
+    Smooth the input signal using a moving average filter.
+    """
+    kernel = np.ones(window_size) / window_size
+    pad_width = (window_size - 1) // 2
+    x = np.pad(x, (pad_width, window_size - pad_width - 1), mode='edge')
+    return np.convolve(x, kernel, mode='valid')

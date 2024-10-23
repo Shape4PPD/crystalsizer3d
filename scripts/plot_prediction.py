@@ -13,7 +13,7 @@ from matplotlib.figure import Figure
 from matplotlib.gridspec import GridSpec
 from mayavi import mlab
 from torch.utils.data import default_collate
-from torchvision.transforms.functional import crop, gaussian_blur, to_tensor
+from torchvision.transforms.functional import center_crop, crop, gaussian_blur, to_tensor
 
 from crystalsizer3d import LOGS_PATH, START_TIMESTAMP, USE_CUDA, logger
 from crystalsizer3d.args.base_args import BaseArgs
@@ -227,15 +227,15 @@ def _init(args: Optional[RuntimeArgs], method: str):
         r_params_target = None
 
         # Crop and resize the image to the working image size
-        # X_target = center_crop(X_target, min(X_target.shape[-2:]))
-        d = min(X_target.shape[-2:])
-        X_target = crop(X_target, top=0, left=X_target.shape[-1] - d, height=d, width=d)
-        X_target = F.interpolate(
-            X_target[None, ...],
-            size=manager.image_shape[-1],
-            mode='bilinear',
-            align_corners=False
-        )[0]
+        X_target = center_crop(X_target, min(X_target.shape[-2:]))
+        # d = min(X_target.shape[-2:])
+        # X_target = crop(X_target, top=0, left=X_target.shape[-1] - d, height=d, width=d)
+        # X_target = F.interpolate(
+        #     X_target[None, ...],
+        #     size=manager.image_shape[-1],
+        #     mode='bilinear',
+        #     align_corners=False
+        # )[0]
     X_target = default_collate([X_target, ])
     X_target = X_target.to(manager.device)
 
@@ -537,9 +537,9 @@ if __name__ == '__main__':
     start_time = time.time()
 
     # plot_prediction()
-    # plot_prediction_noise_batch()
+    plot_prediction_noise_batch()
     # plot_denoised_prediction()
-    plot_denoised_patches()
+    # plot_denoised_patches()
 
     # # Iterate over all images in the image_path directory
     # args_ = parse_arguments()

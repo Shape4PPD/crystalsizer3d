@@ -5,7 +5,7 @@ import shutil
 import time
 from datetime import timedelta
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple, Union
+from typing import Callable, Dict, List, Optional, Tuple, Union
 
 import cv2
 import drjit as dr
@@ -47,7 +47,7 @@ from crystalsizer3d.scene_components.scene import Scene
 from crystalsizer3d.scene_components.utils import orthographic_scale_factor
 from crystalsizer3d.util.convergence_detector import ConvergenceDetector
 from crystalsizer3d.util.image_helpers import save_img, save_img_grid, save_img_with_keypoint_markers
-from crystalsizer3d.util.plots import _add_bars, plot_material, plot_transformation
+from crystalsizer3d.util.plots import _add_bars, plot_light, plot_material, plot_transformation
 from crystalsizer3d.util.utils import get_seed, gumbel_sigmoid, hash_data, init_tensor, is_bad, set_seed, to_multiscale, \
     to_numpy
 
@@ -85,11 +85,13 @@ class Refiner:
 
     keypoint_targets: Optional[Tensor] = None
     anchors: Dict[ProjectedVertexKey, Tensor] = {}
+    prev_distances: Optional[Tensor] = None
 
     rcf_feats_og: Optional[List[Tensor]]
     rcf_feats: Optional[List[Tensor]]
 
     convergence_detector: ConvergenceDetector
+    convergence_detector_param_names: List[str]
 
     def __init__(
             self,
@@ -107,16 +109,16 @@ class Refiner:
         if self.args.seed is not None:
             set_seed(self.args.seed)
 
-        # Set up the log directory
-        self.init_save_dir(output_dir, output_dir_base)
-
         # Whether to destroy the models after use
         self.destroy_denoiser = destroy_denoiser
         self.destroy_keypoint_detector = destroy_keypoint_detector
         self.destroy_predictor = destroy_predictor
 
-        # Load the optimisation targets
         if do_init:
+            # Set up the log directory
+            self.init_save_dir(output_dir, output_dir_base)
+
+            # Load the optimisation targets
             self.init_X_target()
             self.init_X_target_denoised()
             self._init_Y_target()
@@ -169,11 +171,11 @@ class Refiner:
             return getattr(self, name)
         raise AttributeError(f"'{self.__class__.__name__}' object has no attribute '{name}'")
 
-    def get_parameter_vector(self) -> Tensor:
+    def get_parameter_vector(self, include_switch_probs: bool = True) -> Tensor:
         """
         Return a vector of the parameters.
         """
-        return torch.concatenate([
+        params = torch.concatenate([
             self.crystal.distances.detach().cpu(),
             self.crystal.origin.detach().cpu(),
             self.crystal.scale[None, ...].detach().cpu(),
@@ -181,8 +183,11 @@ class Refiner:
             self.crystal.material_roughness[None, ...].detach().cpu(),
             self.crystal.material_ior[None, ...].detach().cpu(),
             self.scene.light_radiance.detach().cpu(),
-            self.conj_switch_probs.detach().cpu()
         ])
+        if include_switch_probs:
+            params = torch.concatenate([params, self.conj_switch_probs.detach().cpu()])
+
+        return params
 
     def init_save_dir(self, output_dir: Path | None = None, output_dir_base: Path | None = None):
         """
@@ -394,14 +399,21 @@ class Refiner:
         """
         Initialise the convergence detector.
         """
-        convergence_detector = ConvergenceDetector(
-            shape=(1 + len(self.get_parameter_vector()),),
+        self.convergence_detector_param_names = [
+            'loss',
+            *[f'd_{i:02d}' for i in range(self.crystal.distances.shape[0])],
+            'roughness',
+            'ior',
+            *[f'light_{"rgb"[i]}' for i in range(3)],
+        ]
+        self.convergence_detector = ConvergenceDetector(
+            shape=(len(self.convergence_detector_param_names),),
             tau_fast=self.args.convergence_tau_fast,
             tau_slow=self.args.convergence_tau_slow,
             threshold=self.args.convergence_threshold,
-            patience=self.args.convergence_patience
+            patience=self.args.convergence_patience,
+            min_absolute_threshold=1e-4
         )
-        self.convergence_detector = convergence_detector
 
     def _resize(self, X: Tensor, size: int | None = None) -> Tensor:
         """
@@ -727,7 +739,8 @@ class Refiner:
             cycle_mul=self.args.lr_cycle_mul,
             cycle_decay=self.args.lr_cycle_decay,
             cycle_limit=self.args.lr_cycle_limit,
-            k_decay=self.args.lr_k_decay
+            k_decay=self.args.lr_k_decay,
+            plateau_mode='min'
         )
 
         self.optimiser = optimiser
@@ -814,6 +827,7 @@ class Refiner:
                 self.X_pred = torch.load(X_pred_path, weights_only=True)
                 self.scene = Scene.from_yml(scene_path)
                 self.scene.crystal.to('cpu')
+                self.scene.light_radiance = nn.Parameter(init_tensor(self.scene.light_radiance), requires_grad=True)
                 self.scene_params = mi.traverse(self.scene.mi_scene)
                 self.crystal = self.scene.crystal
                 logger.info('Loaded initial prediction from cache.')
@@ -835,10 +849,8 @@ class Refiner:
         img_size = self.args.initial_pred_max_img_size if oversize_input else self.manager.image_shape[-1]
 
         # Resize the input if needed
-        restore_size = False
         if oversize_input and X_target.shape[-1] > img_size \
                 or not oversize_input and X_target.shape[-1] != img_size:
-            restore_size = X_target.shape[-1]
             X_target = F.interpolate(X_target, size=img_size, **resize_args)
 
         # Create a batch
@@ -965,7 +977,7 @@ class Refiner:
         self.crystal = scene.crystal
         self._init_projector()
 
-    def train(self, callback: Optional[callable] = None):
+    def train(self, callback: Callable | None = None, prev_distances: Tensor | None = None):
         """
         Train the parameters for a number of steps.
         """
@@ -982,8 +994,11 @@ class Refiner:
         running_loss = 0.
         running_metrics = {k: 0. for k in self.metric_keys}
         running_tps = 0
+        use_inverse_rendering = self.args.use_inverse_rendering  # Save the inverse rendering setting
+        self.prev_distances = prev_distances
 
-        # (Re-)initialise the convergence detector
+        # (Re-)initialise the optimiser, learning rate scheduler and convergence detector
+        self._init_optimiser()
         self._init_convergence_detector()
 
         # Plot initial prediction
@@ -993,13 +1008,24 @@ class Refiner:
         for step in range(start_step, end_step):
             start_time = time.time()
             self.step = step
+
+            # Conditionally enable the inverse rendering
+            self.args.use_inverse_rendering = use_inverse_rendering and step > self.args.ir_wait_n_steps
+
+            # Train for a single step
             loss, stats = self._train_step()
 
-            # Log the material parameter values
+            # Adjust tracking loss to include the IR loss placeholder
+            loss_track = loss.detach().cpu()
+            if use_inverse_rendering and not self.args.use_inverse_rendering and self.args.ir_loss_placeholder > 0:
+                loss_track += self.args.ir_loss_placeholder
+            self.tb_logger.add_scalar('losses/total_tracked', loss_track.item(), step)
+
+            # Log the parameter values
             self.tb_logger.add_scalar('params/roughness', self.crystal.material_roughness.item(), step)
             self.tb_logger.add_scalar('params/ior', self.crystal.material_ior.item(), step)
-
-            # Log the conjugate switching probabilities
+            for i, val in enumerate(self.scene.light_radiance):
+                self.tb_logger.add_scalar(f'params/light_{"rgb"[i]}', val.item(), step)
             if self.args.use_conj_switching:
                 for i, (pair, prob) in enumerate(zip(self.conj_pairs, self.conj_switch_probs)):
                     ab = ','.join([f'{k}' for k in self.crystal.all_miller_indices[pair[0]][:2].tolist()])
@@ -1009,7 +1035,13 @@ class Refiner:
             for i, param_group in enumerate(['distances', 'origin', 'rotation', 'material', 'light']):
                 self.tb_logger.add_scalar(f'lr/{param_group}', self.optimiser.param_groups[i]['lr'], step)
             if self.args.lr_scheduler != 'none':
-                self.lr_scheduler.step(step, loss)
+                self.lr_scheduler.step(step, loss_track)
+
+            # Log convergence statistics
+            for i, val in enumerate(self.convergence_detector.convergence_count):
+                param_name = self.convergence_detector_param_names[i]
+                self.tb_logger.add_scalar(f'convergence/{i:02d}_{param_name}', val, step)
+            self.tb_logger.add_scalar(f'convergence/bad_epochs', self.lr_scheduler.lr_scheduler.num_bad_epochs, step)
 
             # Track running loss and metrics
             running_loss += loss
@@ -1044,7 +1076,13 @@ class Refiner:
                     break
 
             # Check for convergence
-            check_vals = torch.cat([loss.detach().cpu()[None, ...], self.get_parameter_vector()])
+            check_vals = torch.concatenate([
+                loss_track[None, ...],
+                self.crystal.distances.detach().cpu(),
+                self.crystal.material_roughness[None, ...].detach().cpu(),
+                self.crystal.material_ior[None, ...].detach().cpu(),
+                self.scene.light_radiance.detach().cpu(),
+            ])
             self.convergence_detector.forward(check_vals, first_val=step == 0)
             if self.convergence_detector.converged.all():
                 logger.info(f'Converged after {step + 1} iterations.')
@@ -1052,6 +1090,9 @@ class Refiner:
 
         # Final plots
         self._make_plots(force=True)
+
+        # Restore the inverse rendering losses setting
+        self.args.use_inverse_rendering = use_inverse_rendering
 
         logger.info('Training complete.')
 
@@ -1170,7 +1211,7 @@ class Refiner:
         self.X_pred = X_pred
 
         # Use denoised target if available
-        X_target = self.X_target_denoised if self.X_target_denoised is not None else self.X_target
+        X_target = self.X_target_denoised_wis if self.X_target_denoised is not None else self.X_target_wis
 
         # Add some noise to the target image
         if isinstance(X_target, list):
@@ -1232,6 +1273,7 @@ class Refiner:
         z_pos_loss, z_pos_stats = self._z_pos_loss()
         rxy_loss, rxy_stats = self._rotation_xy_loss()
         switch_loss, switch_stats = self._switch_loss()
+        temporal_loss, temporal_stats = self._temporal_loss()
 
         # Keypoints and anchors
         keypoints_loss, keypoints_stats = self._keypoints_loss()
@@ -1248,6 +1290,7 @@ class Refiner:
                + z_pos_loss * self.args.w_z_pos \
                + rxy_loss * self.args.w_rotation_xy \
                + switch_loss * self.args.w_switch_probs \
+               + temporal_loss * self.args.w_temporal \
                + keypoints_loss * self.args.w_keypoints \
                + anchors_loss * self.args.w_anchors
 
@@ -1255,7 +1298,7 @@ class Refiner:
         stats = {
             'losses/total': loss.item(),
             **l1_stats, **l2_stats, **percept_stats, **latent_stats, **rcf_stats, **overshoot_stats, **symmetry_stats,
-            **z_pos_stats, **rxy_stats, **switch_stats, **keypoints_stats, **anchors_stats
+            **z_pos_stats, **rxy_stats, **switch_stats, **temporal_stats, **keypoints_stats, **anchors_stats
         }
 
         # Patches - recalculate all the losses for each patch
@@ -1596,6 +1639,21 @@ class Refiner:
 
         return loss, stats
 
+    def _temporal_loss(self) -> Tuple[Tensor, Dict[str, float]]:
+        """
+        Calculate the temporal regularisation loss.
+        """
+        loss = torch.tensor(0., device=self.device)
+        stats = {}
+        if self.prev_distances is None:
+            return loss, stats
+
+        # L2 loss between the current and previous distances
+        loss = torch.mean((self.crystal.distances - self.prev_distances)**2)
+        stats['losses/temporal_dists'] = loss.item()
+
+        return loss, stats
+
     def _keypoints_loss(self):
         """
         Calculate the keypoints loss.
@@ -1789,16 +1847,21 @@ class Refiner:
         shared_args = dict(
             manager=self.manager,
             Y_pred={
-                'transformation': torch.cat(
-                    [self.crystal.origin, self.crystal.scale[None, ...], self.crystal.rotation]),
-                'material': torch.cat(
-                    [self.crystal.material_ior[None, ...], self.crystal.material_roughness[None, ...]])
+                'transformation': torch.cat([
+                    self.crystal.origin, self.crystal.scale[None, ...], self.crystal.rotation
+                ]),
+                'material': torch.cat([
+                    self.crystal.material_ior[None, ...], self.crystal.material_roughness[None, ...]
+                ]),
+                'light': self.scene.light_radiance
             },
             colour_pred=self.args.plot_colour_pred,
             show_legend=False
         )
         plot_transformation(axes[n_rows - 1, 1], **shared_args)
         plot_material(axes[n_rows - 1, 2], **shared_args)
+        if n_cols > 3:
+            plot_light(axes[n_rows - 1, 3], **shared_args)
 
         fig.suptitle(f'Step {self.step + 1} Loss: {self.loss:.4E}')
         fig.tight_layout()
@@ -1913,7 +1976,8 @@ class Refiner:
         plt.savefig(path, bbox_inches='tight')
 
         # Log to tensorboard
-        self.tb_logger.add_figure(plot_type, fig, self.step)
-        self.tb_logger.flush()
+        if self.args.plot_to_tensorboard:
+            self.tb_logger.add_figure(plot_type, fig, self.step)
+            self.tb_logger.flush()
 
         plt.close(fig)

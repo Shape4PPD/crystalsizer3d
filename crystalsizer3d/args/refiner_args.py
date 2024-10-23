@@ -54,6 +54,8 @@ class RefinerArgs(BaseArgs):
             use_keypoints: bool = False,
 
             # Rendering settings
+            ir_wait_n_steps: int = 0,
+            ir_loss_placeholder: float = 0,
             rendering_size: int = 200,
             spp: int = 64,
             integrator_max_depth: int = 16,
@@ -129,6 +131,7 @@ class RefinerArgs(BaseArgs):
             w_patches: float = 1.0,
             w_fullsize: float = 1.0,
             w_switch_probs: float = 1.0,
+            w_temporal: float = 1.0,
             w_keypoints: float = 1.0,
             w_anchors: float = 1.0,
 
@@ -149,9 +152,10 @@ class RefinerArgs(BaseArgs):
 
             # Runtime args
             log_every_n_steps: int = 1,
-            plot_every_n_steps: int = 10,
 
             # Plotting args
+            plot_every_n_steps: int = 10,
+            plot_to_tensorboard: bool = False,
             plot_n_samples: int = 2,
             plot_n_patches: int = -1,
             plot_rcf_feats: List[int] = [0, 5],
@@ -242,6 +246,8 @@ class RefinerArgs(BaseArgs):
         self.use_keypoints = use_keypoints
 
         # Rendering settings
+        self.ir_wait_n_steps = ir_wait_n_steps
+        self.ir_loss_placeholder = ir_loss_placeholder
         self.rendering_size = rendering_size
         self.spp = spp
         self.integrator_max_depth = integrator_max_depth
@@ -321,6 +327,7 @@ class RefinerArgs(BaseArgs):
         self.w_patches = w_patches
         self.w_fullsize = w_fullsize
         self.w_switch_probs = w_switch_probs
+        self.w_temporal = w_temporal
         self.w_keypoints = w_keypoints
         self.w_anchors = w_anchors
 
@@ -341,9 +348,10 @@ class RefinerArgs(BaseArgs):
 
         # Runtime args
         self.log_every_n_steps = log_every_n_steps
-        self.plot_every_n_steps = plot_every_n_steps
 
         # Plotting args
+        self.plot_every_n_steps = plot_every_n_steps
+        self.plot_to_tensorboard = plot_to_tensorboard
         self.plot_n_samples = plot_n_samples
         self.plot_n_patches = plot_n_patches
         self.plot_rcf_feats = plot_rcf_feats
@@ -449,6 +457,11 @@ class RefinerArgs(BaseArgs):
                            help='Use the keypoints detection method.')
 
         # Rendering settings
+        group.add_argument('--ir-wait-n-steps', type=int, default=0,
+                           help='Number of optimisation steps to wait before turning inverse rendering on '
+                                '(if --use-inverse-rendering=True).')
+        group.add_argument('--ir-loss-placeholder', type=float, default=0,
+                           help='Placeholder loss value for inverse rendering.')
         group.add_argument('--rendering-size', type=int, default=300,
                            help='Resolution of the (square) rendered image in pixels. '
                                 'Larger images are slower to render and use more resources, but may be more accurate.')
@@ -595,6 +608,8 @@ class RefinerArgs(BaseArgs):
                            help='Weight of the combined losses on the full sized image. Only used when using patches.')
         group.add_argument('--w-switch-probs', type=float, default=0.1,
                            help='Weight of the conjugate face switching probabilities loss regulariser term.')
+        group.add_argument('--w-temporal', type=float, default=1.,
+                           help='Weight of the temporal regularisation term, used to penalise changes from a previous solution.')
         group.add_argument('--w-keypoints', type=float, default=1.,
                            help='Weight of the keypoints loss. Only used when using keypoints model.')
         group.add_argument('--w-anchors', type=float, default=1.,
@@ -630,10 +645,12 @@ class RefinerArgs(BaseArgs):
         # Runtime args
         group.add_argument('--log-every-n-steps', type=int, default=1,
                            help='Log every n batches.')
-        group.add_argument('--plot-every-n-steps', type=int, default=10,
-                           help='Plot every n batches.')
 
         # Plotting args
+        group.add_argument('--plot-every-n-steps', type=int, default=10,
+                           help='Plot every n batches.')
+        group.add_argument('--plot-to-tensorboard', type=str2bool, default=False,
+                           help='Save plots to tensorboard (as well as to disk).')
         group.add_argument('--plot-n-samples', type=int, default=2,
                            help='Number of multi-scale or probabilistic samples to plot.')
         group.add_argument('--plot-n-patches', type=int, default=-1,
