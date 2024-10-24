@@ -173,6 +173,33 @@ TEST_CRYSTALS = {
         'point_group_symbol': '222',
         'scale': 25.0,
     },
+    'beta1': {
+        'lattice_unit_cell': [5.159,17.3,6.948],
+        'lattice_angles': [np.pi / 2, np.pi / 2, np.pi / 2],
+        'miller_indices': [(1, 0, 1), (0, 2, 1), (0, 1, 0)],
+        'distances': [0.93, 0.29, 0.11],
+        'point_group_symbol': '222',
+        'scale': 3.0,
+        'rotation': [np.pi/2, 0, 0],
+    },
+    'beta2': {  # permute beta1 (x, y, z) -> (x, z, y)
+        'lattice_unit_cell': [5.159,6.948,17.3],
+        'lattice_angles': [np.pi / 2, np.pi / 2, np.pi / 2],
+        'miller_indices': [(1, 1, 0), (0, 1, 2), (0, 0, 1)],
+        'distances': [0.93, 0.29, 0.11],
+        'point_group_symbol': '222',
+        'scale': 3.0,
+        'rotation': [0, 0, 0],
+    },
+    'beta3': { # permute beta1 (x, y, z) -> (z, x, y)
+        'lattice_unit_cell': [6.948, 5.159,17.3],
+        'lattice_angles': [np.pi / 2, np.pi / 2, np.pi / 2],
+        'miller_indices': [(1, 1, 0), (1, 0, 2), (0, 0, 1)],
+        'distances': [0.93, 0.29, 0.11],
+        'point_group_symbol': '222',
+        'scale': 3.0,
+        'rotation': [0, 0, np.pi/2],
+    },
 }
 
 
@@ -517,7 +544,7 @@ if __name__ == '__main__':
     # show_projected_image('alpha4')
     # show_projected_image('alpha5')
     # show_projected_image('alpha6')
-    show_vertices('alpha8')
+    show_vertices('beta3')
     # show_vertex_heatmap('alpha6')
     # match_to_scene()
     # make_rotation_video()

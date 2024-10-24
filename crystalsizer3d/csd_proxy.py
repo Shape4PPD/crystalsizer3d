@@ -15,6 +15,13 @@ def _check_for_csd() -> bool:
         return False
 
 
+CRYSTAL_FRAMES = {
+    'LGLUAC01': 'xyz',
+    'LGLUAC02': 'xyz',
+    'LGLUAC11': 'xzy',
+}
+
+
 class CellStructure:
     def __init__(
             self,
@@ -28,7 +35,6 @@ class CellStructure:
 
 
 class CSDProxy:
-
     def __init__(self):
         self._init_reader()
         self._init_local_db()
@@ -42,24 +48,23 @@ class CSDProxy:
         # Try to load it from the cache
         if use_cache:
             cs = self._load_from_local_db(crystal_id)
-            if cs is not None:
-                return cs
 
         # If not found, try to load it from the CSD database
-        if cs is None and not self.csd_available:
-            raise RuntimeError('CSD is not available.')
-        cs = self._load_from_csd(crystal_id)
+        if cs is None:
+            if not self.csd_available:
+                raise RuntimeError('CSD is not available.')
+            cs = self._load_from_csd(crystal_id)
 
-        # Save to the cache
-        self.local_db[crystal_id] = {
-            'lattice_unit_cell': cs.lattice_unit_cell,
-            'lattice_angles': cs.lattice_angles,
-            'point_group_symbol': cs.point_group_symbol
-        }
-        with open(CSD_PROXY_PATH, 'w') as f:
-            json.dump(self.local_db, f, indent=4)
+            # Save to the cache
+            self.local_db[crystal_id] = {
+                'lattice_unit_cell': cs.lattice_unit_cell,
+                'lattice_angles': cs.lattice_angles,
+                'point_group_symbol': cs.point_group_symbol
+            }
+            with open(CSD_PROXY_PATH, 'w') as f:
+                json.dump(self.local_db, f, indent=4)
 
-        return cs
+        return self._permute_cell(crystal_id, cs)
 
     def _init_reader(self):
         """
@@ -114,3 +119,13 @@ class CSDProxy:
         if crystal_id in self.local_db:
             return CellStructure(**self.local_db[crystal_id])
         return None
+
+    def _permute_cell(self, crystal_id: str, cs: CellStructure) -> CellStructure:
+        """
+        Permute the lattice unit cell if necessary to ensure the "z" axis is always at the end.
+        """
+        if crystal_id in CRYSTAL_FRAMES and CRYSTAL_FRAMES[crystal_id] != 'xyz':
+            order = ['xyz'.index(xyz) for xyz in CRYSTAL_FRAMES[crystal_id]]
+            cs.lattice_unit_cell = [cs.lattice_unit_cell[i] for i in order]
+            cs.lattice_angles = [cs.lattice_angles[i] for i in order]
+        return cs
