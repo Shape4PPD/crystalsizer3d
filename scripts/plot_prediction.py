@@ -12,6 +12,7 @@ from matplotlib import pyplot as plt
 from matplotlib.figure import Figure
 from matplotlib.gridspec import GridSpec
 from mayavi import mlab
+from torch import Tensor
 from torch.utils.data import default_collate
 from torchvision.transforms.functional import center_crop, crop, gaussian_blur, to_tensor
 
@@ -19,8 +20,9 @@ from crystalsizer3d import LOGS_PATH, START_TIMESTAMP, USE_CUDA, logger
 from crystalsizer3d.args.base_args import BaseArgs
 from crystalsizer3d.nn.manager import Manager
 from crystalsizer3d.projector import Projector
-from crystalsizer3d.refiner.denoising import denoise_batch, stitch_image, tile_image
+from crystalsizer3d.refiner.denoising import denoise_batch, denoise_image, stitch_image, tile_image
 from crystalsizer3d.scene_components.utils import orthographic_scale_factor
+from crystalsizer3d.util.image_helpers import save_img_grid
 from crystalsizer3d.util.plots import make_3d_digital_crystal_image, make_error_image, plot_distances, plot_light, \
     plot_material, plot_transformation
 from crystalsizer3d.util.utils import print_args, str2bool, to_dict, to_numpy
@@ -36,7 +38,10 @@ class RuntimeArgs(BaseArgs):
             dn_model_path: Optional[Path] = None,
             image_path: Optional[Path] = None,
             ds_idx: int = 0,
-            batch_size: int = 1,
+            noise_batch_size: int = 1,
+            pred_batch_size: int = 1,
+            pred_oversize_input: bool = True,
+            pred_max_img_size: int = 512,
             dn_oversize_input: bool = True,
             dn_max_img_size: int = 512,
 
@@ -67,7 +72,10 @@ class RuntimeArgs(BaseArgs):
             assert image_path.exists(), f'Image path does not exist: {image_path}'
         self.image_path = image_path
         self.ds_idx = ds_idx
-        self.batch_size = batch_size
+        self.noise_batch_size = noise_batch_size
+        self.pred_batch_size = pred_batch_size
+        self.pred_oversize_input = pred_oversize_input
+        self.pred_max_img_size = pred_max_img_size
         self.dn_oversize_input = dn_oversize_input
         self.dn_max_img_size = dn_max_img_size
 
@@ -101,12 +109,19 @@ class RuntimeArgs(BaseArgs):
                            help='Path to the image to process. If set, will override the dataset entry.')
         group.add_argument('--ds-idx', type=int, default=0,
                            help='Index of the dataset entry to use.')
-        group.add_argument('--batch-size', type=int, default=16,
+        group.add_argument('--noise-batch-size', type=int, default=16,
                            help='Batch size for a noisy prediction batch.')
+        group.add_argument('--pred-batch-size', type=int, default=8,
+                           help='Batch size for generating predictions.')
+        group.add_argument('--pred-oversize-input', type=str2bool, default=False,
+                           help='Send images to the predictor at full (or reduced to max) resolution. '
+                                'Otherwise, downsample to the resolution the predictor was trained at.')
+        group.add_argument('--pred-max-img-size', type=int, default=512,
+                           help='Maximum image size for the predictor.')
         group.add_argument('--dn-oversize-input', type=str2bool, default=True,
                            help='Send images to the denoiser at full (or reduced to max) resolution. '
                                 'Otherwise, downsample to the resolution the denoiser was trained at.')
-        group.add_argument('--dn-max-img-size', type=int, default=1024,
+        group.add_argument('--dn-max-img-size', type=int, default=512,
                            help='Maximum image size for the denoiser.')
 
         # Digital crystal image
@@ -169,7 +184,7 @@ def _init(args: Optional[RuntimeArgs], method: str):
         target_str = args.image_path.stem
     dir_name = f'{START_TIMESTAMP}_{args.model_path.stem[:4]}_{target_str}'
     if method == 'prediction_noise_batch':
-        dir_name += f'_bs={args.batch_size}'
+        dir_name += f'_bs={args.noise_batch_size}'
     save_dir = LOGS_PATH / method / dir_name
     save_dir.mkdir(parents=True, exist_ok=True)
 
@@ -245,8 +260,8 @@ def _init(args: Optional[RuntimeArgs], method: str):
 def _plot_parameters(
         manager: Manager,
         args: RuntimeArgs,
-        Y_pred: Dict[str, torch.Tensor],
-        Y_target: Optional[Dict[str, torch.Tensor]] = None,
+        Y_pred: Dict[str, Tensor],
+        Y_target: Optional[Dict[str, Tensor]] = None,
         idx: int = 0,
 ) -> Figure:
     """
@@ -292,10 +307,10 @@ def _make_plots(
         args: RuntimeArgs,
         save_dir: Path,
         manager: Manager,
-        X_target: torch.Tensor,
-        Y_pred: Dict[str, torch.Tensor],
-        Y_target: Optional[Dict[str, torch.Tensor]] = None,
-        r_params_target: Optional[Dict[str, torch.Tensor]] = None,
+        X_target: Tensor,
+        Y_pred: Dict[str, Tensor],
+        Y_target: Optional[Dict[str, Tensor]] = None,
+        r_params_target: Optional[Dict[str, Tensor]] = None,
         idx: int = 0,
 ):
     """
@@ -360,6 +375,8 @@ def _make_plots(
 
     # Render the predicted crystal
     img_pred, scene_pred = manager.crystal_renderer.render_from_parameters(r_params_pred, return_scene=True)
+    if img_pred.shape[:2] != img_target.shape[:2]:
+        img_pred = np.array(Image.fromarray(img_pred).resize(img_target.shape[:2][::-1]))
     Image.fromarray(img_pred).save(save_dir / f'predicted_{idx:02d}.png')
 
     # Project the wireframes onto the images
@@ -392,6 +409,46 @@ def _make_plots(
     plt.close(fig)
 
 
+def _make_image_grid_plots(
+        save_dir: Path,
+        manager: Manager,
+        X_target: Tensor,
+        Y_pred: Dict[str, Tensor],
+):
+    """
+    Make a selection of plots and renderings.
+    """
+    images = []
+
+    for idx, X_target_i in enumerate(X_target):
+        r_params_pred = manager.ds.denormalise_rendering_params(Y_pred, idx)
+        img_target = to_numpy(X_target_i * 255).astype(np.uint8).squeeze().transpose(1, 2, 0)
+
+        # Render the predicted crystal
+        img_pred, scene_pred = manager.crystal_renderer.render_from_parameters(r_params_pred, return_scene=True)
+        if img_pred.shape[:2] != img_target.shape[:2]:
+            img_pred = np.array(Image.fromarray(img_pred).resize(img_target.shape[:2][::-1]))
+
+        # Project the wireframes onto the images
+        projector_args = dict(
+            crystal=scene_pred.crystal,
+            image_size=(img_pred.shape[1], img_pred.shape[0]),
+            zoom=orthographic_scale_factor(scene_pred)
+        )
+        projector = Projector(background_image=img_target, **projector_args)
+        img_target_overlay_pred = to_numpy(projector.image * 255).astype(np.uint8).squeeze()
+
+        images.append(img_target_overlay_pred)
+
+    images = np.stack(images)
+
+    save_img_grid(
+        X=images,
+        lbl='target_overlay_pred',
+        save_dir=save_dir,
+    )
+
+
 def plot_prediction(args: Optional[RuntimeArgs] = None):
     """
     Plot the predicted parameters for a given image.
@@ -410,23 +467,63 @@ def plot_prediction_noise_batch(args: Optional[RuntimeArgs] = None):
     """
     args, manager, save_dir, X_target, Y_target, r_params_target = _init(args, 'prediction_noise_batch')
 
-    # Progressively add more noise to the second half of the batch
-    X_target = X_target.repeat(args.batch_size, 1, 1, 1)
-    noise = torch.randn_like(X_target)[:args.batch_size // 2] \
-            * torch.linspace(0, 0.2, args.batch_size // 2, device=manager.device)[:, None, None, None]
-    X_target[args.batch_size // 2:] = X_target[args.batch_size // 2:] + noise
+    def make_noisy_batch(X, n):
+        # Progressively add more noise to the second half of the batch
+        X = X.repeat(n, 1, 1, 1)
+        noise = torch.randn_like(X)[:n // 2] \
+                * torch.linspace(0, 0.2, n // 2, device=manager.device)[:, None, None, None]
+        X[n // 2:] = X[n // 2:] + noise
 
-    # Progressively blur the first half of the batch
-    for j in range(args.batch_size // 2):
-        X_target[args.batch_size // 2 - j - 1] = gaussian_blur(X_target[args.batch_size // 2 - j], kernel_size=[9, 9])
+        # Progressively blur the first half of the batch
+        for j in range(n // 2):
+            X[n // 2 - j - 1] = gaussian_blur(X[n // 2 - j], kernel_size=[9, 9])
+
+        return X
+
+    # Make the initial batch from the original image
+    X_batch = make_noisy_batch(X_target, args.noise_batch_size)
+
+    # Load the denoising model
+    if args.dn_model_path.exists():
+        logger.info('Denoising the image.')
+        manager.load_network(args.dn_model_path, 'denoiser')
+        X_denoised = denoise_image(
+            manager=manager,
+            X=X_target[0],
+            n_tiles=9,
+            overlap=0.08,
+            oversize_input=args.dn_oversize_input,
+            max_img_size=args.dn_max_img_size,
+            batch_size=3
+        )
+        X_denoised = make_noisy_batch(X_denoised, args.noise_batch_size)
+        X_batch = torch.cat([X_batch, X_denoised])
+
+    # Resize the images if necessary
+    resize_args = dict(mode='bilinear', align_corners=False)
+    img_size = args.pred_max_img_size if args.pred_oversize_input else manager.image_shape[-1]
+    if args.pred_oversize_input and X_batch.shape[-1] > img_size \
+            or not args.pred_oversize_input and X_batch.shape[-1] != img_size:
+        X_batch = F.interpolate(X_batch, size=img_size, **resize_args)
 
     # Predict parameters
     logger.info('Predicting parameters.')
-    Y_pred = manager.predict(X_target)
+    bs = args.pred_batch_size
+    n_batches = (X_batch.shape[0] + bs - 1) // bs
+    Y_pred = {}
+    for i in range(n_batches):
+        X_ = X_batch[i * bs:(i + 1) * bs] if bs > 0 else X_batch
+        Y_pred_i = manager.predict(X_)
+        for k, v in Y_pred_i.items():
+            if k not in Y_pred:
+                Y_pred[k] = v
+            else:
+                Y_pred[k] = torch.concatenate([Y_pred[k], v], dim=0)
 
     # Plot
-    for i in range(args.batch_size):
-        _make_plots(args, save_dir, manager, X_target, Y_pred, Y_target, r_params_target, i)
+    _make_image_grid_plots(save_dir, manager, X_batch, Y_pred)
+    # for i in range(args.noise_batch_size):
+    #     _make_plots(args, save_dir, manager, X_batch, Y_pred, Y_target, r_params_target, i)
 
 
 def plot_denoised_prediction(args: Optional[RuntimeArgs] = None):
@@ -444,9 +541,9 @@ def plot_denoised_prediction(args: Optional[RuntimeArgs] = None):
     X_denoised = manager.denoise(X_target)
 
     # Progressively add more noise to the remainder of the batch
-    X_denoised = X_denoised.repeat(args.batch_size - 1, 1, 1, 1)
+    X_denoised = X_denoised.repeat(args.noise_batch_size - 1, 1, 1, 1)
     noise = torch.randn_like(X_denoised) \
-            * torch.linspace(0, 0.2, args.batch_size - 1, device=manager.device)[:, None, None, None]
+            * torch.linspace(0, 0.2, args.noise_batch_size - 1, device=manager.device)[:, None, None, None]
     X_denoised = X_denoised + noise
 
     X_target = torch.cat([X_target, X_denoised])
