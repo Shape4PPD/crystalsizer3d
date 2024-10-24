@@ -339,6 +339,7 @@ class Projector:
 
         # Calculate cosines and sine^2 for the incident and transmitted angles
         cos_theta_inc = incident @ normal
+        cos_theta_inc = cos_theta_inc.clamp_max(1 - 1e-6)
         sin2_theta_t = eta**2 * (1 - cos_theta_inc**2)
 
         # Check for total internal reflection
