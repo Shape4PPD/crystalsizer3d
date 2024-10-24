@@ -4,6 +4,7 @@ import glob
 import json
 import os
 import shutil
+import sys
 import time
 from argparse import ArgumentParser, Namespace
 from collections import OrderedDict
@@ -28,7 +29,6 @@ from crystalsizer3d.refiner.refiner import Refiner
 from crystalsizer3d.scene_components.scene import Scene
 from crystalsizer3d.util.utils import FlexibleJSONEncoder, hash_data, init_tensor, print_args, smooth_signal, str2bool, \
     to_dict, to_numpy, to_rgb
-
 
 plot_extension = 'png'  # or svg
 
@@ -694,8 +694,6 @@ def _plot_face_property_values(
     plt.savefig(save_dir / f'{property_name}_mean.{plot_extension}')
 
 
-
-
 def _plot_distances(
         parameters: Dict[str, np.ndarray],
         image_paths: List[Tuple[int, Path]],
@@ -712,6 +710,7 @@ def _plot_distances(
         image_paths=image_paths,
         save_dir=save_dir
     )
+
 
 def _plot_areas(
         parameters_final: Dict[str, np.ndarray],
@@ -749,6 +748,7 @@ def _plot_areas(
         save_dir=save_dir
     )
 
+
 def _plot_origin(
         parameters_final: Dict[str, np.ndarray],
         image_paths: List[Tuple[int, Path]],
@@ -770,6 +770,7 @@ def _plot_origin(
     fig.tight_layout()
     plt.savefig(save_dir / f'origin.{plot_extension}')
 
+
 def _plot_rotation(
         parameters_final: Dict[str, np.ndarray],
         image_paths: List[Tuple[int, Path]],
@@ -784,7 +785,7 @@ def _plot_rotation(
     ax.set_title('Axis-angle rotation vector components')
     ax.grid()
     for i in range(3):
-        ax.plot(x_vals, rotations[:, i], label='$R_' + 'xyz'[i]+ '$')
+        ax.plot(x_vals, rotations[:, i], label='$R_' + 'xyz'[i] + '$')
     ax.set_xlabel('Image index')
     ax.set_ylabel('Component value')
     ax.legend()
@@ -884,5 +885,7 @@ def plot_run():
 
 
 if __name__ == '__main__':
-    # track_sequence()
-    plot_run()
+    if len(sys.argv) == 2 and sys.argv[1][:9] == '--run-dir':
+        plot_run()
+    else:
+        track_sequence()
