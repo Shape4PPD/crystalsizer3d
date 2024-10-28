@@ -1875,7 +1875,9 @@ class Refiner:
         plot_transformation(axes[n_rows - 1, 1], **shared_args)
         plot_material(axes[n_rows - 1, 2], **shared_args)
         if n_cols > 3:
-            plot_light(axes[n_rows - 1, 3], **shared_args)
+            ax = axes[n_rows - 1, 3]
+            plot_light(ax, **shared_args)
+            ax.set_ylim(0, 1)
 
         fig.suptitle(f'Step {self.step + 1} Loss: {self.loss:.4E}')
         fig.tight_layout()

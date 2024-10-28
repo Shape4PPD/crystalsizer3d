@@ -758,9 +758,11 @@ def track_sequence():
         refiner = Refiner(args=refiner_args, do_init=False)
 
     # Make some plots
-    # _plot_losses(data['losses_final'], data['losses_all'], image_paths, save_dir_run)
-    # _plot_distances(data['parameters_final'], image_paths, save_dir_run)
+    _plot_losses(data['losses_final'], data['losses_all'], image_paths, save_dir_run)
+    _plot_distances(data['parameters_final'], image_paths, save_dir_run)
     _plot_areas(data['parameters_final'], image_paths, save_dir_run)
+    _plot_origin(data['parameters_final'], image_paths, save_dir_run)
+    _plot_rotation(data['parameters_final'], image_paths, save_dir_run)
 
     # Print how long this took - split into hours, minutes, seconds
     elapsed_time = time.time() - start_time
