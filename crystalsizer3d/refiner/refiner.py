@@ -1280,11 +1280,11 @@ class Refiner:
         anchors_loss, anchors_stats = self._anchors_loss()
 
         # Combine losses
-        loss = l1_loss * self.args.w_img_l1 \
-               + l2_loss * self.args.w_img_l2 \
-               + percept_loss * self.args.w_perceptual \
-               + latent_loss * self.args.w_latent \
-               + rcf_loss * self.args.w_rcf \
+        loss = l1_loss.cpu() * self.args.w_img_l1 \
+               + l2_loss.cpu() * self.args.w_img_l2 \
+               + percept_loss.cpu() * self.args.w_perceptual \
+               + latent_loss.cpu() * self.args.w_latent \
+               + rcf_loss.cpu() * self.args.w_rcf \
                + overshoot_loss * self.args.w_overshoot \
                + symmetry_loss * self.args.w_symmetry \
                + z_pos_loss * self.args.w_z_pos \
@@ -1513,7 +1513,7 @@ class Refiner:
         """
         Calculate the symmetry loss - how close are the face distances within each group.
         """
-        loss = torch.tensor(0., device=self.device)
+        loss = torch.tensor(0., device=self.crystal.origin.device)
         if self.symmetry_idx is None:
             return loss, {}
         for i, hkl in enumerate(self.manager.ds.dataset_args.miller_indices):
@@ -1629,7 +1629,7 @@ class Refiner:
         """
         Calculate the conjugate switching loss.
         """
-        loss = torch.tensor(0., device=self.device)
+        loss = torch.tensor(0., device=self.conj_switch_probs.device)
         stats = {}
         if not self.args.use_conj_switching or self.conj_switch_probs is None:
             return loss, stats
@@ -1648,7 +1648,7 @@ class Refiner:
         """
         Calculate the temporal regularisation loss.
         """
-        loss = torch.tensor(0., device=self.device)
+        loss = torch.tensor(0., device=self.crystal.distances.device)
         stats = {}
         if self.prev_distances is None:
             return loss, stats
@@ -1663,7 +1663,7 @@ class Refiner:
         """
         Calculate the keypoints loss.
         """
-        loss = torch.tensor(0., device=self.device)
+        loss = torch.tensor(0., device=self.keypoint_targets.device)
         stats = {}
         if not self.args.use_keypoints or self.keypoint_targets is None or len(self.keypoint_targets) == 0:
             return loss, stats
@@ -1698,7 +1698,7 @@ class Refiner:
         """
         Calculate the loss for manual constraints.
         """
-        loss = torch.tensor(0., device=self.device)
+        loss = torch.tensor(0.)
         stats = {}
         if len(self.anchors) == 0:
             return loss, stats
