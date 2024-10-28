@@ -1060,9 +1060,11 @@ class Refiner:
                 logger.info(log_msg)
                 running_loss = 0.
                 running_metrics = {k: 0. for k in self.metric_keys}
-                seconds_left = float((self.args.max_steps - step) * time_per_step / log_freq)
+                average_tps = running_tps / log_freq
+                running_tps = 0
+                seconds_left = float((self.args.max_steps - step) * average_tps)
                 logger.info('Time per step: {}, Est. complete in: {}'.format(
-                    str(timedelta(seconds=time_per_step)),
+                    str(timedelta(seconds=average_tps)),
                     str(timedelta(seconds=seconds_left))))
 
             # Plots
