@@ -273,7 +273,7 @@ class Refiner:
         """
         self.projector = Projector(
             crystal=self.crystal,
-            image_size=(self.args.rendering_size, self.args.rendering_size),
+            image_size=(400, 400),
             zoom=orthographic_scale_factor(self.scene),
             multi_line=True,
             rtol=1e-2
@@ -839,7 +839,8 @@ class Refiner:
         if scene_path.exists():
             try:
                 self.X_pred = torch.load(X_pred_path, weights_only=True)
-                self.scene = update_scene_parameters(Scene.from_yml(scene_path))
+                scene = Scene.from_yml(scene_path)
+                self.scene = update_scene_parameters(scene)
                 self.scene_params = mi.traverse(self.scene.mi_scene)
                 self.crystal = self.scene.crystal
                 logger.info('Loaded initial prediction from cache.')
@@ -1768,13 +1769,13 @@ class Refiner:
         Plot the target and optimised images side by side.
         """
         X_target_og = self.X_target if isinstance(self.X_target, Tensor) else self.X_target[0]
-        X_target_aug = self.X_target_aug if isinstance(self.X_target_aug, Tensor) else self.X_target_aug[0]
-        Xs = [X_target_og, X_target_aug]
+        X_target_dn = self.X_target_denoised if isinstance(self.X_target_denoised, Tensor) else self.X_target_denoised[0]
+        Xs = [X_target_og, X_target_dn]
         if self.args.use_inverse_rendering:
             X_pred = [self.X_pred] if isinstance(self.X_pred, Tensor) else self.X_pred
             Xs.extend(X_pred)
         if self.args.use_keypoints:
-            Xs.append(X_target_aug)
+            Xs.append(X_target_dn)
         n_cols = len(Xs)
 
         n_rows = 3
