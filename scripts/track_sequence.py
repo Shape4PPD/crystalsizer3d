@@ -12,13 +12,11 @@ from pathlib import Path
 from typing import Any, Dict, List, Tuple
 
 import numpy as np
-import pandas as pd
 import torch
 import yaml
 from matplotlib import pyplot as plt
 from matplotlib.colors import hsv_to_rgb, rgb_to_hsv
 from matplotlib.gridspec import GridSpec
-from pims import ImageSequence
 from torch import Tensor
 
 from crystalsizer3d import LOGS_PATH, START_TIMESTAMP, logger
@@ -166,48 +164,6 @@ def _get_image_paths(args: Namespace):
     )]
     logger.info(f'Found {len(all_image_paths)} images in {args.images_dir}. Using {len(image_paths)} images.')
     return image_paths
-
-
-def _load_measurements(image_seq: ImageSequence, args: Namespace) -> Dict[int, List[float]]:
-    """
-    Load a spreadsheet of measurements if available.
-    """
-    measurements = {}
-    xls = args.measurements_xls
-    if xls is None:
-        # Try to find the measurements file in the parent directory of the images directory
-        xls = args.images_dir.parent / 'measurements.xlsx'
-        if not xls.exists():
-            xls = None
-    if xls is not None:
-        if not xls.is_absolute():
-            xls = args.images_dir / xls
-        assert xls.exists(), \
-            f'Measurements file {xls} does not exist.'
-        assert xls.suffix in ['.xls', '.xlsx'], \
-            f'Expecting an xls or xlsx file, not {xls}.'
-        logger.info(f'Loading measurements from {xls}.')
-        xl_file = pd.ExcelFile(xls)
-        sheet_names = {n: n for n in xl_file.sheet_names}
-        for sn in xl_file.sheet_names:
-            if 'R' in sn and 'Repeat' not in sn:
-                sheet_names[sn.replace('R', 'Repeat ')] = sn
-        if args.images_dir.name in sheet_names:
-            df = xl_file.parse(sheet_names[args.images_dir.name])
-        elif len(sheet_names) == 1:
-            df = xl_file.parse(xl_file.sheet_names[0])
-        else:
-            raise RuntimeError(f'Multiple sheets in xls and none match the images directory: "{args.images_dir.name}".')
-
-        # Extract measurements
-        for i, fp in enumerate(image_seq._filepaths):
-            p = Path(fp).name
-            res = df[df['File'] == p]
-            if len(res) == 1:
-                row = res.values[0]
-                measurements[i] = [row[1], row[2], row[3]]
-
-    return measurements
 
 
 def _calculate_crystals(
@@ -468,34 +424,6 @@ def _generate_or_load_crystals(
         data = _calculate_crystals(args, refiner_args, save_dir_seq, image_paths)
 
     return data
-
-
-def _save_parameters_to_csv(image_seq: ImageSequence, hexagons: np.ndarray, save_dir: Path):
-    """
-    Save the hexagon parameters to csv.
-    """
-    save_path = save_dir / f'hexagon_parameters.csv'
-    logger.info(f'Saving hexagon parameters to {save_path}.')
-    data = hexagons.copy()
-
-    # Take angles in the range [0, pi]
-    data[:, 2:5] = np.mod(data[:, 2:5], np.pi)
-
-    # Calculate face distances (sum of length pairs)
-    lengths = data[:, 5:11].reshape(-1, 3, 2)
-    distances = lengths.sum(axis=-1)
-    data = np.concatenate([data, distances], axis=-1)
-
-    # Take absolute temperatures
-    data[:, 11] = np.abs(data[:, 11])
-
-    # Add the filenames as the first column
-    filenames = np.array([Path(fp).name for fp in image_seq._filepaths])
-    data = np.concatenate([filenames[:, None], data], axis=-1)
-
-    # Append distances to hexagons and write to file
-    np.savetxt(save_path, data, '%s', delimiter=',',
-               header='filename,x,y,a0,a1,a2,l0a,l0b,l1a,l1b,l2a,l2b,temp,d0,d1,d2')
 
 
 def _make_video(images_or_masks: str, save_dir: Path):
