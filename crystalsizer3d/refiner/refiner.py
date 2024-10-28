@@ -1429,7 +1429,12 @@ class Refiner:
         model_input = torch.cat([X_target, X_pred]).permute(0, 3, 1, 2)
 
         # Resize images for input
-        input_size = self.dn_config.data.init_args.train.params.config.size
+        if self.args.latents_input_size == 0:
+            input_size = self.dn_config.data.init_args.train.params.config.size
+        elif self.args.latents_input_size == -1:
+            input_size = model_input.shape[-1]
+        else:
+            input_size = self.args.latents_input_size
         if model_input.shape[-1] != input_size:
             model_input = F.interpolate(model_input, size=(input_size, input_size), mode='bilinear',
                                         align_corners=False)

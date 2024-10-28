@@ -145,6 +145,7 @@ class RefinerArgs(BaseArgs):
             # Helper models
             perceptual_model: Optional[str] = None,
             latents_model: Optional[str] = None,
+            latents_input_size: int = 0,
             mv2_config_path: Optional[Path] = DATA_PATH / 'MAGVIT2' / 'imagenet_lfqgan_256_B.yaml',
             mv2_checkpoint_path: Optional[Path] = DATA_PATH / 'MAGVIT2' / 'imagenet_256_B.ckpt',
             rcf_model_path: Optional[Path] = DATA_PATH / 'bsds500_pascal_model.pth',
@@ -341,6 +342,7 @@ class RefinerArgs(BaseArgs):
         # Helper models
         self.perceptual_model = perceptual_model
         self.latents_model = latents_model
+        self.latents_input_size = latents_input_size
         self.mv2_config_path = mv2_config_path
         self.mv2_checkpoint_path = mv2_checkpoint_path
         self.rcf_model_path = rcf_model_path
@@ -632,6 +634,9 @@ class RefinerArgs(BaseArgs):
                            help='Perceptual model to use. Must start with "timm/".')
         group.add_argument('--latents-model', type=str, default='MAGVIT2',
                            help='Latent encoder model to use. Only MAGVIT2 supported.')
+        group.add_argument('--latents-input-size', type=int, default=0,
+                           help='Size of the input images to the latents model. '
+                                '0: resize to training image size (256). -1: use rendered image size.')
         group.add_argument('--mv2-config-path', type=Path,
                            default=DATA_PATH / 'MAGVIT2' / 'imagenet_lfqgan_256_B.yaml',
                            help='Path to the MAGVIT2 config file to use.')

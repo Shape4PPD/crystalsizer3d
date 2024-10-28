@@ -69,7 +69,7 @@ def get_args(printout: bool = True) -> Tuple[Namespace, RefinerArgs]:
     # Target sequence
     parser.add_argument('--args-path', type=Path,
                         help='Load refiner arguments from this path, any arguments set on the command-line will take preference.')
-    parser.add_argument('--images-dir', type=Path, required=True,
+    parser.add_argument('--images-dir', type=Path,
                         help='Directory containing the sequence of images.')
     parser.add_argument('--image-ext', type=str, default='jpg',
                         help='Image extension.')
