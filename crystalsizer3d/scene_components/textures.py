@@ -2,9 +2,13 @@ from typing import Optional, TYPE_CHECKING
 
 import cv2
 import numpy as np
-import pyfastnoisesimd as fns
 import torch
 from torch.nn.functional import interpolate
+
+try:
+    import pyfastnoisesimd as fns
+except ImportError:
+    fns = None
 
 from crystalsizer3d.util.geometry import line_equation_coefficients, line_intersection, normalise
 from crystalsizer3d.util.utils import get_seed, is_power_of_two, to_dict, to_numpy
