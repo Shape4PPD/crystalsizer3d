@@ -1146,7 +1146,6 @@ class Refiner:
         """
         Process a single step.
         """
-        device = self.scene.device
         rotation = self.crystal.rotation
         distances = self.crystal.distances
         roughness = self.crystal.material_roughness
@@ -1197,13 +1196,14 @@ class Refiner:
 
         # Rebuild the mesh
         v, f = self.crystal.build_mesh(distances=distances, rotation=rotation, update_uv_map=False)
-        v, f = v.to(device), f.to(device)
-        eta = ior.to(device) / self.scene.crystal_material_bsdf['ext_ior']
-        roughness = roughness.to(device).clone()
-        radiance = radiance.to(device).clone()
 
         # Render new image
         if self.args.use_inverse_rendering:
+            device = self.scene.device
+            v, f = v.to(device), f.to(device)
+            eta = ior.to(device) / self.scene.crystal_material_bsdf['ext_ior']
+            roughness = roughness.to(device).clone()
+            radiance = radiance.to(device).clone()
             X_pred = self._render_image(v, f, eta, roughness, radiance, seed=self.step)
             X_pred = torch.clip(X_pred, 0, 1)
             if self.args.multiscale:
