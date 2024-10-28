@@ -822,12 +822,24 @@ class Refiner:
         cache_dir = self.save_dir / 'cache'
         scene_path = cache_dir / 'scene.yml'
         X_pred_path = cache_dir / 'X_pred.pt'
+
+        def update_scene_parameters(scene_: Scene):
+            # Update the scene rendering parameters for optimisation
+            scene_.res = self.args.rendering_size
+            scene_.spp = self.args.spp
+            scene_.camera_type = 'perspective'  # thinlens doesn't work for inverse rendering
+            scene_.integrator_max_depth = self.args.integrator_max_depth
+            scene_.integrator_rr_depth = self.args.integrator_rr_depth
+            scene_.light_radiance = nn.Parameter(init_tensor(scene.light_radiance, device=scene.device),
+                                                 requires_grad=True)
+            scene_.build_mi_scene()
+            scene_.crystal.to('cpu')
+            return scene_
+
         if scene_path.exists():
             try:
                 self.X_pred = torch.load(X_pred_path, weights_only=True)
-                self.scene = Scene.from_yml(scene_path)
-                self.scene.crystal.to('cpu')
-                self.scene.light_radiance = nn.Parameter(init_tensor(self.scene.light_radiance), requires_grad=True)
+                self.scene = update_scene_parameters(Scene.from_yml(scene_path))
                 self.scene_params = mi.traverse(self.scene.mi_scene)
                 self.crystal = self.scene.crystal
                 logger.info('Loaded initial prediction from cache.')
@@ -950,13 +962,7 @@ class Refiner:
 
         # Update the scene rendering parameters for optimisation
         wis = (self.args.rendering_size, self.args.rendering_size)
-        scene.res = wis[0]
-        scene.spp = self.args.spp
-        scene.integrator_max_depth = self.args.integrator_max_depth
-        scene.integrator_rr_depth = self.args.integrator_rr_depth
-        scene.camera_type = 'perspective'  # thinlens doesn't work for inverse rendering
-        scene.light_radiance = nn.Parameter(init_tensor(scene.light_radiance, device=scene.device), requires_grad=True)
-        scene.build_mi_scene()
+        scene = update_scene_parameters(scene)
         scene_params = mi.traverse(scene.mi_scene)
 
         # Render the new scene
@@ -1209,7 +1215,7 @@ class Refiner:
             if self.args.multiscale:
                 X_pred = to_multiscale(X_pred, self.blur)
         else:
-            X_pred = torch.zeros_like(self.X_target)
+            X_pred = torch.zeros_like(self.X_target_wis)
         self.X_pred = X_pred
 
         # Use denoised target if available
