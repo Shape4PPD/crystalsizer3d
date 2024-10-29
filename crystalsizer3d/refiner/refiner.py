@@ -1017,7 +1017,7 @@ class Refiner:
             self.step = step
 
             # Conditionally enable the inverse rendering
-            self.args.use_inverse_rendering = use_inverse_rendering and step > self.args.ir_wait_n_steps
+            self.args.use_inverse_rendering = use_inverse_rendering and step >= self.args.ir_wait_n_steps
 
             # Train for a single step
             loss, stats = self._train_step()
