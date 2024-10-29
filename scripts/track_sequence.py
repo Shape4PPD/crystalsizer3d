@@ -309,10 +309,12 @@ def _calculate_crystals(
             # Make the initial prediction - should use cache if available
             if scene_init is None:
                 refiner.make_initial_prediction()
+                prev_distances = None
 
             # Otherwise, use the previous solution as the starting point
             else:
                 refiner.set_initial_scene(scene_init)
+                prev_distances = scene_init.crystal.distances.clone().detach()
 
                 # Update any parameters that should be overridden for subsequent frames
                 if not applied_seq_args:
@@ -329,7 +331,7 @@ def _calculate_crystals(
 
             # Refine the crystal fit
             refiner.step = 0
-            refiner.train(callback=after_refine_step)
+            refiner.train(callback=after_refine_step, prev_distances=prev_distances)
 
             # Rescale the distances and scales (note this doesn't canonicalise them, but comes close)
             distances_i = np.array(parameters_i['distances'])
@@ -790,21 +792,22 @@ def plot_run():
         args_dict = yaml.load(f, Loader=yaml.FullLoader)
     args = Namespace(**args_dict)
     args.images_dir = Path(args.images_dir)
-    refiner_args = RefinerArgs.from_args(args)
-    save_dir_seq = LOGS_PATH / f'{args.images_dir.name}'
-    # save_dir_seq = Path(args['save_dir_seq'])
+    save_dir_seq = Path(args.save_dir_seq)
     assert save_dir_seq.exists(), f'Sequence save directory {save_dir_seq} does not exist.'
     image_paths = _get_image_paths(args)
 
     # Load the data
+    refiner_dir = save_dir_seq / 'refiner' / args.refiner_dir
+    assert refiner_dir.exists(), f'Refiner output directory {refiner_dir} does not exist.'
     data = {}
     for name in ['losses', 'stats', 'parameters']:
         for all_or_final in ['all', 'final']:
             key = f'{name}_{all_or_final}'
-            with open(run_dir / f'{name}_{all_or_final}.json', 'r') as f:
+            with open(refiner_dir / f'{name}_{all_or_final}.json', 'r') as f:
                 data[key] = _json_to_numpy(json.load(f))
 
     # Instantiate a refiner
+    refiner_args = RefinerArgs.from_args(args)
     refiner = Refiner(args=refiner_args, do_init=False)
 
     # Make plots
@@ -813,9 +816,6 @@ def plot_run():
     _plot_areas(data['parameters_final'], image_paths, run_dir)
     _plot_origin(data['parameters_final'], image_paths, run_dir)
     _plot_rotation(data['parameters_final'], image_paths, run_dir)
-
-    # Make annotated images and videos
-    # todo
 
 
 if __name__ == '__main__':
