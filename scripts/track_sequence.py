@@ -734,7 +734,6 @@ def track_sequence():
     # Make save directories
     save_dir_seq = LOGS_PATH / f'{args.images_dir.name}'
     run_dir_name = START_TIMESTAMP
-    run_dir_name = 'START_TIMESTAMP'
     if args.start_image != 0 or args.end_image != -1 or args.every_n_images != 1:
         run_dir_name += f'_[{args.start_image}:{args.end_image}:{args.every_n_images}]'
     save_dir_run = save_dir_seq / 'runs' / run_dir_name
