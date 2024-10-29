@@ -18,7 +18,7 @@ from edge_detection import load_rcf
 from scipy.ndimage import distance_transform_edt
 from torchvision.transforms.functional import to_tensor
 from scipy.ndimage import gaussian_filter
-
+import json
 from torch.utils.tensorboard import SummaryWriter
 import io
 
@@ -58,14 +58,17 @@ class ContourDistanceNormalLoss(nn.Module):
             # # sampled_values = self.sample_image_along_line(distance_image,line_points)
             reference_value = self.points_in_image(ref_point.point.unsqueeze(0), distance_image)
             
-            nearest_minimum_posistion, nearest_minimum_value = self.find_nearest_local_minimum(distance_image, line_points, ref_point.point)
+            # nearest_minimum_posistion, nearest_minimum_value = self.find_nearest_local_minimum(distance_image, line_points, ref_point.point)
+            nearest_minimum_posistion, nearest_minimum_value = self.find_closest_minima(distance_image, line_points, ref_point.point,window_size=5)
             if nearest_minimum_value == None:
                 continue
             # get the distance to the closest peak
             distance = nearest_minimum_posistion - ref_point.point
             ref_point.set_distance(distance)
             # # Compute the mean squared error between the sampled values and the reference value
-            loss = F.mse_loss(nearest_minimum_value.squeeze(), reference_value.squeeze())
+            # loss = F.mse_loss(nearest_minimum_value.squeeze(), reference_value.squeeze())
+            loss = torch.mean(( reference_value.squeeze() - nearest_minimum_value.squeeze()) ** 2) # l2 loss
+            # loss = torch.mean(torch.exp(torch.abs(reference_value.squeeze() - nearest_minimum_value.squeeze()))) # exp loss
             # loss = F.mse_loss(reference_point, reference_point)
             if torch.isnan(loss).any():
                 print("Found NaN values in x!")
@@ -206,23 +209,27 @@ class ContourDistanceNormalLoss(nn.Module):
         nearest_minimum_index = torch.argmin(distances)
         nearest_minimum_position = sampled_points[local_minima_indices]
         nearest_minimum_value = image_values[local_minima_indices]
-        plot_sampled_points_with_intensity(image, sampled_points, image_values, reference_point, nearest_minimum_position)
+        # plot_sampled_points_with_intensity(image, sampled_points, image_values, reference_point, nearest_minimum_position)
         return nearest_minimum_position, nearest_minimum_value
     
-    def find_local_minima(self,tensor):
-        local_minima_indices = []
-        n = len(tensor)
+    # def find_local_minima(self,tensor):
+    #     local_minima_indices = []
+    #     n = len(tensor)
 
-        for i in range(1, n - 1):
-            # Handle the case where the current value is less than both neighbors
-            if tensor[i - 1] > tensor[i] < tensor[i + 1]:
-                local_minima_indices.append(i)
-            # Handle the case where adjacent values are equal and both are smaller than neighbors
-            elif tensor[i - 1] > tensor[i] == tensor[i + 1]:
-                local_minima_indices.append(i)
-                local_minima_indices.append(i + 1)
-        
-        return list(set(local_minima_indices))  # Remove duplicates, if any
+    #     for i in range(1, n - 1):
+    #         # Handle the case where the current value is less than both neighbors
+    #         if tensor[i - 1] > tensor[i] < tensor[i + 1]:
+    #             local_minima_indices.append(i)
+    #         # Handle the case where adjacent values are equal and both are smaller than neighbors
+    #         elif tensor[i - 1] > tensor[i] == tensor[i + 1]:
+    #             local_minima_indices.append(i)
+    #             local_minima_indices.append(i + 1)
+    #     # local_minima_list = list(set(local_minima_indices))
+    #     # if local_minima_list.dim() == 0:
+    #     #     # Apply unsqueeze to add a new dimension
+    #     #     local_minima_list = local_minima_list.unsqueeze(0)
+    #     # return list(set(local_minima_indices))  # Remove duplicates, if any
+    #     return local_minima_indices
 
     # Function to find the nearest minimum on either side of a given start point
     def find_nearest_minimum(self,tensor, start_idx):
@@ -331,50 +338,55 @@ class ContourDistanceNormalLoss(nn.Module):
         loss = torch.mean(min_distances_a_to_b) + torch.mean(min_distances_b_to_a)
         return loss
     
-    # def plot_min_line(self, image, sampled_points, reference_point):
-    #     # Create a figure and axis
-    #     plt.figure(figsize=(6, 6))
-        
-    #     plt.imshow(image.squeeze(0).squeeze(0).cpu().detach().numpy(), cmap='gray', alpha=0.5)
-
-    #     # Plot the single point
-    #     plt.scatter(reference_point[0].detach().cpu().detach().numpy(), reference_point[1].cpu().detach().numpy(), color='red', label='Single Point', s=30)
-
-    #     # Plot the list of points
-    #     plt.scatter(sampled_points[:, 0].cpu().detach().numpy(), sampled_points[:, 1].cpu().detach().numpy(), color='blue', label='List of Points', s=10)
-
-    #     # Add grid lines, labels, and a legend
-    #     plt.axhline(0, color='black',linewidth=0.5)
-    #     plt.axvline(0, color='black',linewidth=0.5)
-    #     # plt.xlim(-5, 5)
-    #     # plt.ylim(-5, 5)
-    #     plt.title("Tensor as Image, Single Point, and List of Points")
-    #     plt.colorbar(plt.imshow(image.squeeze(0).squeeze(0).cpu().detach().numpy(), cmap='gray', alpha=0.5), label="Image Intensity")
-    #     plt.legend()
-
-    #     # Show the plot
-    #     plt.show()
     
-    # def plot_slice(self,tensor_1d):
-    #     plt.figure(figsize=(6, 4))
-        
-    #     derivative = torch.diff(tensor_1d.squeeze(1))
-    #     derivative2n = torch.diff(derivative)
-    #     plt.plot(tensor_1d.cpu().detach().numpy(), marker='o', linestyle='-', color='b', label='1D Tensor')
-        
-    #     plt.plot(derivative.cpu().detach().numpy(), marker='o', linestyle='-', color='r', label='1D Tensor')
+    def smooth_tensor(self,tensor, window_size=3):
+        # Apply a simple moving average filter for smoothing
+        kernel = torch.ones(window_size) / window_size
+        padding = window_size // 2
+        smooth_tensor = torch.nn.functional.conv1d(tensor.unsqueeze(0).unsqueeze(0), 
+                                                kernel.unsqueeze(0).unsqueeze(0), 
+                                                padding=padding)
+        return smooth_tensor.squeeze()
 
-    #     plt.plot(derivative2n.cpu().detach().numpy(), marker='o', linestyle='-', color='g', label='1D Tensor')
-    #     # Add title and labels
-    #     plt.title("Plot of 1D Tensor")
-    #     plt.xlabel("Index")
-    #     plt.ylabel("Value")
-    #     plt.grid(True)
-    #     plt.legend()
+    def find_local_minima(self,tensor):
+        # Create shifted versions of the tensor
+        shifted_left = torch.roll(tensor, shifts=1)
+        shifted_right = torch.roll(tensor, shifts=-1)
 
-    #     # Show the plot
-    #     plt.show()
-    
+        # Compare each element to its neighbors to find local minima
+        minima_mask = (tensor < shifted_left) & (tensor < shifted_right)
+        
+        # Exclude the first and last elements (edge cases, as they have no two neighbors)
+        minima_mask[0] = minima_mask[-1] = False
+        
+        # Get the indices of the minima
+        minima_indices = torch.nonzero(minima_mask.squeeze()).squeeze()
+        if minima_indices.dim() == 0:
+                # Apply unsqueeze to add a new dimension
+                minima_indices = minima_indices.unsqueeze(0)
+        return minima_indices
+
+    def find_closest_minima(self,image, sampled_points, reference_point, smooth=False, window_size=3):
+        
+        # Sample the image along the line to get the intensity values
+        image_values = self.points_in_image(sampled_points, image).squeeze(0).squeeze(0) # .mean(dim=0)  # Get grayscale values (mean over channels)
+
+        dist = torch.norm(sampled_points - reference_point, dim=1)
+        ref_ind = torch.argmin(dist)
+        
+        if smooth:
+            image_values = self.smooth_tensor(image_values, window_size=window_size)  # Apply smoothing if noise is present
+        
+        minima_indices = self.find_local_minima(image_values)
+        
+        # Find the index of the minimum closest to the given index
+        if len(minima_indices) > 0:
+            closest_minima_idx = minima_indices[(minima_indices - ref_ind).abs().argmin()].item()
+            closest_minima_value = image_values[closest_minima_idx]
+            return sampled_points[closest_minima_idx], closest_minima_value
+        else:
+            return None, None  # No minima found
+        
 TEST_CRYSTALS = {
     'cube': {
         'lattice_unit_cell': [1, 1, 1],
@@ -485,7 +497,8 @@ def generate_synthetic_crystal(
     )
     img = scene.render()
     img = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)  # todo: do we need this?
-
+    img = Image.fromarray((img * 255).astype(np.uint8))
+    img.save(save_dir / 'rcf_featuremaps' / f'rendered_crystal.png')
     # Get the unit scale factor
     z = crystal.vertices[:, 2].mean().item()
     _, (min_y, max_y) = scene.get_xy_bounds(z)
@@ -557,28 +570,7 @@ def generate_synthetic_crystal(
     
     return f_map, dist_map, img_og, img_overlay, zoom
 
-def run():
-    
-    save_dir = LOGS_PATH / f'{START_TIMESTAMP}'#_{args.image_path.name}'
-    rcf_dir = save_dir / 'rcf_featuremaps'
-    save_dir.mkdir(parents=True, exist_ok=True)
-    rcf_dir.mkdir(parents=True, exist_ok=True)
-    writer = SummaryWriter(log_dir=str(save_dir / 'tensorboard_logs'))
-
-    # crystal_tar = Crystal(**TEST_CRYSTALS['cube'])
-    crystal_tar = Crystal(**TEST_CRYSTALS['alpha'])
-    crystal_tar.scale.data= init_tensor(1.2, device=crystal_tar.scale.device)
-    crystal_tar.origin.data[:2] = torch.tensor([0, 0], device=crystal_tar.origin.device)
-    crystal_tar.origin.data[2] -= crystal_tar.vertices[:, 2].min()
-    v, f = crystal_tar.build_mesh()
-    crystal_tar.to(device)
-
-    # generate a synthetic crystal to compare too
-    f_map, dist_map, img, img_overlay, zoom = generate_synthetic_crystal(
-        crystal_tar,
-        save_dir,
-    )
-    
+def generate_line_crystal(img_overlay,save_dir):
     #convert image overlay
     overlay_pil = Image.fromarray(img_overlay.astype(np.uint8))
     overlay_pil.save(save_dir / 'overlay_image.png')
@@ -609,18 +601,44 @@ def run():
     distance_map_tensor = to_tensor(dist).squeeze(0)
     Image.fromarray((dist * 255).astype(np.uint8)).save(save_dir / 'distance_map.png')
     dist_map = dist
+    return distance_map_tensor
 
+def run():
+    
+    save_dir = LOGS_PATH / f'{START_TIMESTAMP}'#_{args.image_path.name}'
+    rcf_dir = save_dir / 'rcf_featuremaps'
+    crystal_dir = save_dir / 'crystals'
+    save_dir.mkdir(parents=True, exist_ok=True)
+    rcf_dir.mkdir(parents=True, exist_ok=True)
+    crystal_dir.mkdir(parents=True, exist_ok=True)
+    writer = SummaryWriter(log_dir=str(save_dir / 'tensorboard_logs'))
 
+    # crystal_tar = Crystal(**TEST_CRYSTALS['cube'])
+    crystal_tar = Crystal(**TEST_CRYSTALS['alpha'])
+    crystal_tar.scale.data= init_tensor(1.2, device=crystal_tar.scale.device)
+    crystal_tar.origin.data[:2] = torch.tensor([0, 0], device=crystal_tar.origin.device)
+    crystal_tar.origin.data[2] -= crystal_tar.vertices[:, 2].min()
+    v, f = crystal_tar.build_mesh()
+    crystal_tar.to(device)
 
-    # Step 3: Convert to tensor
-    img_tensor = distance_map_tensor
+    # generate a synthetic crystal to compare too
+    f_map, dist_map, img, img_overlay, zoom = generate_synthetic_crystal(
+        crystal_tar,
+        save_dir,
+    )
+    
+    # from crystal lines
+    # img_tensor = generate_line_crystal(img_overlay,save_dir)
+    # # Normalize the tensor to the range [0, 1] if needed
+    # img_tensor = img_tensor / 255.0
+    # img_tensor = img_tensor.unsqueeze(0).unsqueeze(0).to(device)
 
-
-    # Normalize the tensor to the range [0, 1] if needed
-    img_tensor = img_tensor / 255.0
-    img_tensor = img_tensor.unsqueeze(0).unsqueeze(0).to(device)
-    # f_map = f_map.to(device)
-    # dist_map = dist_map.to(device)
+    # from synthetic crystal
+    # f_map_inv = 1 - f_map
+    img_tensor = f_map.to(device)
+    # dist_inv = 1 - dist_map
+    # img_tensor = dist_inv.to(device)
+    # # dist_map = dist_map.to(device)
     
     projector_tar = ProjectorPoints(crystal_tar,
                                 external_ior=1.333,
@@ -719,7 +737,8 @@ def run():
             # img_overlay[:, :, 3] = (img_overlay[:, :, 3] * 0.5).astype(np.uint8)
             # overlay_plot(img,points_opt,save_dir,'progress_' + str(step))
             multiplot(img_overlay,points_opt,save_dir,'progress_' + str(step).zfill(3),plot_loss_dist=True, writer=writer,global_step=step)
-        
+            crystal_opt.to_json(crystal_dir / f"crystal_{str(step).zfill(3)}.json")
+            
         optimizer.step()
 
         # Log the loss value

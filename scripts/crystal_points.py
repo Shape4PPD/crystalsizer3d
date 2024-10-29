@@ -320,7 +320,7 @@ class ProjectorPoints(nn.Module):
             visable_points = []
             start_vertex = ref_edge_2d[0]
             end_vertex = ref_edge_2d[1]
-            
+            dist = torch.norm(end_vertex - start_vertex)
             intersections, start_inside, end_inside = self._line_face_intersection(front_face_2d,[start_vertex,end_vertex]) 
 
             # see if it crosses face edges at all
@@ -378,25 +378,28 @@ class ProjectorPoints(nn.Module):
         n = vertices.shape[0]
         intersections = 0
         intersection_points = []
-        
+        atol = 1e-0
         # Check if the start or end point is inside the polygon
         start_inside = self._is_point_in_polygon(vertices, test_edge[0])
         end_inside = self._is_point_in_polygon(vertices, test_edge[1])
         
         def does_point_exist(point):
             for inter in intersection_points:
-                if torch.allclose(inter,point):
+                if torch.allclose(inter,point,atol=atol):
                     return True
             return False
         # Check for intersections with each polygon edge
         for i in range(n):
             v1 = vertices[i]
             v2 = vertices[(i + 1) % n]
-            if torch.isclose(v1,test_edge[0],atol=1e-1).all() and torch.isclose(v2,test_edge[1],atol=1e-1).all():
+            if torch.isclose(v1,test_edge[0],atol=atol).all() and torch.isclose(v2,test_edge[1],atol=atol).all():
                 continue
-            if torch.isclose(v2,test_edge[0],atol=1e-1).all() and torch.isclose(v1,test_edge[1],atol=1e-1).all():
+            if torch.isclose(v2,test_edge[0],atol=atol).all() and torch.isclose(v1,test_edge[1],atol=atol).all():
                 continue
             intersection, intersect = self._line_intersection(test_edge,[v1,v2])
+            
+            
+            
             if intersect:
                 intersections += 1
                 if does_point_exist(intersection) == False:
@@ -545,6 +548,8 @@ class ProjectorPoints(nn.Module):
         
         # Check if the intersection point is within both line segments
         def is_between(p, q, r):
+            if torch.isclose(p,r,atol=1e-1) and torch.isclose(q,r,atol=1e-1):
+                return True
             return (min(p, q) <= r <= max(p, q))
         
         if (is_between(x1, x2, intersect_x) and is_between(y1, y2, intersect_y) and
