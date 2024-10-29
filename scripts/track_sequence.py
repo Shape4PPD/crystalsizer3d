@@ -14,17 +14,21 @@ from typing import Any, Dict, List, Tuple
 import numpy as np
 import torch
 import yaml
+from PIL import Image, ImageDraw
 from matplotlib import pyplot as plt
 from matplotlib.colors import hsv_to_rgb, rgb_to_hsv
 from matplotlib.gridspec import GridSpec
+from scipy.interpolate import interp1d
 from torch import Tensor
 
 from crystalsizer3d import LOGS_PATH, START_TIMESTAMP, logger
 from crystalsizer3d.args.refiner_args import RefinerArgs
 from crystalsizer3d.crystal import Crystal
 from crystalsizer3d.nn.manager import Manager
+from crystalsizer3d.projector import Projector
 from crystalsizer3d.refiner.refiner import Refiner
 from crystalsizer3d.scene_components.scene import Scene
+from crystalsizer3d.scene_components.utils import orthographic_scale_factor
 from crystalsizer3d.util.utils import FlexibleJSONEncoder, hash_data, init_tensor, print_args, smooth_signal, str2bool, \
     to_dict, to_numpy, to_rgb
 
@@ -723,6 +727,124 @@ def _plot_rotation(
     plt.savefig(save_dir / f'rotation.{plot_extension}')
 
 
+def _make_annotated_images(
+        args: Namespace,
+        parameters_final: Dict[str, np.ndarray],
+        image_paths: List[Tuple[int, Path]],
+        save_dir_run: Path,
+        overwrite: bool = True
+):
+    """
+    Make annotated images.
+    """
+    global refiner
+    wf_line_width = 3
+
+    # Make the save directory
+    save_dir = save_dir_run / 'annotated_images'
+    if save_dir.exists():
+        if not overwrite:
+            raise RuntimeError(f'Annotated images directory {save_dir} already exists. '
+                               f'Pass overwrite=True to overwrite.')
+        logger.info(f'Overwriting annotated images directory {save_dir}.')
+        shutil.rmtree(save_dir)
+    save_dir.mkdir()
+
+    # Load the scene from the first image
+    logger.info('Loading the scene from the first image.')
+    idx0, img_path0 = image_paths[0]
+    image_dir = Path(args.save_dir_seq) / 'refiner' / args.refiner_dir / f'image_{idx0:04d}'
+    img0 = Image.open(img_path0)
+    image_size = min(img0.size)
+    if img0.size[0] != img0.size[1]:
+        offset_l = (img0.size[0] - image_size) // 2
+        offset_t = (img0.size[1] - image_size) // 2
+    else:
+        offset_l = 0
+        offset_t = 0
+    scene = Scene.from_yml(image_dir / 'scene.yml')
+    crystal = scene.crystal
+
+    # Set up the projector
+    logger.info('Setting up the projector.')
+    projector = Projector(
+        crystal=crystal,
+        image_size=(image_size, image_size),
+        zoom=orthographic_scale_factor(scene),
+        transparent_background=True,
+        multi_line=True,
+        rtol=1e-2
+    )
+
+    # Load all the image paths including ones which weren't optimised
+    every_n_images = args.every_n_images
+    args.every_n_images = 1
+    image_paths_all = _get_image_paths(args)
+    args.every_n_images = every_n_images
+
+    # Prepare the parameters - interpolating the missing data
+    data = {}
+    param_keys = ['scale', 'distances', 'origin', 'rotation', 'material_roughness', 'material_ior']
+    x_old = np.linspace(0, 1, len(image_paths))
+    x_new = np.linspace(0, 1, len(image_paths_all))
+    for key in param_keys:
+        param_data = parameters_final[key]
+        if param_data.ndim == 1:
+            param_data = param_data[:, None]
+        new_data = np.zeros((len(image_paths_all), param_data.shape[1]))
+        for i in range(param_data.shape[1]):
+            f = interp1d(x_old, param_data[:, i], kind='cubic')
+            new_data[:, i] = f(x_new)
+        data[key] = new_data.squeeze()
+
+    # Make the annotated images
+    logger.info('Making annotated images.')
+    for i, (idx, image_path) in enumerate(image_paths_all):
+        if (i + 1) % 5 == 0:
+            logger.info(f'Making annotated images for image {i + 1}/{len(image_paths_all)}.')
+
+        # Update the crystal parameters and project the wireframe
+        for key in param_keys:
+            getattr(crystal, key).data = init_tensor(data[key][i])
+        crystal.build_mesh()
+        projector.project(generate_image=False)
+
+        # Draw the wireframe onto the image
+        img = Image.open(image_path)
+        img = img.convert('RGB')
+        draw = ImageDraw.Draw(img, 'RGB')
+        for ref_face_idx, face_segments in projector.edge_segments.items():
+            if len(face_segments) == 0:
+                continue
+            colour = projector.colour_facing_towards if ref_face_idx == 'facing' else projector.colour_facing_away
+            colour = tuple((colour * 255).int().tolist())
+            for segment in face_segments:
+                l = segment.clone()
+                l[:, 0] = torch.clamp(l[:, 0], 1, projector.image_size[1] - 2) + offset_l
+                l[:, 1] = torch.clamp(l[:, 1], 1, projector.image_size[0] - 2) + offset_t
+                draw.line(xy=[tuple(l[0].int().tolist()), tuple(l[1].int().tolist())],
+                          fill=colour, width=wf_line_width)
+
+        # Save the image
+        img.save(save_dir / f'image_{idx:04d}.png')
+
+
+def _make_growth_video(
+        save_dir_run: Path,
+):
+    """
+    Make a video of the growth.
+    """
+    images_dir = save_dir_run / 'annotated_images'
+    assert images_dir.exists(), f'Annotated images directory {images_dir} doesn\'t exist.'
+    save_path = save_dir_run / 'annotated_growth.mp4'
+    logger.info(f'Making annotated growth video from {images_dir} to {save_path}.')
+    escaped_images_dir = str(images_dir.absolute()).replace('[', '\\[').replace(']', '\\]')
+    cmd = f'ffmpeg -y -framerate 25 -pattern_type glob -i "{escaped_images_dir}/*.png" -c:v libx264 -pix_fmt yuv420p "{save_path}"'
+    logger.info(f'Running command: {cmd}')
+    os.system(cmd)
+
+
 def track_sequence():
     """
     Track a sequence of crystals.
@@ -816,6 +938,10 @@ def plot_run():
     _plot_areas(data['parameters_final'], image_paths, run_dir)
     _plot_origin(data['parameters_final'], image_paths, run_dir)
     _plot_rotation(data['parameters_final'], image_paths, run_dir)
+
+    # Make annotated images and videos
+    _make_annotated_images(args, data['parameters_final'], image_paths, run_dir)
+    _make_growth_video(run_dir)
 
 
 if __name__ == '__main__':
