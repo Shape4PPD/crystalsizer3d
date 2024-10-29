@@ -746,6 +746,11 @@ def track_sequence():
         spec = to_dict(args)
         spec['created'] = START_TIMESTAMP
         spec['save_dir_seq'] = str(save_dir_seq)
+        spec['refiner_dir'] = hash_data(to_dict(args))
+        for model_name, arg_names in ARG_NAMES.items():
+            model_args = {k: getattr(refiner_args, k) for k in arg_names}
+            model_id = model_args[f'{model_name}_model_path'].stem[:4]
+            spec[model_name + '_dir'] = f'{model_id}_{hash_data(model_args)}'
         yaml.dump(spec, f)
 
     # Generate or load the crystals

@@ -78,7 +78,6 @@ class RefinerArgs(BaseArgs):
             convergence_tau_slow: int = 100,
             convergence_threshold: float = 0.05,
             convergence_patience: int = 100,
-            convergence_loss_target: float = 50.,
 
             # Noise
             image_noise_std: float = 0.0,
@@ -271,7 +270,6 @@ class RefinerArgs(BaseArgs):
         self.convergence_tau_slow = convergence_tau_slow
         self.convergence_threshold = convergence_threshold
         self.convergence_patience = convergence_patience
-        self.convergence_loss_target = convergence_loss_target
 
         # Noise
         self.image_noise_std = image_noise_std
@@ -503,8 +501,6 @@ class RefinerArgs(BaseArgs):
                            help='Convergence threshold.')
         group.add_argument('--convergence-patience', type=int, default=100,
                            help='Convergence patience.')
-        group.add_argument('--convergence-loss-target', type=float, default=50.,
-                           help='Convergence loss target.')
 
         # Noise
         group.add_argument('--image-noise-std', type=float, default=0.0,
