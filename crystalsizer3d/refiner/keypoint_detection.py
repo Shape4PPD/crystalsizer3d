@@ -166,7 +166,7 @@ def generate_attention_patches(
     X_patches = []
     for i in range(n_patches):
         # Calculate the heatmap sum for each possible patch position
-        patch_sums = F.conv2d(X_kp, torch.ones(1, 1, ps, ps), padding=ps2).squeeze()
+        patch_sums = F.conv2d(X_kp, focal_attenuator, padding=ps2).squeeze()
         if patch_sums.shape[-1] != wis:
             patch_sums = F.interpolate(patch_sums[None, None, ...], size=wis, **resize_args).squeeze()
 

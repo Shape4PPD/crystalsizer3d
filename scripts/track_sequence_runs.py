@@ -92,7 +92,7 @@ def track_sequence_runs():
 
     # Put specified columns first
     first_cols = ['created', 'sequence', 'run_dir', 'n_images_processed', 'path',
-                  'refiner_dir', 'denoiser_dir', 'predictor_dir', 'denoiser_dir']
+                  'refiner_dir', 'denoiser_dir', 'keypoints_dir', 'predictor_dir']
     valid_first_cols = [col for col in first_cols if col in df.columns]
     col_order = valid_first_cols + [col for col in df.columns if col not in valid_first_cols]
     df = df[col_order]
