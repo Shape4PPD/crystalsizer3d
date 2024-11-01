@@ -20,12 +20,14 @@ from matplotlib.colors import hsv_to_rgb, rgb_to_hsv
 from matplotlib.gridspec import GridSpec
 from scipy.interpolate import interp1d
 from torch import Tensor
+from torchvision.transforms.functional import center_crop
 
 from crystalsizer3d import LOGS_PATH, START_TIMESTAMP, logger
 from crystalsizer3d.args.refiner_args import RefinerArgs
 from crystalsizer3d.crystal import Crystal
 from crystalsizer3d.nn.manager import Manager
 from crystalsizer3d.projector import Projector
+from crystalsizer3d.refiner.denoising import denoise_image
 from crystalsizer3d.refiner.refiner import Refiner
 from crystalsizer3d.scene_components.scene import Scene
 from crystalsizer3d.scene_components.utils import orthographic_scale_factor
@@ -135,6 +137,9 @@ def get_args(printout: bool = True) -> Tuple[Namespace, RefinerArgs]:
     # Check arguments are valid
     assert args.images_dir.exists(), f'Images directory {args.images_dir} does not exist.'
 
+    # Remove the args_path argument as it is not needed
+    delattr(args, 'args_path')
+
     return args, refiner_args
 
 
@@ -155,16 +160,16 @@ def _json_to_numpy(data: Any) -> Any:
         return [_json_to_numpy(v) for v in data]
 
 
-def _get_image_paths(args: Namespace):
+def _get_image_paths(args: Namespace, load_all: bool = False) -> List[Tuple[int, Path]]:
     """
-    Load the images into an image sequence
+    Load the images into an image sequence.
     """
     pathspec = str(args.images_dir.absolute()) + '/*.' + args.image_ext
     all_image_paths = sorted(glob.glob(pathspec))
     image_paths = [(idx, Path(all_image_paths[idx])) for idx in range(
         args.start_image,
         len(all_image_paths) if args.end_image == -1 else args.end_image,
-        args.every_n_images
+        args.every_n_images if not load_all else 1
     )]
     logger.info(f'Found {len(all_image_paths)} images in {args.images_dir}. Using {len(image_paths)} images.')
     return image_paths
@@ -727,28 +732,40 @@ def _plot_rotation(
     plt.savefig(save_dir / f'rotation.{plot_extension}')
 
 
-def _make_annotated_images(
+def _generate_images(
         args: Namespace,
         parameters_final: Dict[str, np.ndarray],
         image_paths: List[Tuple[int, Path]],
         save_dir_run: Path,
-        overwrite: bool = True
+        overwrite: bool = False
 ):
     """
-    Make annotated images.
+    Generate annotated, denoised and rendered images.
     """
+    logger.info('Generating images.')
     global refiner
     wf_line_width = 3
 
-    # Make the save directory
-    save_dir = save_dir_run / 'annotated_images'
-    if save_dir.exists():
-        if not overwrite:
-            raise RuntimeError(f'Annotated images directory {save_dir} already exists. '
-                               f'Pass overwrite=True to overwrite.')
-        logger.info(f'Overwriting annotated images directory {save_dir}.')
-        shutil.rmtree(save_dir)
-    save_dir.mkdir()
+    # Make the save directories
+    save_dirs = {}
+    for which in ['original', 'denoised', 'rendered']:
+        save_dirs[which] = {}
+        for annotated in [True, False]:
+            if which == 'original' and not annotated:
+                continue
+            save_dir = save_dir_run / 'images' / (which + ('_annotated' if annotated else ''))
+            if save_dir.exists():
+                if not overwrite:
+                    logger.warning(f'Images directory {save_dir} already exists. '
+                                   f'Pass overwrite=True to overwrite.')
+                    continue
+                logger.info(f'Overwriting annotated images directory {save_dir}.')
+                shutil.rmtree(save_dir)
+            save_dir.mkdir(parents=True)
+            save_dirs[which]['annotated' if annotated else 'not_annotated'] = save_dir
+    if sum([len(v) for v in save_dirs.values()]) == 0:
+        logger.info('All images already generated. Skipping.')
+        return
 
     # Load the scene from the first image
     logger.info('Loading the scene from the first image.')
@@ -776,15 +793,15 @@ def _make_annotated_images(
         rtol=1e-2
     )
 
+    # Set up the denoiser
+    refiner.manager.load_network(refiner.args.denoiser_model_path, 'denoiser')
+
     # Load all the image paths including ones which weren't optimised
-    every_n_images = args.every_n_images
-    args.every_n_images = 1
-    image_paths_all = _get_image_paths(args)
-    args.every_n_images = every_n_images
+    image_paths_all = _get_image_paths(args, load_all=True)
 
     # Prepare the parameters - interpolating the missing data
     data = {}
-    param_keys = ['scale', 'distances', 'origin', 'rotation', 'material_roughness', 'material_ior']
+    param_keys = ['scale', 'distances', 'origin', 'rotation', 'material_roughness', 'material_ior', 'light_radiance']
     x_old = np.linspace(0, 1, len(image_paths))
     x_new = np.linspace(0, 1, len(image_paths_all))
     for key in param_keys:
@@ -798,49 +815,149 @@ def _make_annotated_images(
         data[key] = new_data.squeeze()
 
     # Make the annotated images
-    logger.info('Making annotated images.')
+    logger.info('Generating images.')
     for i, (idx, image_path) in enumerate(image_paths_all):
         if (i + 1) % 5 == 0:
-            logger.info(f'Making annotated images for image {i + 1}/{len(image_paths_all)}.')
+            logger.info(f'Generating images for image {i + 1}/{len(image_paths_all)}.')
 
-        # Update the crystal parameters and project the wireframe
+        # Update the crystal and scene parameters
         for key in param_keys:
-            getattr(crystal, key).data = init_tensor(data[key][i])
+            if hasattr(crystal, key):
+                getattr(crystal, key).data = init_tensor(data[key][i])
+            elif hasattr(scene, key):
+                getattr(scene, key).data = init_tensor(data[key][i])
+            else:
+                raise ValueError(f'Invalid key: {key}')
+
+        # Rebuild the crystal mesh and project the wireframe
         crystal.build_mesh()
         projector.project(generate_image=False)
 
-        # Draw the wireframe onto the image
+        # Load the image
+        imgs = {}
         img = Image.open(image_path)
         img = img.convert('RGB')
-        draw = ImageDraw.Draw(img, 'RGB')
-        for ref_face_idx, face_segments in projector.edge_segments.items():
-            if len(face_segments) == 0:
+        imgs['original'] = img
+
+        # Denoise the image
+        X = torch.from_numpy(np.array(img)).float().permute(2, 0, 1) / 255
+        if X.shape[-2] != X.shape[-1]:
+            X = center_crop(X, min(X.shape[-2:]))
+        X_denoised = denoise_image(
+            manager=refiner.manager,
+            X=X,
+            n_tiles=refiner.args.denoiser_n_tiles,
+            overlap=refiner.args.denoiser_tile_overlap,
+            oversize_input=refiner.args.denoiser_oversize_input,
+            max_img_size=refiner.args.denoiser_max_img_size,
+            batch_size=refiner.args.denoiser_batch_size,
+            return_patches=False
+        )
+        img_denoised = Image.fromarray((to_numpy(X_denoised).transpose(1, 2, 0) * 255).astype(np.uint8))
+        imgs['denoised'] = img_denoised
+
+        # Render the scene
+        scene.build_mi_scene()  # Rebuild the scene with updated crystal and lighting parameters
+        img_rendered = scene.render()
+        imgs['rendered'] = Image.fromarray(img_rendered).resize((image_size, image_size))
+
+        # Save the non-annotated denoised and rendered images
+        for img_type, img in imgs.items():
+            if img_type == 'original':  # Don't save the original image as it's just a duplication
                 continue
-            colour = projector.colour_facing_towards if ref_face_idx == 'facing' else projector.colour_facing_away
-            colour = tuple((colour * 255).int().tolist())
-            for segment in face_segments:
-                l = segment.clone()
-                l[:, 0] = torch.clamp(l[:, 0], 1, projector.image_size[1] - 2) + offset_l
-                l[:, 1] = torch.clamp(l[:, 1], 1, projector.image_size[0] - 2) + offset_t
-                draw.line(xy=[tuple(l[0].int().tolist()), tuple(l[1].int().tolist())],
-                          fill=colour, width=wf_line_width)
+            if 'not_annotated' in save_dirs[img_type]:
+                img.save(save_dirs[img_type]['not_annotated'] / f'image_{idx:04d}.png')
 
-        # Save the image
-        img.save(save_dir / f'image_{idx:04d}.png')
+        # Draw wireframes onto the images
+        for img_type, img in imgs.items():
+            if 'annotated' not in save_dirs[img_type]:
+                continue
+
+            # Add offsets for original images as these aren't square
+            if img_type == 'original':
+                wf_ol = offset_l
+                wf_ot = offset_t
+            else:
+                wf_ol = 0
+                wf_ot = 0
+
+            draw = ImageDraw.Draw(img, 'RGB')
+            for ref_face_idx, face_segments in projector.edge_segments.items():
+                if len(face_segments) == 0:
+                    continue
+                colour = projector.colour_facing_towards if ref_face_idx == 'facing' else projector.colour_facing_away
+                colour = tuple((colour * 255).int().tolist())
+                for segment in face_segments:
+                    l = segment.clone()
+                    l[:, 0] = torch.clamp(l[:, 0], 1, projector.image_size[1] - 2) + wf_ol
+                    l[:, 1] = torch.clamp(l[:, 1], 1, projector.image_size[0] - 2) + wf_ot
+
+                    draw.line(xy=[tuple(l[0].int().tolist()), tuple(l[1].int().tolist())],
+                              fill=colour, width=wf_line_width)
+            img.save(save_dirs[img_type]['annotated'] / f'image_{idx:04d}.png')
 
 
-def _make_growth_video(
+def _generate_videos(
+        args: Namespace,
         save_dir_run: Path,
+        overwrite: bool = False
 ):
     """
-    Make a video of the growth.
+    Make videos of the growth sequences.
     """
-    images_dir = save_dir_run / 'annotated_images'
-    assert images_dir.exists(), f'Annotated images directory {images_dir} doesn\'t exist.'
-    save_path = save_dir_run / 'annotated_growth.mp4'
-    logger.info(f'Making annotated growth video from {images_dir} to {save_path}.')
-    escaped_images_dir = str(images_dir.absolute()).replace('[', '\\[').replace(']', '\\]')
-    cmd = f'ffmpeg -y -framerate 25 -pattern_type glob -i "{escaped_images_dir}/*.png" -c:v libx264 -pix_fmt yuv420p "{save_path}"'
+    image_paths_all = _get_image_paths(args, load_all=True)
+    video_paths = []
+    videos_dir = save_dir_run / 'videos'
+    videos_dir.mkdir(exist_ok=True)
+    for which in ['original', 'denoised', 'rendered']:
+        for annotated in [False, True]:
+            imgs_dir = save_dir_run / 'images' / (which + ('_annotated' if annotated else ''))
+            save_path = videos_dir / f'{which}{"_annotated" if annotated else ""}.mp4'
+            video_paths.append(str(save_path.absolute()))
+            if save_path.exists() and not overwrite:
+                logger.warning(f'Growth video {save_path} already exists. Pass overwrite=True to overwrite.')
+                continue
+
+            # Make a temporary copy of the original (non-annotated) images as we don't duplicate these
+            if which == 'original' and not annotated:
+                if imgs_dir.exists():
+                    shutil.rmtree(imgs_dir)
+                imgs_dir.mkdir(parents=True)
+                for idx, img_path in image_paths_all:
+                    Image.open(img_path).save(imgs_dir / f'image_{idx:04d}.png')
+
+            # Generate the video
+            logger.info(f'Making growth video from {imgs_dir} to {save_path}.')
+            escaped_images_dir = str(imgs_dir.absolute()).replace('[', '\\[').replace(']', '\\]')
+            cmd = f'ffmpeg -y -framerate 25 -pattern_type glob -i "{escaped_images_dir}/*.png" -c:v libx264 -pix_fmt yuv420p "{save_path}"'
+            logger.info(f'Running command: {cmd}')
+            os.system(cmd)
+
+            # Remove the temporary copy of the original images
+            if which == 'original' and not annotated:
+                shutil.rmtree(imgs_dir)
+
+    # Make a composite video
+    save_path = videos_dir / 'composite.mp4'
+    if save_path.exists() and not overwrite:
+        logger.warning(f'Composite growth video {save_path} already exists. Pass overwrite=True to overwrite.')
+        return
+    logger.info(f'Making composite growth video from {video_paths} to {save_path}.')
+    panel_res = min(Image.open(image_paths_all[0][1]).size) // 3
+    cmd = f'''
+    ffmpeg -y -i {" -i ".join(video_paths)} \
+    -filter_complex "
+    [0:v]scale=-1:{panel_res}, crop={panel_res}:{panel_res}:x=(in_w-{panel_res})/2[v0];
+    [1:v]scale=-1:{panel_res}, crop={panel_res}:{panel_res}:x=(in_w-{panel_res})/2[v1];
+    [2:v]scale={panel_res}:{panel_res}[v2];
+    [3:v]scale={panel_res}:{panel_res}[v3];
+    [4:v]scale={panel_res}:{panel_res}[v4];
+    [5:v]scale={panel_res}:{panel_res}[v5];
+    [v0][v2][v4]hstack=inputs=3[top];
+    [v1][v3][v5]hstack=inputs=3[bottom];
+    [top][bottom]vstack=inputs=2
+    " -c:v libx264 -pix_fmt yuv420p "{save_path}"
+    '''
     logger.info(f'Running command: {cmd}')
     os.system(cmd)
 
@@ -939,9 +1056,10 @@ def plot_run():
     _plot_origin(data['parameters_final'], image_paths, run_dir)
     _plot_rotation(data['parameters_final'], image_paths, run_dir)
 
-    # Make annotated images and videos
-    _make_annotated_images(args, data['parameters_final'], image_paths, run_dir)
-    _make_growth_video(run_dir)
+    # Generate images and videos
+    overwrite = False
+    _generate_images(args, data['parameters_final'], image_paths, run_dir, overwrite=overwrite)
+    _generate_videos(args, run_dir, overwrite=overwrite)
 
 
 if __name__ == '__main__':
