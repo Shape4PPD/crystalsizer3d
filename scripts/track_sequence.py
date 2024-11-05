@@ -85,10 +85,10 @@ def get_args(printout: bool = True) -> Tuple[Namespace, RefinerArgs]:
                         help='End processing at this image.')
     parser.add_argument('--every-n-images', type=int, default=1,
                         help='Only process every N images.')
+    parser.add_argument('--initial-scene', type=Path,
+                        help='Path to the initial scene file. Will be used in place of the initial prediction.')
     # parser.add_argument('--measurements-xls', type=Path,
     #                     help='Path to an xls file containing manual measurements.')
-
-    # todo: add initial crystal fit from path
 
     # Refining settings
     RefinerArgs.add_args(parser)
@@ -233,9 +233,16 @@ def _calculate_crystals(
         output_dir=save_dir_image,
         destroy_denoiser=False,
         destroy_keypoint_detector=False,
-        destroy_predictor=False,
+        destroy_predictor=True,
         do_init=False,
     )
+
+    # Load the initial scene if provided
+    scene_init = None
+    if args.initial_scene is not None:
+        assert args.initial_scene.exists(), f'Initial scene file {args.initial_scene} does not exist.'
+        logger.info(f'Loading initial scene data from {args.initial_scene}.')
+        scene_init = Scene.from_yml(args.initial_scene)
 
     # Instantiate the parameters and statistics logs
     losses_all = []
@@ -261,7 +268,6 @@ def _calculate_crystals(
             parameters_i[k].append(v)
 
     # Iterate over the image sequence
-    scene_init = None
     applied_seq_args = False
     for i, (idx, image_path) in enumerate(image_paths):
         logger.info(f'Processing image idx {idx} ({i + 1}/{N}): {image_path}.')
@@ -316,9 +322,14 @@ def _calculate_crystals(
                 refiner.init_keypoint_targets()
 
             # Make the initial prediction - should use cache if available
-            if scene_init is None:
+            if i == 0:
                 refiner.make_initial_prediction()
                 prev_distances = None
+
+                # Update the parameters from the initial scene
+                if scene_init is not None:
+                    refiner.scene.crystal.copy_parameters_from(scene_init.crystal)
+                refiner.scene.light_radiance.data = init_tensor(scene_init.light_radiance)
 
             # Otherwise, use the previous solution as the starting point
             else:
