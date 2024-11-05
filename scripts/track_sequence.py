@@ -31,6 +31,7 @@ from crystalsizer3d.refiner.denoising import denoise_image
 from crystalsizer3d.refiner.refiner import Refiner
 from crystalsizer3d.scene_components.scene import Scene
 from crystalsizer3d.scene_components.utils import orthographic_scale_factor
+from crystalsizer3d.util.kalman_filter import KalmanFilter
 from crystalsizer3d.util.utils import FlexibleJSONEncoder, hash_data, init_tensor, print_args, smooth_signal, str2bool, \
     to_dict, to_numpy, to_rgb
 
@@ -244,6 +245,13 @@ def _calculate_crystals(
         logger.info(f'Loading initial scene data from {args.initial_scene}.')
         scene_init = Scene.from_yml(args.initial_scene)
 
+    # Initialise the Kalman filter for better temporal smoothing
+    kalman_filter = KalmanFilter(
+        param_dim=len(refiner.manager.ds.labels_distances),
+        process_variance=1e-3,
+        measurement_variance=1e-4
+    )
+
     # Instantiate the parameters and statistics logs
     losses_all = []
     stats_all = {}
@@ -324,17 +332,25 @@ def _calculate_crystals(
             # Make the initial prediction - should use cache if available
             if i == 0:
                 refiner.make_initial_prediction()
-                prev_distances = None
+                distances_est = None
 
                 # Update the parameters from the initial scene
                 if scene_init is not None:
                     refiner.scene.crystal.copy_parameters_from(scene_init.crystal)
                 refiner.scene.light_radiance.data = init_tensor(scene_init.light_radiance)
 
+                # Update the Kalman filter with the initial distances
+                distances_actual = (scene_init.crystal.distances * scene_init.crystal.scale).detach()
+                kalman_filter.update(distances_actual)
+
             # Otherwise, use the previous solution as the starting point
             else:
                 refiner.set_initial_scene(scene_init)
-                prev_distances = scene_init.crystal.distances.clone().detach()
+
+                # Predict the next state using the Kalman filter
+                distances_est = kalman_filter.predict() / scene_init.crystal.scale.detach()
+                if i < 3:  # Use the previous values for the first few frames while filter is still learning
+                    distances_est = scene_init.crystal.distances.detach()
 
                 # Update any parameters that should be overridden for subsequent frames
                 if not applied_seq_args:
@@ -351,7 +367,7 @@ def _calculate_crystals(
 
             # Refine the crystal fit
             refiner.step = 0
-            refiner.train(callback=after_refine_step, prev_distances=prev_distances)
+            refiner.train(callback=after_refine_step, distances_est=distances_est)
 
             # Rescale the distances and scales (note this doesn't canonicalise them, but comes close)
             distances_i = np.array(parameters_i['distances'])
@@ -381,6 +397,10 @@ def _calculate_crystals(
             for subdir in ['initial_prediction', 'denoise_patches', 'keypoints', 'optimisation']:
                 if not any((save_dir_image / subdir).iterdir()):
                     shutil.rmtree(save_dir_image / subdir)
+
+        # Update the Kalman filter
+        distances_actual = torch.from_numpy(parameters_i['distances'][-1] * parameters_i['scale'][-1])
+        kalman_filter.update(distances_actual)
 
         # Combine the losses, stats and parameters for this image into the sequence
         losses_all.append(losses_i)

@@ -86,7 +86,7 @@ class Refiner:
 
     keypoint_targets: Optional[Tensor] = None
     anchors: Dict[ProjectedVertexKey, Tensor] = {}
-    prev_distances: Optional[Tensor] = None
+    distances_est: Optional[Tensor] = None
 
     rcf_feats_og: Optional[List[Tensor]]
     rcf_feats: Optional[List[Tensor]]
@@ -401,7 +401,7 @@ class Refiner:
         Initialise the convergence detector.
         """
         self.convergence_detector_param_names = [
-            'loss',
+            # 'loss',
             *[f'd_{i:02d}' for i in range(self.crystal.distances.shape[0])],
             'roughness',
             'ior',
@@ -984,7 +984,7 @@ class Refiner:
         self.crystal = scene.crystal
         self._init_projector()
 
-    def train(self, callback: Callable | None = None, prev_distances: Tensor | None = None):
+    def train(self, callback: Callable | None = None, distances_est: Tensor | None = None):
         """
         Train the parameters for a number of steps.
         """
@@ -1002,7 +1002,7 @@ class Refiner:
         running_metrics = {k: 0. for k in self.metric_keys}
         running_tps = 0
         use_inverse_rendering = self.args.use_inverse_rendering  # Save the inverse rendering setting
-        self.prev_distances = prev_distances
+        self.distances_est = distances_est
 
         # (Re-)initialise the optimiser, learning rate scheduler and convergence detector
         self._init_optimiser()
@@ -1086,7 +1086,7 @@ class Refiner:
 
             # Check for convergence
             check_vals = torch.concatenate([
-                loss_track[None, ...],
+                # loss_track[None, ...],
                 self.crystal.distances.detach().cpu(),
                 self.crystal.material_roughness[None, ...].detach().cpu(),
                 self.crystal.material_ior[None, ...].detach().cpu(),
@@ -1687,11 +1687,11 @@ class Refiner:
         """
         loss = torch.tensor(0., device=self.crystal.distances.device)
         stats = {}
-        if self.prev_distances is None:
+        if self.distances_est is None:
             return loss, stats
 
-        # L2 loss between the current and previous distances
-        loss = torch.mean((self.crystal.distances - self.prev_distances)**2)
+        # L2 loss between the current distances and estimated from the sequence history
+        loss = torch.mean((self.crystal.distances - self.distances_est)**2)
         stats['losses/temporal_dists'] = loss.item()
 
         return loss, stats
