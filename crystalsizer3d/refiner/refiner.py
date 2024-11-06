@@ -83,6 +83,7 @@ class Refiner:
     symmetry_idx: Tensor
     conj_pairs: List[Tuple[int, int]]
     conj_switch_probs: Tensor
+    param_group_keys: List[str]
 
     keypoint_targets: Optional[Tensor] = None
     anchors: Dict[ProjectedVertexKey, Tensor] = {}
@@ -698,6 +699,7 @@ class Refiner:
         logger.info('Initialising optimiser.')
 
         param_groups = []
+        self.param_group_keys = []
         for k in ['distances', 'origin', 'rotation', 'material', 'light', 'switches']:
             lr = getattr(self.args, f'lr_{k}')
             if lr == 0:
@@ -709,12 +711,16 @@ class Refiner:
             elif k == 'light':
                 params = [self.scene.light_radiance]
             elif k == 'switches':
+                if not self.args.use_conj_switching:
+                    continue
                 params = [self.conj_switch_probs]
+            param_groups.append({'params': params, 'lr': lr})
+            self.param_group_keys.append(k)
 
         optimiser = create_optimizer_v2(
             opt=self.args.opt_algorithm,
             weight_decay=0,
-            model_or_params=params,
+            model_or_params=param_groups,
         )
 
         # For cycle based schedulers (cosine, tanh, poly) adjust total steps for cycles and cooldown
@@ -1051,7 +1057,7 @@ class Refiner:
                     self.tb_logger.add_scalar(f'params/conj_switch_probs/{ab}', prob.item(), step)
 
             # Log learning rates and update them
-            for i, param_group in enumerate(['distances', 'origin', 'rotation', 'material', 'light']):
+            for i, param_group in enumerate(self.param_group_keys):
                 self.tb_logger.add_scalar(f'lr/{param_group}', self.optimiser.param_groups[i]['lr'], step)
             if self.args.lr_scheduler != 'none':
                 self.lr_scheduler.step(step, loss_track)
