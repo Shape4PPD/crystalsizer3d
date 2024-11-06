@@ -43,10 +43,18 @@ class KalmanFilter(nn.Module):
         self.register_buffer('Q', process_variance * torch.eye(3 * param_dim))  # Process noise
         self.register_buffer('R', measurement_variance * torch.eye(param_dim))  # Measurement noise
 
+        # Step counters
+        self.predict_count = 0
+        self.update_count = 0
+
     def predict(self) -> Tensor:
         """
         Predict the next state and covariance.
         """
+        if self.predict_count > self.update_count:
+            return self.state[:self.param_dim]
+        self.predict_count += 1
+
         # Predict the state vector
         self.state = self.F @ self.state
 
@@ -60,6 +68,13 @@ class KalmanFilter(nn.Module):
         """
         Update the state with a new measurement.
         """
+        if self.update_count >= self.predict_count:
+            self.predict()
+            return self.update(measurement)
+        self.update_count += 1
+        if measurement.dtype != torch.float32:
+            measurement = measurement.to(torch.float32)
+
         # Measurement residual
         y = measurement - (self.H @ self.state)
 
