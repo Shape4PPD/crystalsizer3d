@@ -88,6 +88,8 @@ def get_args(printout: bool = True) -> Tuple[Namespace, RefinerArgs]:
                         help='Only process every N images.')
     parser.add_argument('--initial-scene', type=Path,
                         help='Path to the initial scene file. Will be used in place of the initial prediction.')
+    parser.add_argument('--enforce-positive-growth', type=str2bool, default=False,
+                        help='Enforce positive growth of the crystal distances.')
     # parser.add_argument('--measurements-xls', type=Path,
     #                     help='Path to an xls file containing manual measurements.')
 
@@ -277,6 +279,8 @@ def _calculate_crystals(
 
     # Iterate over the image sequence
     applied_seq_args = False
+    distances_est = None
+    distances_min = None
     for i, (idx, image_path) in enumerate(image_paths):
         logger.info(f'Processing image idx {idx} ({i + 1}/{N}): {image_path}.')
         refiner_args.image_path = image_path
@@ -291,7 +295,7 @@ def _calculate_crystals(
             data = []
             for name in ['losses', 'stats', 'parameters']:
                 with open(save_dir_image / f'{name}.json', 'r') as f:
-                    data.append(json.load(f))
+                    data.append(_json_to_numpy(json.load(f)))
             losses_i, stats_i, parameters_i = data
 
         # Generate the result
@@ -332,7 +336,6 @@ def _calculate_crystals(
             # Make the initial prediction - should use cache if available
             if i == 0:
                 refiner.make_initial_prediction()
-                distances_est = None
 
                 # Update the parameters from the initial scene
                 if scene_init is not None:
@@ -352,6 +355,9 @@ def _calculate_crystals(
                 if i < 3:  # Use the previous values for the first few frames while filter is still learning
                     distances_est = scene_init.crystal.distances.detach()
 
+                # If enforcing positive growth, pass the previous frame's distances as the minimum
+                distances_min = scene_init.crystal.distances.detach() if args.enforce_positive_growth else None
+
                 # Update any parameters that should be overridden for subsequent frames
                 if not applied_seq_args:
                     for k in refiner_args.to_dict().keys():
@@ -367,7 +373,7 @@ def _calculate_crystals(
 
             # Refine the crystal fit
             refiner.step = 0
-            refiner.train(callback=after_refine_step, distances_est=distances_est)
+            refiner.train(callback=after_refine_step, distances_est=distances_est, distances_min=distances_min)
 
             # Rescale the distances and scales (note this doesn't canonicalise them, but comes close)
             distances_i = np.array(parameters_i['distances'])

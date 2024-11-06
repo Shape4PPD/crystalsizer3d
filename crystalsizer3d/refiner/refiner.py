@@ -87,6 +87,7 @@ class Refiner:
     keypoint_targets: Optional[Tensor] = None
     anchors: Dict[ProjectedVertexKey, Tensor] = {}
     distances_est: Optional[Tensor] = None
+    distances_min: Optional[Tensor] = None
 
     rcf_feats_og: Optional[List[Tensor]]
     rcf_feats: Optional[List[Tensor]]
@@ -984,7 +985,12 @@ class Refiner:
         self.crystal = scene.crystal
         self._init_projector()
 
-    def train(self, callback: Callable | None = None, distances_est: Tensor | None = None):
+    def train(
+            self,
+            callback: Callable | None = None,
+            distances_est: Tensor | None = None,
+            distances_min: Tensor | None = None,
+    ):
         """
         Train the parameters for a number of steps.
         """
@@ -1003,6 +1009,7 @@ class Refiner:
         running_tps = 0
         use_inverse_rendering = self.args.use_inverse_rendering  # Save the inverse rendering setting
         self.distances_est = distances_est
+        self.distances_min = distances_min
 
         # (Re-)initialise the optimiser, learning rate scheduler and convergence detector
         self._init_optimiser()
@@ -1116,23 +1123,32 @@ class Refiner:
 
         # Take optimisation step
         if (self.step + 1) % self.args.acc_grad_steps == 0:
+            # Clip gradients
             if self.args.clip_grad_norm > 0:
                 nn.utils.clip_grad_norm_([self.crystal.distances], max_norm=self.args.clip_grad_norm)
                 nn.utils.clip_grad_norm_([self.crystal.rotation], max_norm=self.args.clip_grad_norm)
+
+            # Check for bad gradients
             for group in self.optimiser.param_groups:
                 for param in group['params']:
                     if param.grad is not None:
                         if is_bad(param.grad):
                             logger.warning('Bad gradients detected!')
                             param.grad.zero_()
+
+            # Optimisation step
             self.optimiser.step()
             self.optimiser.zero_grad()
+
+            # Clamp parameters
             self.crystal.clamp_parameters(rescale=False)
             self.conj_switch_probs.data = torch.clamp(
                 self.conj_switch_probs,
                 min=self.args.conj_switch_prob_min,
                 max=self.args.conj_switch_prob_max
             )
+            if self.distances_min is not None:
+                self.crystal.distances.data = self.crystal.distances.clamp(min=self.distances_min)
 
             # Actually switch the distances where the switch prob is high enough
             if self.args.use_conj_switching:
