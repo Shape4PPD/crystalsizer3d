@@ -710,7 +710,6 @@ class Refiner:
                 params = [self.scene.light_radiance]
             elif k == 'switches':
                 params = [self.conj_switch_probs]
-            param_groups.append({'params': [getattr(self.crystal, k)], 'lr': lr})
 
         optimiser = create_optimizer_v2(
             opt=self.args.opt_algorithm,
