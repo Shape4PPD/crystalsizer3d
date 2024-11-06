@@ -696,20 +696,26 @@ class Refiner:
         Set up the optimiser and learning rate scheduler.
         """
         logger.info('Initialising optimiser.')
+
+        param_groups = []
+        for k in ['distances', 'origin', 'rotation', 'material', 'light', 'switches']:
+            lr = getattr(self.args, f'lr_{k}')
+            if lr == 0:
+                continue
+            if k in ['distances', 'origin', 'rotation']:
+                params = [getattr(self.crystal, k)]
+            elif k == 'material':
+                params = [self.crystal.material_roughness, self.crystal.material_ior]
+            elif k == 'light':
+                params = [self.scene.light_radiance]
+            elif k == 'switches':
+                params = [self.conj_switch_probs]
+            param_groups.append({'params': [getattr(self.crystal, k)], 'lr': lr})
+
         optimiser = create_optimizer_v2(
             opt=self.args.opt_algorithm,
             weight_decay=0,
-            model_or_params=[
-                # {'params': [self.crystal.scale], 'lr': self.args.lr_scale},
-                {'params': [self.crystal.distances], 'lr': self.args.lr_distances},
-                {'params': [self.crystal.origin], 'lr': self.args.lr_origin},
-                {'params': [self.crystal.rotation], 'lr': self.args.lr_rotation},
-                {'params': [self.crystal.material_roughness, self.crystal.material_ior], 'lr': self.args.lr_material},
-                # {'params': [self.crystal.material_roughness], 'lr': self.args.lr_material / 10},
-                # {'params': [self.crystal.material_ior], 'lr': self.args.lr_material},
-                {'params': [self.scene.light_radiance], 'lr': self.args.lr_light},
-                {'params': [self.conj_switch_probs], 'lr': self.args.lr_switches},
-            ],
+            model_or_params=params,
         )
 
         # For cycle based schedulers (cosine, tanh, poly) adjust total steps for cycles and cooldown
