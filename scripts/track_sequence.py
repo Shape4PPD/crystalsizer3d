@@ -32,7 +32,8 @@ from crystalsizer3d.refiner.refiner import Refiner
 from crystalsizer3d.scene_components.scene import Scene
 from crystalsizer3d.scene_components.utils import orthographic_scale_factor
 from crystalsizer3d.util.kalman_filter import KalmanFilter
-from crystalsizer3d.util.utils import FlexibleJSONEncoder, hash_data, init_tensor, print_args, smooth_signal, str2bool, \
+from crystalsizer3d.util.utils import FlexibleJSONEncoder, hash_data, init_tensor, json_to_numpy, print_args, \
+    smooth_signal, str2bool, \
     to_dict, to_numpy, to_rgb
 
 plot_extension = 'png'  # or svg
@@ -144,23 +145,6 @@ def get_args(printout: bool = True) -> Tuple[Namespace, RefinerArgs]:
     delattr(args, 'args_path')
 
     return args, refiner_args
-
-
-def _json_to_numpy(data: Any) -> Any:
-    """
-    Convert json data to numpy arrays where possible.
-    """
-    if isinstance(data, dict):
-        return {k: _json_to_numpy(v) for k, v in data.items()}
-    if isinstance(data, list):
-        types = [type(v) for v in data]
-        if all([t in [int, float] for t in types]):
-            return np.array(data)
-        if all([t in [list, dict] for t in types]):
-            n_entries = [len(v) for v in data]
-            if len(set(n_entries)) == 1:
-                return np.array(data)
-        return [_json_to_numpy(v) for v in data]
 
 
 def _get_image_paths(args: Namespace, load_all: bool = False) -> List[Tuple[int, Path]]:
@@ -295,7 +279,7 @@ def _calculate_crystals(
             data = []
             for name in ['losses', 'stats', 'parameters']:
                 with open(save_dir_image / f'{name}.json', 'r') as f:
-                    data.append(_json_to_numpy(json.load(f)))
+                    data.append(json_to_numpy(json.load(f)))
             losses_i, stats_i, parameters_i = data
 
         # Generate the result
@@ -349,14 +333,15 @@ def _calculate_crystals(
             # Otherwise, use the previous solution as the starting point
             else:
                 refiner.set_initial_scene(scene_init)
+                d_prev = scene_init.crystal.distances.clone().detach()
 
                 # Predict the next state using the Kalman filter
-                distances_est = kalman_filter.predict() / scene_init.crystal.scale.detach()
+                distances_est = kalman_filter.predict() / scene_init.crystal.scale.clone().detach()
                 if i < 3:  # Use the previous values for the first few frames while filter is still learning
-                    distances_est = scene_init.crystal.distances.detach()
+                    distances_est = d_prev
 
                 # If enforcing positive growth, pass the previous frame's distances as the minimum
-                distances_min = scene_init.crystal.distances.detach() if args.enforce_positive_growth else None
+                distances_min = d_prev if args.enforce_positive_growth else None
 
                 # Update any parameters that should be overridden for subsequent frames
                 if not applied_seq_args:
@@ -374,6 +359,8 @@ def _calculate_crystals(
             # Refine the crystal fit
             refiner.step = 0
             refiner.train(callback=after_refine_step, distances_est=distances_est, distances_min=distances_min)
+            if distances_min is not None:
+                assert torch.all(refiner.crystal.distances >= distances_min)
 
             # Rescale the distances and scales (note this doesn't canonicalise them, but comes close)
             distances_i = np.array(parameters_i['distances'])
@@ -459,7 +446,7 @@ def _generate_or_load_crystals(
             for all_or_final in ['all', 'final']:
                 key = f'{name}_{all_or_final}'
                 with open(cache_dir / f'{name}_{all_or_final}.json', 'r') as f:
-                    data[key] = _json_to_numpy(json.load(f))
+                    data[key] = json_to_numpy(json.load(f))
 
     except Exception as e:
         logger.warning(f'Could not load data: {e}')
@@ -1046,6 +1033,12 @@ def track_sequence():
     _plot_origin(data['parameters_final'], image_paths, save_dir_run)
     _plot_rotation(data['parameters_final'], image_paths, save_dir_run)
 
+    # Generate images and videos
+    if args.save_annotated_images:
+        _generate_images(args, data['parameters_final'], image_paths, save_dir_run)
+    if args.make_videos:
+        _generate_videos(args, save_dir_run)
+
     # Print how long this took - split into hours, minutes, seconds
     elapsed_time = time.time() - start_time
     hours, rem = divmod(elapsed_time, 3600)
@@ -1060,7 +1053,10 @@ def plot_run():
     global refiner
     parser = ArgumentParser(description='CrystalSizer3D script to track crystal growth.')
     parser.add_argument('--run-dir', type=Path, help='Directory containing the run data.')
-    run_dir = parser.parse_known_args()[0].run_dir
+    parser.add_argument('--overwrite', type=str2bool, default=False, help='Overwrite existing images and videos.')
+    runtime_args = parser.parse_known_args()[0]
+    run_dir = runtime_args.run_dir
+    overwrite = runtime_args.overwrite
     assert run_dir.exists(), f'Run directory {run_dir} does not exist.'
 
     # Load the args from the run dir
@@ -1080,7 +1076,7 @@ def plot_run():
         for all_or_final in ['all', 'final']:
             key = f'{name}_{all_or_final}'
             with open(refiner_dir / f'{name}_{all_or_final}.json', 'r') as f:
-                data[key] = _json_to_numpy(json.load(f))
+                data[key] = json_to_numpy(json.load(f))
 
     # Instantiate a refiner
     refiner_args = RefinerArgs.from_args(args)
@@ -1094,7 +1090,6 @@ def plot_run():
     _plot_rotation(data['parameters_final'], image_paths, run_dir)
 
     # Generate images and videos
-    overwrite = False
     _generate_images(args, data['parameters_final'], image_paths, run_dir, overwrite=overwrite)
     _generate_videos(args, run_dir, overwrite=overwrite)
 

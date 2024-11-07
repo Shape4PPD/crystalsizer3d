@@ -8,7 +8,7 @@ from argparse import Namespace
 from json import JSONEncoder
 from math import log2
 from pathlib import Path
-from typing import List, Optional, Tuple, Union
+from typing import Any, List, Optional, Tuple, Union
 
 import matplotlib.colors as mcolors
 import numpy as np
@@ -42,7 +42,7 @@ def get_seed() -> int:
 
 def to_numpy(t: Tensor) -> np.ndarray:
     """Converts a torch tensor to a numpy array."""
-    return t.detach().cpu().numpy()
+    return t.detach().cpu().numpy().copy()
 
 
 def str2bool(v: str) -> bool:
@@ -119,6 +119,23 @@ class ArgsCompatibleJSONEncoder(JSONEncoder):
         if isinstance(obj, BaseArgs):
             return obj.to_dict()
         return JSONEncoder.default(self, obj)
+
+
+def json_to_numpy(data: Any) -> Any:
+    """
+    Convert json data to numpy arrays where possible.
+    """
+    if isinstance(data, dict):
+        return {k: json_to_numpy(v) for k, v in data.items()}
+    if isinstance(data, list):
+        types = [type(v) for v in data]
+        if all([t in [int, float] for t in types]):
+            return np.array(data)
+        if all([t in [list, dict] for t in types]):
+            n_entries = [len(v) for v in data]
+            if len(set(n_entries)) == 1:
+                return np.array(data)
+        return [json_to_numpy(v) for v in data]
 
 
 def hash_data(data) -> str:
