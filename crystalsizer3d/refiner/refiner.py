@@ -43,6 +43,7 @@ from crystalsizer3d.nn.models.rcf import RCF
 from crystalsizer3d.projector import ProjectedVertexKey, Projector
 from crystalsizer3d.refiner.denoising import denoise_image
 from crystalsizer3d.refiner.keypoint_detection import find_keypoints, to_absolute_coordinates
+from crystalsizer3d.refiner.edge_matching import ContourDistanceNormalLoss
 from crystalsizer3d.scene_components.scene import Scene
 from crystalsizer3d.scene_components.utils import orthographic_scale_factor
 from crystalsizer3d.util.convergence_detector import ConvergenceDetector
@@ -151,6 +152,9 @@ class Refiner:
         elif name == 'latents_model':
             self._init_latents_model()
             return self.latents_model
+        elif name == "edge_matching":
+            self._init_edge_matching()
+            return self.edge_matching_model
         elif name in ['optimiser', 'lr_scheduler']:
             self._init_optimiser()
             return getattr(self, name)
@@ -394,6 +398,11 @@ class Refiner:
         else:
             model_input = self.X_target_wis[None, ...].permute(0, 3, 1, 2)
             self.rcf_feats_og = self.rcf(model_input, apply_sigmoid=False)
+
+    def _init_edge_matching(self):
+        edge_matching = ContourDistanceNormalLoss()
+        edge_matching.to(self.device)
+        self.edge_matching_model = edge_matching
 
     def _init_convergence_detector(self):
         """
@@ -1287,6 +1296,9 @@ class Refiner:
         # Keypoints and anchors
         keypoints_loss, keypoints_stats = self._keypoints_loss()
         anchors_loss, anchors_stats = self._anchors_loss()
+        
+        # Edge matching
+        edge_matching_loss, edge_matching_stats = self._edge_matching_loss()
 
         # Combine losses
         loss = l1_loss.cpu() * self.args.w_img_l1 \
@@ -1301,13 +1313,14 @@ class Refiner:
                + switch_loss * self.args.w_switch_probs \
                + temporal_loss * self.args.w_temporal \
                + keypoints_loss * self.args.w_keypoints \
-               + anchors_loss * self.args.w_anchors
+               + anchors_loss * self.args.w_anchors \
+               + edge_matching_loss *self.args.w_edge_matching
 
         # Combine stats
         stats = {
             'losses/total': loss.item(),
             **l1_stats, **l2_stats, **percept_stats, **latent_stats, **rcf_stats, **overshoot_stats, **symmetry_stats,
-            **z_pos_stats, **rxy_stats, **switch_stats, **temporal_stats, **keypoints_stats, **anchors_stats
+            **z_pos_stats, **rxy_stats, **switch_stats, **temporal_stats, **keypoints_stats, **anchors_stats, **edge_matching_stats
         }
 
         # Patches - recalculate all the losses for each patch
@@ -1742,6 +1755,29 @@ class Refiner:
             loss = torch.stack(losses).mean()
         stats[f'losses/anchors'] = loss.item()
 
+        return loss, stats
+    
+    def _edge_matching_loss(self):
+        """
+        Calculate the edge matching loss.
+        """
+        loss = torch.tensor(0., device=self.crystal.distances.device)
+        stats = {}
+        if not self.args.edge_matching:
+            return loss, stats
+        
+        # Calculate the distance between a point on the edge
+        # of the crystal and a found edge
+        edge_points = self.projector.edge_points
+        edge_normals = self.projector.edge_normals   
+        
+        # These need to be calulated first     
+        
+        
+        loss, distances = self.edge_matching_model(edge_points,edge_normals, self.rcf_feats[5])
+        
+        stats[f'losses/edgematching'] = loss.item()
+        
         return loss, stats
 
     @torch.no_grad()

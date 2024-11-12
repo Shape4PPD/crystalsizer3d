@@ -3,11 +3,12 @@ from torch import nn
 import numpy as np
 from pathlib import Path
 from crystalsizer3d.crystal import Crystal
+from crystalsizer3d.refiner.edge_matching import ContourDistanceNormalLoss
 from crystalsizer3d import LOGS_PATH, ROOT_PATH, START_TIMESTAMP, USE_CUDA, logger
 from crystalsizer3d.util.utils import print_args, to_numpy, init_tensor
 import torch.nn.functional as F
 import torchvision.transforms as transforms
-from crystal_points import ProjectorPoints
+# from crystal_points import ProjectorPoints
 from plot_mesh import multiplot, overlay_plot, plot_sampled_points_with_intensity
 import torch.optim as optim
 from crystalsizer3d.scene_components.scene import Scene
@@ -21,6 +22,8 @@ from scipy.ndimage import gaussian_filter
 import json
 from torch.utils.tensorboard import SummaryWriter
 import io
+
+
 
 # import matplotlib.pyplot as plt
 from PIL import Image
@@ -67,526 +70,6 @@ else:
     
 from PIL import Image
 
-class ContourDistanceNormalLoss(nn.Module):
-    def __init__(self):
-        super(ContourDistanceNormalLoss, self).__init__()
-
-    def forward(self, points, distance_image):
-        N = len(points)  # Number of points
-
-        # Extract all points and normal vectors at once
-        ref_points = torch.stack([points.get_point(i).point for i in range(N)])
-        normals = torch.stack([points.get_point(i).normal for i in range(N)],)
-        
-        # Sample points along lines for all reference points
-        line_points = self.sample_points_along_line_full_image(ref_points, normals, 1000, distance_image.shape[-2:])
-        
-        # Get reference values for all points 
-        reference_values = self.points_in_image(ref_points, distance_image)
-        
-        # Find nearest local minima for all line points
-        nearest_minima_positions, nearest_minima_values = self.find_closest_minima(distance_image, line_points, ref_points, window_size=5)
-        
-        
-        # Filter out None values
-        valid_indices = [i for i, val in enumerate(nearest_minima_values) if val is not None]
-        if not valid_indices:
-            return torch.tensor(0.0)  # Return zero if no valid minima found
-        
-        valid_indices = torch.tensor(valid_indices, device=distance_image.device)
-        valid_ref_points = ref_points[valid_indices]
-        valid_reference_values = reference_values[:,:, valid_indices]
-        valid_nearest_minima_positions = torch.stack([nearest_minima_positions[i] for i in valid_indices])
-        valid_nearest_minima_values = torch.stack([nearest_minima_values[i] for i in valid_indices])
-        
-        # Calculate distances and set them
-        distances = valid_nearest_minima_positions - valid_ref_points
-        for i, idx in enumerate(valid_indices):
-            points.get_point(idx).set_distance(distances[i])
-        
-        # Compute the mean squared error loss
-        losses = torch.mean((valid_reference_values.squeeze() - valid_nearest_minima_values.squeeze()) ** 2)
-        
-        # Return the mean loss across all valid points
-        return torch.mean(losses)
-
-    def sample_points_along_line_full_image(self, ref_points, normals, num_samples, image_shape):
-        # Normalize the direction vectors
-        direction_vectors_norm = normals / torch.norm(normals, dim=1, keepdim=True)
-
-        # Find the intersection points with the image boundaries for all points
-        intersections = torch.stack([
-            self.find_intersections_with_boundaries(ref_points[i], direction_vectors_norm[i], image_shape)
-            for i in range(ref_points.size(0))
-        ])
-
-        # Sample points uniformly between the two intersection points for each reference point
-        sampled_points = torch.linspace(0, 1, steps=num_samples, device=device).unsqueeze(1).unsqueeze(0) * (intersections[:, 1] - intersections[:, 0]).unsqueeze(1) + intersections[:, 0].unsqueeze(1)
-
-        # Clamp the points to ensure they are within image boundaries
-        sampled_points = torch.stack([
-            torch.clamp(sampled_points[..., 0], 0, image_shape[1] - 1),  # x-coordinates
-            torch.clamp(sampled_points[..., 1], 0, image_shape[0] - 1)   # y-coordinates
-        ], dim=-1)
-
-        return sampled_points
-
-    def find_intersections_with_boundaries(self, point, direction_vector, image_shape):
-        height, width = image_shape
-        max_float = torch.finfo(direction_vector.dtype).max  # Maximum finite float value for the given dtype
-
-        # Parametric line equation: p(t) = point + t * direction_vector
-        # We need to find t such that p(t) lies on the image boundary
-
-        # Handle intersections with left (x=0) and right (x=width-1) boundaries
-        if torch.isclose(direction_vector[0], torch.tensor(0.0), atol=1e-3):
-            t_left, t_right = -max_float, max_float
-        else:
-            t_left = (0 - point[0]) / direction_vector[0]  # Intersection with left boundary
-            t_right = (width - 1 - point[0]) / direction_vector[0]  # Intersection with right boundary
-        
-        # Handle intersections with top (y=0) and bottom (y=height-1) boundaries
-        if torch.isclose(direction_vector[1], torch.tensor(0.0), atol=1e-3):
-            t_top, t_bottom = -max_float, max_float
-        else:
-            t_top = (0 - point[1]) / direction_vector[1]  # Intersection with top boundary
-            t_bottom = (height - 1 - point[1]) / direction_vector[1]  # Intersection with bottom boundary
-
-        # Take the maximum of left/top and the minimum of right/bottom
-        t_min = max(t_left, t_top)
-        t_max = min(t_right, t_bottom)
-
-        # Compute the actual intersection points using the t values
-        intersection_1 = point + t_min * direction_vector
-        intersection_2 = point + t_max * direction_vector
-
-        return torch.stack([intersection_1, intersection_2])
-
-    def points_in_image(self, points, distance_image):
-        N = len(points)  # Number of points
-        H, W = distance_image.shape[-2], distance_image.shape[-1]  # Height and Width of the distance image
-        try:
-            grid = points.get_grid_sample_points(H, W)
-        except:
-            grid = points.clone()
-            grid[:, 0] = 2.0 * grid[:, 0] / (W - 1) - 1.0  # x (width)
-            grid[:, 1] = 2.0 * grid[:, 1] / (H - 1) - 1.0  # y (height)
-            grid = grid.view(1, -1, 1, 2)
-        interpolated_values = F.grid_sample(distance_image, grid, mode='bilinear', align_corners=True)
-        return interpolated_values
-
-    def find_closest_minima(self, image, sampled_points, reference_points, window_size=3):
-        # Sample the image along the line to get the intensity values
-        image_values = self.points_in_image(sampled_points.view(-1, 2), image).view(sampled_points.size(0), sampled_points.size(1))
-
-        # Calculate distances from reference points to all sampled points
-        dist = torch.norm(sampled_points - reference_points.unsqueeze(1), dim=2)
-        ref_inds = torch.argmin(dist, dim=1)
-
-       # Find local minima for each set of sampled points
-        minima_indices = self.find_local_minima_batch(image_values)
-
-        # Find the nearest local minima for each reference point
-        nearest_minima_positions = []
-        nearest_minima_values = []
-        for i in range(len(minima_indices)):
-            if len(minima_indices[i]) > 0:
-                closest_minima_idx = minima_indices[i][(minima_indices[i] - ref_inds[i]).abs().argmin()].item()
-                nearest_minima_positions.append(sampled_points[i, closest_minima_idx])
-                nearest_minima_values.append(image_values[i, closest_minima_idx])
-            else:
-                nearest_minima_positions.append(None)
-                nearest_minima_values.append(None)
-
-        return nearest_minima_positions, nearest_minima_values
-    
-    def find_local_minima(self, tensor):
-        # Create shifted versions of the tensor
-        shifted_left = torch.roll(tensor, shifts=1)
-        shifted_right = torch.roll(tensor, shifts=-1)
-
-        # Compare each element to its neighbors to find local minima
-        minima_mask = (tensor < shifted_left) & (tensor < shifted_right)
-        
-        # Exclude the first and last elements (edge cases, as they have no two neighbors)
-        minima_mask[0] = minima_mask[-1] = False
-        
-        # Get the indices of the minima
-        minima_indices = torch.nonzero(minima_mask.squeeze()).squeeze()
-        if minima_indices.dim() == 0:
-            minima_indices = minima_indices.unsqueeze(0)
-        return minima_indices
-
-    def find_local_minima_batch(self, tensor):
-        # Create shifted versions of the tensor
-        shifted_left = torch.roll(tensor, shifts=1, dims=1)
-        shifted_right = torch.roll(tensor, shifts=-1, dims=1)
-
-        # Compare each element to its neighbors to find local minima
-        minima_mask = (tensor < shifted_left) & (tensor < shifted_right)
-        
-        # Exclude the first and last elements (edge cases, as they have no two neighbors)
-        minima_mask[:, 0] = minima_mask[:, -1] = False
-        
-        # Get the indices of the minima
-        minima_indices = [torch.nonzero(minima_mask[i]).squeeze() for i in range(minima_mask.size(0))]
-        minima_indices = [indices if indices.dim() > 0 else indices.unsqueeze(0) for indices in minima_indices]
-        return minima_indices
-
-# class ContourDistanceNormalLoss(nn.Module):
-#     def __init__(self,
-#                  #distance_image,
-#         ):
-#         super(ContourDistanceNormalLoss,self).__init__()
-        
-    
-#     def forward(self,points,distance_image):
-        
-#         N = len(points)  # Number of points
-        
-#         # Initialize a tensor to accumulate the losses
-#         losses = []
-#         distances = []
-        
-#         for i in range(N):
-#             # Extract the point and the normal vector for this iteration
-#             ref_point = points.get_point(i)
-            
-#             line_points = self.sample_points_along_line_full_image(ref_point, 1000, distance_image.shape[-2:])
-            
-            
-#             # # sampled_values = self.sample_image_along_line(distance_image,line_points)
-#             reference_value = self.points_in_image(ref_point.point.unsqueeze(0), distance_image)
-            
-#             # nearest_minimum_posistion, nearest_minimum_value = self.find_nearest_local_minimum(distance_image, line_points, ref_point.point)
-#             nearest_minimum_posistion, nearest_minimum_value = self.find_closest_minima(distance_image, line_points, ref_point.point,window_size=5)
-#             if nearest_minimum_value == None:
-#                 continue
-#             # get the distance to the closest peak
-#             distance = nearest_minimum_posistion - ref_point.point
-#             ref_point.set_distance(distance)
-#             # # Compute the mean squared error between the sampled values and the reference value
-#             # loss = F.mse_loss(nearest_minimum_value.squeeze(), reference_value.squeeze())
-#             loss = torch.mean(( reference_value.squeeze() - nearest_minimum_value.squeeze()) ** 2) # l2 loss
-#             # loss = torch.mean(torch.exp(torch.abs(reference_value.squeeze() - nearest_minimum_value.squeeze()))) # exp loss
-#             # loss = F.mse_loss(reference_point, reference_point)
-#             if torch.isnan(loss).any():
-#                 print("Found NaN values in x!")
-#             losses.append(loss)
-            
-#             # something is funnyt wioth how its getting the vallues from the image as x approches w and y approches h
-        
-#         # Return the mean loss across all points
-#         return torch.mean(torch.stack(losses))
-    
-#     def sample_points_along_line_full_image(self, ref_point, num_samples, image_shape):
-#         """
-#         Samples points along a line across the entire image, given a point and a normal vector.
-        
-#         Args:
-#             point (torch.Tensor): A 2D tensor of shape (2,) representing the point on the line (x, y).
-#             normal_vector (torch.Tensor): A 2D tensor of shape (2,) representing the normal vector to the line.
-#             num_samples (int): Number of points to sample along the line.
-#             image_shape (tuple): A tuple representing the shape of the image (height, width).
-            
-#         Returns:
-#             torch.Tensor: A tensor of sampled points along the line, of shape (num_samples, 2).
-#         """
-        
-#         point = ref_point.point
-#         normal_vector = ref_point.normal.to(device)
-
-#         # # Compute the direction vector by rotating the normal vector by 90 degrees
-#         # direction_vector = torch.tensor([-normal_vector[1], normal_vector[0]],device=device)
-
-#         # Normalize the direction vector
-#         direction_vector_norm = normal_vector / torch.norm(normal_vector)
-#         # direction_vector_norm = direction_vector / torch.norm(direction_vector)
-
-#         # Find the intersection points with the image boundaries
-#         intersections = self.find_intersections_with_boundaries(point, direction_vector_norm, image_shape)
-
-#         # Sample points uniformly between the two intersection points
-#         sampled_points = torch.linspace(0, 1, steps=num_samples,device=device).unsqueeze(1) * (intersections[1] - intersections[0]) + intersections[0]
-
-#         # Clamp the points to ensure they are within image boundaries
-#         # sampled_points[:, 0] = torch.clamp(sampled_points[:, 0], 0, image_shape[1] - 1)  # x-coordinates
-#         # sampled_points[:, 1] = torch.clamp(sampled_points[:, 1], 0, image_shape[0] - 1)  # y-coordinates
-#         sampled_points = torch.stack([
-#             torch.clamp(sampled_points[:, 0], 0, image_shape[1] - 1),  # x-coordinates
-#             torch.clamp(sampled_points[:, 1], 0, image_shape[0] - 1)   # y-coordinates
-#         ], dim=1)
-
-#         return sampled_points
-    
-#     def find_intersections_with_boundaries(self,point, direction_vector, image_shape):
-#         """
-#         Find the intersection points of the line with the image boundaries.
-
-#         Args:
-#             point (torch.Tensor): A 2D tensor of shape (2,) representing the point on the line (x, y).
-#             direction_vector (torch.Tensor): A 2D tensor of shape (2,) representing the direction vector of the line.
-#             image_shape (tuple): A tuple representing the shape of the image (height, width).
-        
-#         Returns:
-#             list: A list of two points representing the intersection points with the image boundaries.
-#         """
-#         height, width = image_shape
-#         max_float = torch.finfo(direction_vector.dtype).max  # Maximum finite float value for the given dtype
-
-
-#         # Parametric line equation: p(t) = point + t * direction_vector
-#         # We need to find t such that p(t) lies on the image boundary
-
-#         # Handle intersections with left (x=0) and right (x=width-1) boundaries
-#         if torch.isclose(direction_vector[0], torch.tensor(0.0),atol=1e-3):
-#             t_left, t_right = -max_float, max_float
-#         else:
-#             t_left = (0 - point[0]) / direction_vector[0]  # Intersection with left boundary
-#             t_right = (width - 1 - point[0]) / direction_vector[0]  # Intersection with right boundary
-        
-#         # Handle intersections with top (y=0) and bottom (y=height-1) boundaries
-#         if torch.isclose(direction_vector[1], torch.tensor(0.0),atol=1e-3):
-#             t_top, t_bottom = -max_float, max_float
-#         else:
-#             t_top = (0 - point[1]) / direction_vector[1]  # Intersection with top boundary
-#             t_bottom = (height - 1 - point[1]) / direction_vector[1]  # Intersection with bottom boundary
-
-#         # Take the maximum of left/top and the minimum of right/bottom
-#         t_min = max(t_left, t_top)
-#         t_max = min(t_right, t_bottom)
-
-#         # Compute the actual intersection points using the t values
-#         intersection_1 = point + t_min * direction_vector
-#         intersection_2 = point + t_max * direction_vector
-
-#         return torch.stack([intersection_1, intersection_2])
-    
-#     def points_in_image(self,points,distance_image):
-#         N = len(points)  # Number of points
-#         H, W = distance_image.shape[-2], distance_image.shape[-1]  # Height and Width of the distance image
-#         try:
-#             grid = points.get_grid_sample_points(H,W)
-#         except:
-#             grid = points.clone()
-#             grid[:, 0] = 2.0 * grid[:, 0] / (W - 1) - 1.0  # x (width)
-#             grid[:, 1] = 2.0 * grid[:, 1] / (H - 1) - 1.0  # y (height)
-#             grid = grid.view(1, -1, 1, 2)
-#         interpolated_values = F.grid_sample(distance_image, grid, mode='bilinear', align_corners=True)
-#         return interpolated_values
-    
-#     def find_nearest_local_minimum(self, image, sampled_points, reference_point):
-#         """
-#         Finds the nearest local minimum along the line relative to the reference point.
-
-#         Args:
-#             image (torch.Tensor): The image to sample from, of shape (C, H, W).
-#             sampled_points (torch.Tensor): A tensor of shape (num_samples, 2) with the points sampled along the line.
-#             reference_point (torch.Tensor): A 2D tensor representing the reference point (x, y).
-        
-#         Returns:
-#             dict: Information about the nearest local minimum (position and value).
-#         """
-#         # Sample the image along the line to get the intensity values
-#         image_values = self.points_in_image(sampled_points, image).squeeze(0).squeeze(0) # .mean(dim=0)  # Get grayscale values (mean over channels)
-
-#         # Find the local minima along the line
-#         # local_minima_indices = self.find_local_minima_along_line(image_values) ###
-#         dist = torch.norm(sampled_points - reference_point, dim=1)
-#         ref_ind = torch.argmin(dist)
-#         local_minima_indices, min_value = self.find_nearest_minimum(image_values, ref_ind)
-            
-#         # self.plot_min_line(image, sampled_points, reference_point)#, image_values) #debug
-#         # self.plot_slice(image_values) # debug
-        
-#         if local_minima_indices == None:
-#             return None, None  # No local minima found
-
-#         # Calculate distances from the reference point to each local minimum
-#         distances = torch.norm(sampled_points[local_minima_indices] - reference_point)#, dim=1)
-
-#         # Find the index of the nearest local minimum
-#         nearest_minimum_index = torch.argmin(distances)
-#         nearest_minimum_position = sampled_points[local_minima_indices]
-#         nearest_minimum_value = image_values[local_minima_indices]
-#         # plot_sampled_points_with_intensity(image, sampled_points, image_values, reference_point, nearest_minimum_position)
-#         return nearest_minimum_position, nearest_minimum_value
-    
-#     # def find_local_minima(self,tensor):
-#     #     local_minima_indices = []
-#     #     n = len(tensor)
-
-#     #     for i in range(1, n - 1):
-#     #         # Handle the case where the current value is less than both neighbors
-#     #         if tensor[i - 1] > tensor[i] < tensor[i + 1]:
-#     #             local_minima_indices.append(i)
-#     #         # Handle the case where adjacent values are equal and both are smaller than neighbors
-#     #         elif tensor[i - 1] > tensor[i] == tensor[i + 1]:
-#     #             local_minima_indices.append(i)
-#     #             local_minima_indices.append(i + 1)
-#     #     # local_minima_list = list(set(local_minima_indices))
-#     #     # if local_minima_list.dim() == 0:
-#     #     #     # Apply unsqueeze to add a new dimension
-#     #     #     local_minima_list = local_minima_list.unsqueeze(0)
-#     #     # return list(set(local_minima_indices))  # Remove duplicates, if any
-#     #     return local_minima_indices
-
-#     # Function to find the nearest minimum on either side of a given start point
-#     def find_nearest_minimum(self,tensor, start_idx):
-#         # Find all local minima
-#         local_minima_indices = self.find_local_minima(tensor)
-        
-#         # Separate minima into those left and right of the start point
-#         left_minima = [i for i in local_minima_indices if i < start_idx]
-#         right_minima = [i for i in local_minima_indices if i > start_idx]
-        
-#         # Find the nearest minima on either side, if they exist
-#         nearest_left = min(left_minima, key=lambda i: start_idx - i, default=None)
-#         nearest_right = min(right_minima, key=lambda i: i - start_idx, default=None)
-        
-#         # Return the nearest minima
-#         if nearest_left is not None and nearest_right is not None:
-#             if (start_idx - nearest_left) <= (nearest_right - start_idx):
-#                 return nearest_left, tensor[nearest_left]
-#             else:
-#                 return nearest_right, tensor[nearest_right]
-#         elif nearest_left is not None:
-#             return nearest_left, tensor[nearest_left]
-#         elif nearest_right is not None:
-#             return nearest_right, tensor[nearest_right]
-#         else:
-#             return None, None  # No local minima found
-        
-#     def find_local_minima_along_line(self, image_values):
-#         """
-#         Finds the indices of local minima in the sampled image values along a line.
-
-#         Args:
-#             image_values (torch.Tensor): A 1D tensor of sampled image values along the line.
-        
-#         Returns:
-#             torch.Tensor: A tensor of indices where local minima occur.
-#         """
-#         # Compare each point with its neighbors to find local minima
-#         # Shifted comparison for left and right neighbors
-#         left_shifted = image_values[:-2]  # Shift the values left
-#         right_shifted = image_values[2:]  # Shift the values right
-#         center_values = image_values[1:-1]  # Middle values
-
-#         # Condition for local minima: center_value is less than both neighbors
-#         local_minima_mask = (center_values < left_shifted) & (center_values < right_shifted)
-
-#         # Get indices of local minima and adjust indices because of shifting
-#         local_minima_indices = torch.nonzero(local_minima_mask.squeeze(1)) + 1  # Adjust by +1 to map to correct positions
-#         return local_minima_indices.flatten()
-    
-#     def sample_image_along_line(self, image, sampled_points):
-#         """
-#         Samples the image along the provided points using bilinear interpolation.
-        
-#         Args:
-#             image (torch.Tensor): The image to sample from, of shape (C, H, W).
-#             sampled_points (torch.Tensor): A tensor of points (x, y) along the line of shape (num_samples, 2).
-        
-#         Returns:
-#             torch.Tensor: The sampled image values along the line, of shape (C, num_samples).
-#         """
-#         # Normalize sampled points to the range [-1, 1] for grid_sample
-#         height, width = image.shape[-2], image.shape[-1]
-        
-#         # Convert points to the range [-1, 1] for both x and y
-#         # sampled_points_normalized = sampled_points.clone()
-#         # sampled_points_normalized[:, 0] = 2.0 * (sampled_points[:, 0] / (width - 1)) - 1.0  # Normalize x-coordinates
-#         # sampled_points_normalized[:, 1] = 2.0 * (sampled_points[:, 1] / (height - 1)) - 1.0  # Normalize y-coordinates
-#         sampled_points_normalized = torch.stack([
-#             2.0 * (sampled_points[:, 0] / (width - 1)) - 1.0,  # Normalize x-coordinate
-#             2.0 * (sampled_points[:, 1] / (height - 1)) - 1.0  # Normalize y-coordinate
-#         ])
-
-        
-#         # Reshape points to match the grid_sample format
-#         grid = sampled_points_normalized.view(1, -1, 1, 2)  # Shape: (1, num_samples, 1, 2)
-
-#         # Use grid_sample to sample image values at the given points
-#         sampled_values = F.grid_sample(image.unsqueeze(0).unsqueeze(0), grid, align_corners=True, mode='bilinear', padding_mode='border')
-        
-#         return sampled_values.squeeze(0).squeeze(1)  # Return shape (C, num_samples)
-    
-#     def closest_point_loss(self,points_set_a, points_set_b):
-#         """
-#         Computes the loss between two sets of points using closest point matching.
-#         For each point in points_set_a, we find the closest point in points_set_b.
-#         """
-#         # Get the number of points in each set
-#         n_a = points_set_a.size(0)
-#         n_b = points_set_b.size(0)
-
-#         # Expand both sets to calculate pairwise distances between all points
-#         points_a_exp = points_set_a.unsqueeze(1).expand(n_a, n_b, -1)  # Shape: (n_a, n_b, 3)
-#         points_b_exp = points_set_b.unsqueeze(0).expand(n_a, n_b, -1)  # Shape: (n_a, n_b, 3)
-
-#         # Calculate pairwise distances between points in the two sets
-#         distances = torch.norm(points_a_exp - points_b_exp, dim=2)  # Shape: (n_a, n_b)
-
-#         # For each point in set A, find the closest point in set B
-#         min_distances_a_to_b, _ = torch.min(distances, dim=1)  # Shape: (n_a,)
-
-#         # For each point in set B, find the closest point in set A
-#         min_distances_b_to_a, _ = torch.min(distances, dim=0)  # Shape: (n_b,)
-
-#         # The loss is the sum of both matching directions
-#         loss = torch.mean(min_distances_a_to_b) + torch.mean(min_distances_b_to_a)
-#         return loss
-    
-    
-#     def smooth_tensor(self,tensor, window_size=3):
-#         # Apply a simple moving average filter for smoothing
-#         kernel = torch.ones(window_size) / window_size
-#         padding = window_size // 2
-#         smooth_tensor = torch.nn.functional.conv1d(tensor.unsqueeze(0).unsqueeze(0), 
-#                                                 kernel.unsqueeze(0).unsqueeze(0), 
-#                                                 padding=padding)
-#         return smooth_tensor.squeeze()
-
-#     def find_local_minima(self,tensor):
-#         # Create shifted versions of the tensor
-#         shifted_left = torch.roll(tensor, shifts=1)
-#         shifted_right = torch.roll(tensor, shifts=-1)
-
-#         # Compare each element to its neighbors to find local minima
-#         minima_mask = (tensor < shifted_left) & (tensor < shifted_right)
-        
-#         # Exclude the first and last elements (edge cases, as they have no two neighbors)
-#         minima_mask[0] = minima_mask[-1] = False
-        
-#         # Get the indices of the minima
-#         minima_indices = torch.nonzero(minima_mask.squeeze()).squeeze()
-#         if minima_indices.dim() == 0:
-#                 # Apply unsqueeze to add a new dimension
-#                 minima_indices = minima_indices.unsqueeze(0)
-#         return minima_indices
-
-#     def find_closest_minima(self,image, sampled_points, reference_point, smooth=False, window_size=3):
-        
-#         # Sample the image along the line to get the intensity values
-#         image_values = self.points_in_image(sampled_points, image).squeeze(0).squeeze(0) # .mean(dim=0)  # Get grayscale values (mean over channels)
-
-#         dist = torch.norm(sampled_points - reference_point, dim=1)
-#         ref_ind = torch.argmin(dist)
-        
-#         if smooth:
-#             image_values = self.smooth_tensor(image_values, window_size=window_size)  # Apply smoothing if noise is present
-        
-#         minima_indices = self.find_local_minima(image_values)
-        
-#         # Find the index of the minimum closest to the given index
-#         if len(minima_indices) > 0:
-#             closest_minima_idx = minima_indices[(minima_indices - ref_ind).abs().argmin()].item()
-#             closest_minima_value = image_values[closest_minima_idx]
-#             return sampled_points[closest_minima_idx], closest_minima_value
-#         else:
-#             return None, None  # No minima found
-        
 TEST_CRYSTALS = {
     'cube': {
         'lattice_unit_cell': [1, 1, 1],
@@ -760,7 +243,7 @@ def generate_synthetic_crystal(
         Image.fromarray((dist * 255).astype(np.uint8)).save(save_dir / 'rcf_featuremaps' / f'dists_{name}.png')
     
     dist_maps = torch.stack(dist_maps_arr)
-    dist_map = dist_maps[2].unsqueeze(0)
+    dist_map = dist_maps[5].unsqueeze(0)
     f_map = torch.abs(feature_maps[2])
     
     f_map_np = to_numpy(f_map).squeeze()
@@ -834,19 +317,19 @@ def run():
     img_tensor = img_tensor.unsqueeze(0).unsqueeze(0).to(device)
 
     # from synthetic crystal
-    # f_map_inv = 1 - f_map
-    # img_tensor = f_map.to(device)
-    # dist_inv = 1 - dist_map
-    # img_tensor = dist_inv.to(device)
+    f_map_inv = 1 - f_map
+    img_tensor = f_map.to(device)
+    dist_inv = 1 - dist_map
+    img_tensor = dist_inv.to(device)
     # # dist_map = dist_map.to(device)
     
-    projector_tar = ProjectorPoints(crystal_tar,
+    projector_tar = Projector(crystal_tar,
                                 external_ior=1.333,
                                 zoom =zoom,
                                 image_size=f_map.shape[-2:],)
-    projector_tar.to(device)
-    points_tar = projector_tar.project()
-
+    # projector_tar.to(device)
+    projector_tar.project()
+    points_tar = projector_tar.edge_points
 
     # crystal_opt = Crystal(**TEST_CRYSTALS['cube_test'])
     # crystal_opt = Crystal(**TEST_CRYSTALS['alpha_test'])
@@ -866,13 +349,13 @@ def run():
     v, f = crystal_opt.build_mesh(distances=crystal_opt.distances)
     crystal_opt.to(device)
 
-    projector_opt = ProjectorPoints(crystal_opt,
+    projector_opt = Projector(crystal_opt,
                                 external_ior=1.333,
                                 zoom = zoom,
                                 image_size=f_map.shape[-2:])
-    projector_opt.to(device)
-    points_opt = projector_opt.project()
-
+    # projector_opt.to(device)
+    projector_opt.project()
+    points_opt = projector_opt.edge_points
     params = {
             'distances': [crystal_opt.distances],
         }
@@ -897,17 +380,20 @@ def run():
         # Convert polar to Cartesian coordinates
         v, f = crystal_opt.build_mesh()
         
-        projector_opt = ProjectorPoints(crystal_opt,
+        projector_opt = Projector(crystal_opt,
                             zoom = zoom,
                             image_size=f_map.shape[-2:],
                             external_ior=1.333,)
-        points_opt = projector_opt.project()
+        projector_opt.project()
+        points_opt = projector_opt.edge_points
+        normals_opt = projector_opt.edge_normals
+
         
         dist = crystal_opt.distances
         # a = points_opt.get_all_points_tensor()
         # print(f"points tensor {a}")
         # Forward pass: get the pixel value at the current point (x, y)
-        loss = model(points_opt, img_tensor)  # Call model's forward method with Cartesian coordinates
+        loss, distances = model(points_opt,normals_opt, img_tensor)  # Call model's forward method with Cartesian coordinates
         # Perform backpropagation (minimize the pixel value)
         
         loss.backward(retain_graph=True)
@@ -936,7 +422,7 @@ def run():
             # img_overlay = to_numpy(projector.image * 255).astype(np.uint8).squeeze().transpose(1, 2, 0)
             # img_overlay[:, :, 3] = (img_overlay[:, :, 3] * 0.5).astype(np.uint8)
             # overlay_plot(img,points_opt,save_dir,'progress_' + str(step))
-            multiplot(img_overlay,points_opt,save_dir,'progress_' + str(step).zfill(3),plot_loss_dist=True, writer=writer,global_step=step)
+            multiplot(img_overlay,points_opt,save_dir,'progress_' + str(step).zfill(3),distances= distances, plot_loss_dist=True, writer=writer,global_step=step)
             crystal_opt.to_json(crystal_dir / f"crystal_{str(step).zfill(3)}.json")
             
         optimizer.step()

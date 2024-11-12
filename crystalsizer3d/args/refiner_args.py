@@ -133,6 +133,7 @@ class RefinerArgs(BaseArgs):
             w_temporal: float = 1.0,
             w_keypoints: float = 1.0,
             w_anchors: float = 1.0,
+            w_edge_matching: float = 1.0,
 
             # Loss decay factors
             l_decay_l1: float = 1.0,
