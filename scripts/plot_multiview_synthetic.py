@@ -66,7 +66,13 @@ def get_args() -> Namespace:
 
     # Perspective renderings
     parser.add_argument('--n-rotations-per-axis', type=int, default=3,
-                        help='Number of rotations to make per axis.')
+                        help='Number of rotation increments to make per axis for the systematic rotation.')
+    parser.add_argument('--n-frames', type=int, default=200,
+                        help='Number of frames for the random rotation video.')
+    parser.add_argument('--max-acc-change', type=float, default=0.01,
+                        help='Maximum change in acceleration for the random rotation video.')
+    parser.add_argument('--roughness', type=float, default=None,
+                        help='Override the roughness of the crystal material.')
 
     args = parser.parse_args()
 
@@ -211,10 +217,8 @@ def _plot_random_rotation(
     """
     Render different perspectives of the crystal.
     """
-    n_frames = 200
-    max_acc_change = 0.01
     r0 = np.zeros((1, 3))
-    momentum = np.random.uniform(-max_acc_change, max_acc_change, size=(n_frames - 1, 3))
+    momentum = np.random.uniform(-args.max_acc_change, args.max_acc_change, size=(args.n_frames - 1, 3))
     components = np.cumsum(np.concatenate([r0, np.cumsum(momentum, axis=0)]), axis=0)
     rotations = R.from_euler('xyz', components).as_rotvec()
 
@@ -229,7 +233,8 @@ def _plot_random_rotation(
     #     shift=1.,
     #     seed=args.seed
     # )
-    crystal.material_roughness.data.fill_(0.2)
+    if args.roughness is not None:
+        crystal.material_roughness.data.fill_(args.roughness)
 
     scene = Scene(
         crystal=crystal,
@@ -249,7 +254,7 @@ def _plot_random_rotation(
 
     for i, r in enumerate(rotations):
         if (i + 1) % 5 == 0:
-            logger.info(f'Rendering frame {i + 1}/{n_frames}')
+            logger.info(f'Rendering frame {i + 1}/{args.n_frames}')
         crystal.rotation.data = init_tensor(r, device=device)
         scene.build_mi_scene()
         img = scene.render()
