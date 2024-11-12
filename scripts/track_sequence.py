@@ -33,8 +33,7 @@ from crystalsizer3d.scene_components.scene import Scene
 from crystalsizer3d.scene_components.utils import orthographic_scale_factor
 from crystalsizer3d.util.kalman_filter import KalmanFilter
 from crystalsizer3d.util.utils import FlexibleJSONEncoder, hash_data, init_tensor, json_to_numpy, print_args, \
-    smooth_signal, str2bool, \
-    to_dict, to_numpy, to_rgb
+    smooth_signal, str2bool, to_dict, to_numpy, to_rgb
 
 plot_extension = 'png'  # or svg
 
@@ -65,6 +64,11 @@ ARG_NAMES = {
     'predictor': PREDICTOR_ARG_NAMES
 }
 
+PARAMETER_KEYS = ['scale', 'distances', 'origin', 'rotation', 'material_roughness', 'material_ior', 'light_radiance']
+
+line_styles = ['--', '-.', ':']
+marker_styles = ['o', 'x', 's', '+', 'v', '^', '<', '>', 'd', 'p', 'P', '*', 'h', 'H', '|', '_']
+
 refiner: Refiner = None
 
 
@@ -91,8 +95,6 @@ def get_args(printout: bool = True) -> Tuple[Namespace, RefinerArgs]:
                         help='Path to the initial scene file. Will be used in place of the initial prediction.')
     parser.add_argument('--enforce-positive-growth', type=str2bool, default=False,
                         help='Enforce positive growth of the crystal distances.')
-    # parser.add_argument('--measurements-xls', type=Path,
-    #                     help='Path to an xls file containing manual measurements.')
 
     # Refining settings
     RefinerArgs.add_args(parser)
@@ -587,7 +589,9 @@ def _plot_face_property_values(
         property_name: str,
         property_values: np.ndarray,
         image_paths: List[Tuple[int, Path]],
-        save_dir: Path
+        save_dir: Path,
+        measurement_idxs: np.ndarray = None,
+        measurement_values: np.ndarray = None
 ):
     """
     Plot face distances or areas.
@@ -613,11 +617,11 @@ def _plot_face_property_values(
         top=0.95, bottom=0.08, right=0.99, left=0.05,
         hspace=0.3, wspace=0.2
     )
-    line_styles = ['--', '-.', ':']
     for i, (group_hkl, group_idxs) in enumerate(groups.items()):
         colour = group_colours[i]
         colour_variants = _get_colour_variations(colour, len(group_idxs))
         y = property_values[:, list(group_idxs.values())]
+        y_measured = measurement_values[:, list(group_idxs.values())] if measurement_values is not None else None
         y_mean = y.mean(axis=1)
         y_std = y.std(axis=1)
         lbls = [_get_hkl_label(hkl) for hkl in list(group_idxs.keys())]
@@ -633,6 +637,9 @@ def _plot_face_property_values(
         for j, (y_j, lbl, colour_j) in enumerate(zip(y.T, lbls, colour_variants)):
             ax.plot(x_vals, y_j, label=lbl, c=colour_j,
                     linestyle=line_styles[j % len(line_styles)], linewidth=0.8, alpha=0.8)
+            if y_measured is not None:
+                ax.plot(measurement_idxs, y_measured[:, j], label=lbl + ' (manual)', c=colour_j,
+                        marker=marker_styles[j % len(marker_styles)], linestyle='none', markersize=5, alpha=0.7)
 
         ax.set_xlabel('Image index')
         ax.set_ylabel(y_label)
@@ -660,7 +667,8 @@ def _plot_face_property_values(
 def _plot_distances(
         parameters: Dict[str, np.ndarray],
         image_paths: List[Tuple[int, Path]],
-        save_dir: Path
+        save_dir: Path,
+        measurements: Dict[str, np.ndarray] = None
 ):
     """
     Plot face distances.
@@ -671,20 +679,24 @@ def _plot_distances(
         property_name='distances',
         property_values=distances * scales[:, None],
         image_paths=image_paths,
-        save_dir=save_dir
+        save_dir=save_dir,
+        measurement_idxs=measurements['idx'] if measurements is not None else None,
+        measurement_values=measurements['distances'] * measurements['scale'][:,
+                                                       None] if measurements is not None else None
     )
 
 
 def _plot_areas(
-        parameters_final: Dict[str, np.ndarray],
+        parameters: Dict[str, np.ndarray],
         image_paths: List[Tuple[int, Path]],
-        save_dir: Path
+        save_dir: Path,
+        measurements: Dict[str, np.ndarray] = None
 ):
     """
     Plot face areas.
     """
-    distances = parameters_final['distances']
-    scales = parameters_final['scale']
+    distances = parameters['distances']
+    scales = parameters['scale']
 
     # Get a crystal object
     ds = refiner.manager.ds
@@ -704,29 +716,49 @@ def _plot_areas(
         unscaled_areas = np.array([crystal.areas[tuple(hkl.tolist())] for hkl in crystal.all_miller_indices])
         areas[i] = unscaled_areas * scales[i]**2
 
+    # Calculate the face areas for the manual measurements
+    areas_m = None
+    if measurements is not None:
+        distances_m = measurements['distances']
+        scales_m = measurements['scale']
+        areas_m = np.zeros_like(distances_m)
+        for i in range(len(distances_m)):
+            crystal.build_mesh(distances=init_tensor(distances_m[i], dtype=torch.float64))
+            unscaled_areas_m = np.array([crystal.areas[tuple(hkl.tolist())] for hkl in crystal.all_miller_indices])
+            areas_m[i] = unscaled_areas_m * scales_m[i]**2
+
     _plot_face_property_values(
         property_name='areas',
         property_values=areas,
         image_paths=image_paths,
-        save_dir=save_dir
+        save_dir=save_dir,
+        measurement_idxs=measurements['idx'] if measurements is not None else None,
+        measurement_values=areas_m
     )
 
 
 def _plot_origin(
-        parameters_final: Dict[str, np.ndarray],
+        parameters: Dict[str, np.ndarray],
         image_paths: List[Tuple[int, Path]],
-        save_dir: Path
+        save_dir: Path,
+        measurements: Dict[str, np.ndarray] = None
 ):
     """
     Plot origin position.
     """
-    origins = parameters_final['origin']
+    origins = parameters['origin']
     x_vals = [idx for idx, _ in image_paths]
     fig, ax = plt.subplots(1, figsize=(12, 8))
     ax.set_title('Origin position')
     ax.grid()
     for i in range(3):
         ax.plot(x_vals, origins[:, i], label='xyz'[i])
+    if measurements is not None:
+        origins = measurements['origin']
+        x_vals = measurements['idx']
+        for i in range(3):
+            ax.plot(x_vals, origins[:, i], label='xyz'[i] + ' (manual)', linestyle='none',
+                    marker=marker_styles[i], markersize=5, alpha=0.7)
     ax.set_xlabel('Image index')
     ax.set_ylabel('Position')
     ax.legend()
@@ -735,20 +767,27 @@ def _plot_origin(
 
 
 def _plot_rotation(
-        parameters_final: Dict[str, np.ndarray],
+        parameters: Dict[str, np.ndarray],
         image_paths: List[Tuple[int, Path]],
-        save_dir: Path
+        save_dir: Path,
+        measurements: Dict[str, np.ndarray] = None
 ):
     """
     Plot rotation.
     """
-    rotations = parameters_final['rotation']
+    rotations = parameters['rotation']
     x_vals = [idx for idx, _ in image_paths]
     fig, ax = plt.subplots(1, figsize=(12, 8))
     ax.set_title('Axis-angle rotation vector components')
     ax.grid()
     for i in range(3):
         ax.plot(x_vals, rotations[:, i], label='$R_' + 'xyz'[i] + '$')
+    if measurements is not None:
+        rotations = measurements['rotation']
+        x_vals = measurements['idx']
+        for i in range(3):
+            ax.plot(x_vals, rotations[:, i], label='$R_' + 'xyz'[i] + '$ (manual)', linestyle='none',
+                    marker=marker_styles[i], markersize=5, alpha=0.7)
     ax.set_xlabel('Image index')
     ax.set_ylabel('Component value')
     ax.legend()
@@ -758,9 +797,9 @@ def _plot_rotation(
 
 def _generate_images(
         args: Namespace,
-        parameters_final: Dict[str, np.ndarray],
+        parameters: Dict[str, np.ndarray],
         image_paths: List[Tuple[int, Path]],
-        save_dir_run: Path,
+        save_dir: Path,
         overwrite: bool = False
 ):
     """
@@ -777,16 +816,16 @@ def _generate_images(
         for annotated in [True, False]:
             if which == 'original' and not annotated:
                 continue
-            save_dir = save_dir_run / 'images' / (which + ('_annotated' if annotated else ''))
-            if save_dir.exists():
+            imgs_dir = save_dir / 'images' / (which + ('_annotated' if annotated else ''))
+            if imgs_dir.exists():
                 if not overwrite:
-                    logger.warning(f'Images directory {save_dir} already exists. '
+                    logger.warning(f'Images directory {imgs_dir} already exists. '
                                    f'Pass overwrite=True to overwrite.')
                     continue
-                logger.info(f'Overwriting annotated images directory {save_dir}.')
-                shutil.rmtree(save_dir)
-            save_dir.mkdir(parents=True)
-            save_dirs[which]['annotated' if annotated else 'not_annotated'] = save_dir
+                logger.info(f'Overwriting annotated images directory {imgs_dir}.')
+                shutil.rmtree(imgs_dir)
+            imgs_dir.mkdir(parents=True)
+            save_dirs[which]['annotated' if annotated else 'not_annotated'] = imgs_dir
     if sum([len(v) for v in save_dirs.values()]) == 0:
         logger.info('All images already generated. Skipping.')
         return
@@ -825,11 +864,10 @@ def _generate_images(
 
     # Prepare the parameters - interpolating the missing data
     data = {}
-    param_keys = ['scale', 'distances', 'origin', 'rotation', 'material_roughness', 'material_ior', 'light_radiance']
     x_old = np.linspace(0, 1, len(image_paths))
     x_new = np.linspace(0, 1, len(image_paths_all))
-    for key in param_keys:
-        param_data = parameters_final[key]
+    for key in PARAMETER_KEYS:
+        param_data = parameters[key]
         if param_data.ndim == 1:
             param_data = param_data[:, None]
         new_data = np.zeros((len(image_paths_all), param_data.shape[1]))
@@ -845,7 +883,7 @@ def _generate_images(
             logger.info(f'Generating images for image {i + 1}/{len(image_paths_all)}.')
 
         # Update the crystal and scene parameters
-        for key in param_keys:
+        for key in PARAMETER_KEYS:
             if hasattr(crystal, key):
                 getattr(crystal, key).data = init_tensor(data[key][i])
             elif hasattr(scene, key):
@@ -921,6 +959,100 @@ def _generate_images(
             img.save(save_dirs[img_type]['annotated'] / f'image_{idx:04d}.png')
 
 
+def _generate_manual_measurement_overlay_images(
+        args: Namespace,
+        measurements: Dict[str, np.ndarray],
+        image_paths: List[Tuple[int, Path]],
+        save_dir: Path,
+        overwrite: bool = False,
+        **kwargs
+):
+    """
+    Generate images with the manual measurement projected overlays.
+    """
+    logger.info('Generating manual measurement images.')
+    global refiner
+    wf_line_width = 3
+
+    # Make the save directories
+    imgs_dir = save_dir / 'images' / 'original_annotated_manual'
+    if imgs_dir.exists():
+        if not overwrite:
+            logger.warning(f'Images directory {imgs_dir} already exists. '
+                           f'Pass overwrite=True to overwrite.')
+            return
+        logger.info(f'Overwriting annotated images directory {imgs_dir}.')
+        shutil.rmtree(imgs_dir)
+    imgs_dir.mkdir(parents=True)
+
+    # Load the scene from the first image
+    logger.info('Loading the scene from the first image.')
+    idx0, img_path0 = image_paths[0]
+    image_dir = Path(args.save_dir_seq) / 'refiner' / args.refiner_dir / f'image_{idx0:04d}'
+    img0 = Image.open(img_path0)
+    image_size = min(img0.size)
+    if img0.size[0] != img0.size[1]:
+        offset_l = (img0.size[0] - image_size) // 2
+        offset_t = (img0.size[1] - image_size) // 2
+    else:
+        offset_l = 0
+        offset_t = 0
+    scene = Scene.from_yml(image_dir / 'scene.yml')
+    crystal = scene.crystal
+
+    # Set up the projector
+    logger.info('Setting up the projector.')
+    projector = Projector(
+        crystal=crystal,
+        image_size=(image_size, image_size),
+        zoom=orthographic_scale_factor(scene),
+        transparent_background=True,
+        multi_line=True,
+        rtol=1e-2
+    )
+
+    # Load all the image paths including ones which weren't optimised
+    measurement_idxs = measurements['idx']
+    pathspec = str(args.images_dir.absolute()) + '/*.' + args.image_ext
+    all_image_paths = sorted(glob.glob(pathspec))
+    image_paths = [(idx, Path(all_image_paths[idx])) for idx in measurement_idxs]
+
+    # Make the annotated images
+    logger.info('Generating images.')
+    for i, (idx, image_path) in enumerate(image_paths):
+        if (i + 1) % 5 == 0:
+            logger.info(f'Generating images for image {i + 1}/{len(image_paths)}.')
+
+        # Update the crystal parameters
+        for key in PARAMETER_KEYS:
+            if key in measurements and hasattr(crystal, key):
+                getattr(crystal, key).data = init_tensor(measurements[key][i])
+
+        # Rebuild the crystal mesh and project the wireframe
+        crystal.build_mesh()
+        projector.project(generate_image=False)
+
+        # Load the image
+        img = Image.open(image_path)
+        img = img.convert('RGB')
+
+        # Draw wireframe onto the image
+        draw = ImageDraw.Draw(img, 'RGB')
+        for ref_face_idx, face_segments in projector.edge_segments.items():
+            if len(face_segments) == 0:
+                continue
+            colour = projector.colour_facing_towards if ref_face_idx == 'facing' else projector.colour_facing_away
+            colour = tuple((colour * 255).int().tolist())
+            for segment in face_segments:
+                l = segment.clone()
+                l[:, 0] = torch.clamp(l[:, 0], 1, projector.image_size[1] - 2) + offset_l
+                l[:, 1] = torch.clamp(l[:, 1], 1, projector.image_size[0] - 2) + offset_t
+
+                draw.line(xy=[tuple(l[0].int().tolist()), tuple(l[1].int().tolist())],
+                          fill=colour, width=wf_line_width)
+        img.save(imgs_dir / f'image_{idx:04d}.png')
+
+
 def _generate_videos(
         args: Namespace,
         save_dir_run: Path,
@@ -960,6 +1092,16 @@ def _generate_videos(
             # Remove the temporary copy of the original images
             if which == 'original' and not annotated:
                 shutil.rmtree(imgs_dir)
+
+    # Make manual measurements video
+    imgs_dir = save_dir_run / 'images' / 'original_annotated_manual'
+    if imgs_dir.exists():
+        save_path = videos_dir / 'original_annotated_manual.mp4'
+        logger.info(f'Making growth video from {imgs_dir} to {save_path}.')
+        escaped_images_dir = str(imgs_dir.absolute()).replace('[', '\\[').replace(']', '\\]')
+        cmd = f'ffmpeg -y -framerate 25 -pattern_type glob -i "{escaped_images_dir}/*.png" -c:v libx264 -pix_fmt yuv420p "{save_path}"'
+        logger.info(f'Running command: {cmd}')
+        os.system(cmd)
 
     # Make a composite video
     save_path = videos_dir / 'composite.mp4'
@@ -1054,7 +1196,8 @@ def plot_run():
     parser = ArgumentParser(description='CrystalSizer3D script to track crystal growth.')
     parser.add_argument('--run-dir', type=Path, help='Directory containing the run data.')
     parser.add_argument('--overwrite', type=str2bool, default=False, help='Overwrite existing images and videos.')
-    runtime_args = parser.parse_known_args()[0]
+    parser.add_argument('--measurements-dir', type=Path, help='Path to a directory containing manual measurements.')
+    runtime_args = parser.parse_args()
     run_dir = runtime_args.run_dir
     overwrite = runtime_args.overwrite
     assert run_dir.exists(), f'Run directory {run_dir} does not exist.'
@@ -1081,21 +1224,84 @@ def plot_run():
     # Instantiate a refiner
     refiner_args = RefinerArgs.from_args(args)
     refiner = Refiner(args=refiner_args, do_init=False)
+    mi_ref = refiner.manager.crystal.all_miller_indices
+
+    # Load manual measurements
+    measurements = None
+    if runtime_args.measurements_dir is not None:
+        assert runtime_args.measurements_dir.exists(), f'Measurements directory {runtime_args.measurements_dir} does not exist.'
+
+        # Expect measurements dir to contain files like XXXX.json
+        keys = ['idx', 'distances', 'scale', 'origin', 'rotation', 'material_roughness', 'material_ior']
+        measurements = {k: [] for k in keys}
+        for file_path in runtime_args.measurements_dir.iterdir():
+            if file_path.suffix != '.json':
+                continue
+            crystal = Crystal.from_json(file_path)
+            idx = int(file_path.stem)
+            for k in keys:
+                if k == 'idx':
+                    measurements[k].append(idx)
+                elif k == 'distances':
+                    mi = crystal.all_miller_indices
+                    mi_idxs = ((mi[None, ...] == mi_ref[:, None]).all(dim=2)).nonzero(as_tuple=True)[1]
+                    measurements[k].append(to_numpy(crystal.distances[mi_idxs]))
+                else:
+                    measurements[k].append(to_numpy(getattr(crystal, k)))
+        for k in keys:
+            measurements[k] = np.array(measurements[k])
+
+        # Fix the origin for the automatic measurements to match the manual measurements
+        ds = refiner.manager.ds
+        cs = ds.csd_proxy.load(ds.dataset_args.crystal_id)
+        crystal = Crystal(
+            lattice_unit_cell=cs.lattice_unit_cell,
+            lattice_angles=cs.lattice_angles,
+            miller_indices=ds.miller_indices,
+            point_group_symbol=cs.point_group_symbol,
+        )
+
+        def adjust_distances(distances_old, origin_old):
+            distances_new = np.zeros_like(distances_old)
+            for i in range(len(origin_old)):
+                crystal.distances.data = init_tensor(distances_old[i])
+                crystal.origin.data = init_tensor(origin_old[i])
+                crystal.adjust_origin(origin0, verify=False)
+                distances_new[i] = to_numpy(crystal.distances)
+            return distances_new
+
+        # Use the origin from the first measured frame for all other frames
+        origin0 = init_tensor(measurements['origin'][0])
+        params = data['parameters_final']
+        params['distances'] = adjust_distances(params['distances'], params['origin'])
+
+        # Ensure the measurements also all have the same origin
+        if len(np.unique(measurements['origin'], axis=0)) != 1:
+            measurements['distances'] = adjust_distances(measurements['distances'], measurements['origin'])
 
     # Make plots
     _plot_losses(data['losses_final'], data['losses_all'], image_paths, run_dir)
-    _plot_distances(data['parameters_final'], image_paths, run_dir)
-    _plot_areas(data['parameters_final'], image_paths, run_dir)
-    _plot_origin(data['parameters_final'], image_paths, run_dir)
-    _plot_rotation(data['parameters_final'], image_paths, run_dir)
+    plot_args = dict(
+        parameters=data['parameters_final'],
+        measurements=measurements,
+        image_paths=image_paths,
+        save_dir=run_dir,
+    )
+    _plot_distances(**plot_args)
+    _plot_areas(**plot_args)
+    _plot_origin(**plot_args)
+    _plot_rotation(**plot_args)
 
     # Generate images and videos
-    _generate_images(args, data['parameters_final'], image_paths, run_dir, overwrite=overwrite)
+    _generate_images(args, parameters=data['parameters_final'],
+                     image_paths=image_paths, save_dir=run_dir, overwrite=overwrite)
+    if measurements is not None:
+        _generate_manual_measurement_overlay_images(args, overwrite=overwrite, **plot_args)
     _generate_videos(args, run_dir, overwrite=overwrite)
 
 
 if __name__ == '__main__':
-    if len(sys.argv) == 2 and sys.argv[1][:9] == '--run-dir':
+    if len(sys.argv) >= 2 and sys.argv[1][:9] == '--run-dir':
         plot_run()
     else:
         track_sequence()

@@ -711,6 +711,37 @@ class Crystal(nn.Module):
         self.uv_mask = uv_mask
         # plot_uv_map(rows, row_heights, col_widths, sf, mask)
 
+    @torch.no_grad()
+    def adjust_origin(self, new_origin: Tensor, verify: bool = True):
+        """
+        Adjust the origin of the crystal.
+        """
+        scale = self.scale.clone()
+        rotation = self.rotation.clone()
+        self.scale.data.fill_(1.)
+        self.rotation.data.fill_(0.)
+        v_old, f_old = self.build_mesh()
+
+        # Adjust the distances to match the new origin
+        origin_shift = self.origin - new_origin
+        for j, N in enumerate(self.N):
+            d = self.distances[j]
+            adjust = origin_shift @ N  # Distance to shift perpendicular to the face normal
+            self.distances.data[j] = d + adjust
+
+        # Update origin
+        self.origin.data = new_origin
+
+        # Verify the shape still matches
+        if verify:
+            v_new, f_new = self.build_mesh()
+            assert torch.allclose(v_old, v_new, atol=1e-6), 'Vertices do not match!'
+            assert torch.allclose(f_old, f_new), 'Faces do not match!'
+
+        # Restore scale and rotation
+        self.scale.data = scale
+        self.rotation.data = rotation
+
 
 def plot_uv_map(rows, row_heights, col_widths, sf, uv_mask):
     import matplotlib.pyplot as plt
