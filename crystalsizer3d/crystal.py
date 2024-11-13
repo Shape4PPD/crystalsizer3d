@@ -12,8 +12,8 @@ from torch import Tensor, nn
 
 from crystalsizer3d import logger
 from crystalsizer3d.scene_components.textures import NoiseTexture
-from crystalsizer3d.util.geometry import align_points_to_xy_plane, calculate_relative_angles, merge_vertices, normalise, \
-    rotate_2d_points_to_square
+from crystalsizer3d.util.geometry import align_points_to_xy_plane, merge_vertices, normalise, \
+    rotate_2d_points_to_square, sort_face_vertices
 from crystalsizer3d.util.utils import init_tensor
 
 ROTATION_MODE_QUATERNION = 'quaternion'
@@ -166,6 +166,7 @@ class Crystal(nn.Module):
         # Register buffers
         self.register_buffer('all_distances', torch.empty(0))
         self.register_buffer('N', torch.empty(0))
+        self.register_buffer('vertices_og', torch.empty(0))
         self.register_buffer('vertices', torch.empty(0))
         self.register_buffer('mesh_vertices', torch.empty(0))
         self.register_buffer('mesh_faces', torch.empty(0, dtype=torch.int64))
@@ -358,7 +359,7 @@ class Crystal(nn.Module):
             if self.rotation_mode == ROTATION_MODE_AXISANGLE:
                 rv_norm = self.rotation.norm()
                 if rv_norm > 2 * torch.pi:
-                    rv_norm2 = torch.remainder(self.rotation.norm(), 2 * torch.pi)
+                    rv_norm2 = torch.remainder(rv_norm, 2 * torch.pi)
                     self.rotation.data = self.rotation / rv_norm * rv_norm2
             elif self.rotation_mode == ROTATION_MODE_QUATERNION:
                 rv_norm = self.rotation.norm()
@@ -368,6 +369,32 @@ class Crystal(nn.Module):
 
             self.material_roughness.data = torch.clamp(self.material_roughness, 1e-4, None)
             self.material_ior.data = torch.clamp(self.material_ior, 1. + 1e-4, None)
+
+    def canonicalise(self):
+        """
+        Canonicalise the crystal morphology by ensuring all distances are minimal and the maximum distance is 1.
+        """
+        with torch.no_grad():
+            # Recalculate the basic vertices
+            all_distances = self.distances[self.symmetry_idx]
+            all_combinations = list(combinations(range(len(self.N)), 3))
+            intersection_points = []
+            for i, combo in enumerate(all_combinations):
+                point = self._plane_intersection(*combo)
+                if point is not None:
+                    intersection_points.append(point)
+            intersection_points = torch.stack(intersection_points)
+            T = intersection_points @ self.N.T
+            R = torch.all(T <= all_distances + 1e-3, dim=1)
+            vertices = intersection_points[R]
+
+            # Calculate the minimum distances for each face
+            distances_min = (self.N @ vertices.T).amax(dim=1)[:len(self.miller_indices)]
+
+            # Update the distances and scale
+            d_max = distances_min.amax()
+            self.distances.data = distances_min / d_max
+            self.scale.data = self.scale * d_max
 
     def _init(self):
         """
@@ -509,36 +536,14 @@ class Crystal(nn.Module):
                 areas[hkl] = 0
                 continue
 
-            # Calculate the angles of each vertex relative to the centroid
-            centroid = torch.mean(face_vertices, dim=0)
-            angles = calculate_relative_angles(face_vertices, centroid)
-
-            # Sort the vertices based on the angles
-            sorted_idxs = torch.argsort(angles)
-            sorted_vertices = face_vertices[sorted_idxs]
-
-            # Flip the order if the normal is pointing inwards
-            normal = torch.zeros(3)
-            normal_norm = 0
-            largest_normal = normal
-            largest_normal_norm = 0
-            i = 0
-            while normal_norm < 1e-3 and i < len(sorted_vertices) - 1:
-                normal = torch.cross(sorted_vertices[i] - centroid, sorted_vertices[i + 1] - centroid, dim=0)
-                normal_norm = normal.norm()
-                if normal_norm > largest_normal_norm:
-                    largest_normal = normal
-                    largest_normal_norm = normal_norm
-                i += 1
-            if normal_norm < 1e-3:
-                normal = largest_normal
-            if torch.dot(normal, centroid) < 0:
-                sorted_idxs = sorted_idxs.flip(0)
-            sorted_face_vertex_idxs = face_vertex_idxs[sorted_idxs]
-            faces[hkl] = sorted_face_vertex_idxs
+            # Sort the face vertices
+            sorted_idxs = sort_face_vertices(face_vertices)
+            faces[hkl] = face_vertex_idxs[sorted_idxs]
+            face_vertices = face_vertices[sorted_idxs]
 
             # Build the triangular faces
-            mfv = torch.stack([centroid, *face_vertices[sorted_idxs]])
+            centroid = torch.mean(face_vertices, dim=0)
+            mfv = torch.stack([centroid, *face_vertices])
             N = len(face_vertices)
             jdx = torch.arange(N, device=device)
             mfi = torch.stack([torch.zeros(N, device=device, dtype=torch.int64), jdx % N + 1, (jdx + 1) % N + 1])
@@ -705,6 +710,37 @@ class Crystal(nn.Module):
         self.uv_faces = uv_faces
         self.uv_mask = uv_mask
         # plot_uv_map(rows, row_heights, col_widths, sf, mask)
+
+    @torch.no_grad()
+    def adjust_origin(self, new_origin: Tensor, verify: bool = True):
+        """
+        Adjust the origin of the crystal.
+        """
+        scale = self.scale.clone()
+        rotation = self.rotation.clone()
+        self.scale.data.fill_(1.)
+        self.rotation.data.fill_(0.)
+        v_old, f_old = self.build_mesh()
+
+        # Adjust the distances to match the new origin
+        origin_shift = self.origin - new_origin
+        for j, N in enumerate(self.N):
+            d = self.distances[j]
+            adjust = origin_shift @ N  # Distance to shift perpendicular to the face normal
+            self.distances.data[j] = d + adjust
+
+        # Update origin
+        self.origin.data = new_origin
+
+        # Verify the shape still matches
+        if verify:
+            v_new, f_new = self.build_mesh()
+            assert torch.allclose(v_old, v_new, atol=1e-6), 'Vertices do not match!'
+            assert torch.allclose(f_old, f_new), 'Faces do not match!'
+
+        # Restore scale and rotation
+        self.scale.data = scale
+        self.rotation.data = rotation
 
 
 def plot_uv_map(rows, row_heights, col_widths, sf, uv_mask):

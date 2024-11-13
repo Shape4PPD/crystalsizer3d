@@ -35,6 +35,7 @@ class ConvergenceDetector(nn.Module):
             tau_fast: int = 10,
             tau_slow: int = 100,
             threshold: float = 0.1,
+            min_absolute_threshold: float = 1e-6,
             patience: int = 100
     ):
         super().__init__()
@@ -46,6 +47,7 @@ class ConvergenceDetector(nn.Module):
         self.tau_fast.fill_(tau_fast)
         self.tau_slow.fill_(tau_slow)
         self.threshold = threshold
+        self.min_absolute_threshold = min_absolute_threshold
         self.patience = patience
 
     def forward(self, val: torch.Tensor, first_val: bool = False):
@@ -96,8 +98,9 @@ class ConvergenceDetector(nn.Module):
         self.mu_slow += alpha_slow * diff_slow
 
         # Update threshold bounds
-        self.T_upper = self.mu_fast + self.threshold * torch.abs(self.mu_fast)
-        self.T_lower = self.mu_fast - self.threshold * torch.abs(self.mu_fast)
+        buffer = torch.clamp_min(self.threshold * torch.abs(self.mu_slow), self.min_absolute_threshold)
+        self.T_upper = self.mu_slow + buffer
+        self.T_lower = self.mu_slow - buffer
 
     def _check_bounds(self) -> torch.Tensor:
-        return (self.mu_slow > self.T_lower) & (self.mu_slow < self.T_upper) | (self.mu_fast == 0)
+        return (self.mu_fast > self.T_lower) & (self.mu_fast < self.T_upper)

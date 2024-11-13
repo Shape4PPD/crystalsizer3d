@@ -23,7 +23,7 @@ def parse_args(printout: bool = True) -> Tuple[DatasetSyntheticArgs, Namespace]:
     """
     Parse command line arguments and build parameter holders.
     """
-    parser = ArgumentParser(description='Generate a dataset of segmented objects found in videos.')
+    parser = ArgumentParser(description='Generate a dataset of synthetic crystals.')
     DatasetSyntheticArgs.add_args(parser)
     parser.add_argument('--ds-name', type=str,
                         help='Set a dataset name to use for setting multiple workers on the same dataset.')
@@ -31,6 +31,8 @@ def parse_args(printout: bool = True) -> Tuple[DatasetSyntheticArgs, Namespace]:
                         help='Overwrite an existing dataset if it exists, otherwise try resume then validate.')
     parser.add_argument('--seed', type=int, default=1,
                         help='Set the random seed for the dataset generation.')
+    parser.add_argument('--generate-only', type=str2bool, default=False,
+                        help='Only generate the crystal parameters and images, do not render them.')
     parser.add_argument('--n-generator-workers', type=int, default=N_WORKERS,
                         help='Set the number of workers to use for generating crystals.')
     parser.add_argument('--n-renderer-workers', type=int, default=1,
@@ -50,6 +52,7 @@ def parse_args(printout: bool = True) -> Tuple[DatasetSyntheticArgs, Namespace]:
         ds_name=args.ds_name if args.ds_name is not None else START_TIMESTAMP,
         overwrite_existing=args.overwrite_existing,
         seed=args.seed,
+        generate_only=args.generate_only,
         n_generator_workers=args.n_generator_workers,
         n_renderer_workers=args.n_renderer_workers,
         migrate_distances=args.migrate_distances
@@ -152,6 +155,7 @@ def validate(
     for i, idx in enumerate(idxs):
         logger.info(f'Validating entry idx={idx} ({i + 1}/{n_examples}).')
         img_path = val_dir / '0000000001.png'
+        img_path_clean = val_dir / '0000000001_clean.png'
 
         try:
             # Load the parameters for this idx
@@ -164,7 +168,7 @@ def validate(
             distances = np.array([example[f'd{i}_{k}'] for i, k in enumerate(ref_idxs)])
             _, _, z, m = generator.generate_crystal(distances=distances)
 
-            # Render the crystal
+            # Render the noisy crystal image
             img, scene = renderer.render_from_parameters(r_params, return_scene=True)
             cv2.imwrite(str(img_path), img)
 
@@ -177,6 +181,21 @@ def validate(
             img_compare.paste(img_new, (img_og.width, 0))
             img_compare.save(img_path_compare)
 
+            if 'clean_image' in example:
+                # Render the clean crystal image
+                scene.clear_interference()
+                img_clean = scene.render(seed=r_params['seed'])
+                cv2.imwrite(str(img_path_clean), img_clean)
+
+                # Save the images side by side for comparison
+                img_path_compare_clean = val_dir / f'compare_{idx:05d}_clean.png'
+                img_clean_og = Image.open(example['clean_image'])
+                img_clean_new = Image.open(img_path_clean)
+                img_clean_compare = Image.new('RGB', (img_clean_og.width * 2, img_clean_og.height))
+                img_clean_compare.paste(img_clean_og, (0, 0))
+                img_clean_compare.paste(img_clean_new, (img_clean_og.width, 0))
+                img_clean_compare.save(img_path_compare_clean)
+
             # Assert that the images aren't too different
             img_og = np.array(img_og).astype(np.float32)
             img_new = np.array(img_new).astype(np.float32)
@@ -184,6 +203,14 @@ def validate(
             max_diff = np.max(np.abs(img_og - img_new))
             assert max_diff < 15 and mean_diff < 0.01, \
                 f'Images are too different! (Mean diff={mean_diff:.3E}, Max diff={max_diff:.1f})'
+
+            # Assert that the clean images aren't too different
+            img_clean_og = np.array(img_clean_og).astype(np.float32)
+            img_clean_new = np.array(img_clean_new).astype(np.float32)
+            mean_diff_clean = np.mean(np.abs(img_clean_og - img_clean_new))
+            max_diff_clean = np.max(np.abs(img_clean_og - img_clean_new))
+            assert max_diff_clean < 15 and mean_diff_clean < 0.01, \
+                f'Clean images are too different! (Mean diff={mean_diff_clean:.3E}, Max diff={max_diff_clean:.1f})'
 
             # Check that the vertices match
             v1 = to_numpy(scene.crystal.vertices)
@@ -229,8 +256,21 @@ def generate_dataset():
             logger.warning(f'Overwriting existing dataset at {save_dir}.')
             shutil.rmtree(save_dir)
         else:
-            logger.info(f'Dataset already exists at {save_dir}. Resuming...')
-            return resume(save_dir, runtime_args)
+            # Load arguments
+            assert (save_dir / 'options.yml').exists(), f'Options file does not exist: {save_dir / "options.yml"}'
+            with open(save_dir / 'options.yml', 'r') as f:
+                args = yaml.load(f, Loader=yaml.FullLoader)
+                dataset_args = DatasetSyntheticArgs.from_args(args['dataset_args'])
+
+            # If parameters and images dir exists then resume
+            param_path = save_dir / 'parameters.csv'
+            images_dir = save_dir / 'images'
+            if param_path.exists() and images_dir.exists():
+                if runtime_args.generate_only:
+                    logger.info(f'Crystal parameters already exists at {save_dir}. Aborting since generate_only=True.')
+                    return
+                logger.info(f'Dataset already exists at {save_dir}. Resuming...')
+                return resume(save_dir, runtime_args)
 
     # Set a timer going to record how long this takes
     start_time = time.time()
@@ -296,6 +336,11 @@ def generate_dataset():
                 entry[f'd{j}_{hkl}'] = float(distances[j])
                 entry[f'a{j}_{hkl}'] = float(areas[j])
             writer.writerow(entry)
+
+    if runtime_args.generate_only:
+        elapsed_time = time.time() - start_time
+        logger.info(f'Finished in {elapsed_time // 60:.0f}m {elapsed_time % 60:.0f}s.')
+        return
 
     # Render the crystals
     logger.info('Rendering crystals.')

@@ -16,6 +16,7 @@ from torch import Tensor
 
 from crystalsizer3d import USE_MLAB
 from crystalsizer3d.crystal import Crystal, ROTATION_MODE_AXISANGLE, ROTATION_MODE_QUATERNION
+from crystalsizer3d.nn.data_loader import DataBatch
 from crystalsizer3d.util.geometry import get_closest_rotation
 from crystalsizer3d.util.utils import equal_aspect_ratio, to_numpy, to_rgb
 
@@ -68,14 +69,18 @@ def plot_error(ax: Axes, err: str):
     ax.axis('off')
 
 
-def plot_image(ax: Axes, title: str, img: np.ndarray):
+def plot_image(ax: Axes, title: str, img: np.ndarray, cmap: str = 'gray'):
     """
     Plot an image on the axis.
     """
     ax.set_title(title)
     img = img.squeeze()
+    if img.dtype == np.uint8:
+        img = np.clip(img, 0, 255)
+    else:
+        img = np.clip(img, 0, 1)
     if img.ndim == 2:
-        ax.imshow(img, cmap='gray', vmin=0, vmax=1)
+        ax.imshow(img, cmap=cmap, vmin=0, vmax=1)
     else:
         if img.shape[0] == 3:
             img = img.transpose(1, 2, 0)
@@ -351,11 +356,11 @@ def plot_distances(
     d_pred2 = _load_single_parameter(Y_pred2, 'distances', idx)
 
     # Prepare the distances
-    d_pred = ds.prep_distances(torch.from_numpy(d_pred))
+    d_pred = ds.prep_distances(torch.from_numpy(d_pred), normalise=ds.dst_args.train_scale)
     if d_target is not None:
-        d_target = ds.prep_distances(torch.from_numpy(d_target))
+        d_target = ds.prep_distances(torch.from_numpy(d_target), normalise=ds.dst_args.train_scale)
     if d_pred2 is not None:
-        d_pred2 = ds.prep_distances(torch.from_numpy(d_pred2))
+        d_pred2 = ds.prep_distances(torch.from_numpy(d_pred2), normalise=ds.dst_args.train_scale)
 
     # Group asymmetric distances by face group
     distance_groups = {}
@@ -432,9 +437,27 @@ def plot_distances(
     ax.set_xticklabels(xlabels)
     if len(xlabels) > 5:
         ax.tick_params(axis='x', labelsize='small')
-    ax.set_ylim(0, 1)
-    ax.set_yticks([0, 0.5, 1])
-    ax.set_yticklabels(['0', '', '1'])
+    if ds.dst_args.train_scale:
+        ax.set_ylim(0, 1)
+        ax.set_yticks([0, 0.5, 1])
+        ax.set_yticklabels(['0', '', '1'])
+    else:
+        max_y = d_pred.max()
+        if d_target is not None:
+            max_y = max(max_y, d_target.max())
+        if d_pred2 is not None:
+            max_y = max(max_y, d_pred2.max())
+        if 'distances' in share_ax:
+            ax_to_label = share_ax['distances']
+            max_y = max(max_y, ax_to_label.get_ylim()[1] / 1.05)
+        else:
+            ax_to_label = ax
+        ax_to_label.set_ylim(0, max_y * 1.05)
+        yticks = np.arange(int(max_y * 2 + 1)) / 2
+        yticklabels = [f'{int(y):0d}' if y == int(y) else '' for y in yticks]
+        ax_to_label.set_yticks(yticks)
+        ax_to_label.set_yticklabels(yticklabels)
+
     if show_legend:
         _shared_ax_legend(share_ax, ax, 'distances')
 
@@ -549,6 +572,7 @@ def plot_transformation(
     t_pred = _load_single_parameter(Y_pred, 'transformation', idx)
     t_target = _load_single_parameter(Y_target, 'transformation', idx)
     t_pred2 = _load_single_parameter(Y_pred2, 'transformation', idx)
+    r_idx = 4 if manager.dataset_args.train_scale else 3
 
     # Adjust the target rotation to the best matching symmetry group
     if (Y_target is not None
@@ -557,7 +581,7 @@ def plot_transformation(
         sym_rotations = Y_target['sym_rotations']
         if isinstance(sym_rotations, list):
             sym_rotations = sym_rotations[idx]
-        t_target[4:] = get_closest_rotation(t_pred[4:], sym_rotations)
+        t_target[r_idx:] = get_closest_rotation(t_pred[r_idx:], sym_rotations)
 
     # Add bar chart data
     locs, bar_width, offset = _add_bars(
@@ -578,8 +602,9 @@ def plot_transformation(
     else:
         k = 3 / 4 * bar_width
     ax.axvspan(locs[0] - k, locs[2] + k, alpha=0.1, color='green')
-    ax.axvspan(locs[3] - k, locs[3] + k, alpha=0.1, color='red')
-    ax.axvspan(locs[4] - k, locs[-1] + k, alpha=0.1, color='blue')
+    if manager.dataset_args.train_scale:
+        ax.axvspan(locs[3] - k, locs[3] + k, alpha=0.1, color='red')
+    ax.axvspan(locs[r_idx] - k, locs[-1] + k, alpha=0.1, color='blue')
 
     ax.set_title('Transformation')
     ax.axhline(0, color='grey', linestyle='--', linewidth=1)
@@ -691,7 +716,7 @@ def plot_light(
 
 def plot_training_samples(
         manager: Manager,
-        data: Tuple[dict, Tensor, Tensor, Tensor, Dict[str, Tensor]],
+        data: DataBatch,
         outputs: Dict[str, Any],
         train_or_test: str,
         idxs: List[int],
@@ -700,7 +725,7 @@ def plot_training_samples(
     Plot the image and parameter comparisons.
     """
     n_examples = len(idxs)
-    metas, images, images_aug, images_clean, Y_target = data
+    metas, images, images_aug, images_clean, images_clean_aug, Y_target = data
     Y_pred = outputs['Y_pred']
     dsa = manager.dataset_args
     if dsa.train_generator:
@@ -770,8 +795,11 @@ def plot_training_samples(
         crystal_pred = manager.ds.load_crystal(r_params=r_params_pred, zero_origin=True)
         row_idx = 0
 
-        # Plot the (possibly augmented) input image
-        img = to_numpy(images_aug[idx]).squeeze()
+        # Plot the (possibly augmented) input image, either clean or noisy
+        if dsa.use_clean_images:
+            img = to_numpy(images_clean_aug[idx]).squeeze()
+        else:
+            img = to_numpy(images_aug[idx]).squeeze()
         ax = fig.add_subplot(gs[row_idx, i])
         plot_image(ax, meta['image'].name, img)
         add_discriminator_value(ax, outputs, 'D_real', idx)
@@ -838,7 +866,7 @@ def plot_training_samples(
 
 def plot_generator_samples(
         manager: Manager,
-        data: Tuple[dict, Tensor, Tensor, Tensor, Dict[str, Tensor]],
+        data: DataBatch,
         outputs: Dict[str, Any],
         train_or_test: str,
         idxs: List[int],
@@ -847,7 +875,7 @@ def plot_generator_samples(
     Plot the image and generator output.
     """
     n_examples = len(idxs)
-    metas, images, images_aug, images_clean, Y_target = data
+    metas, images, images_aug, images_clean, images_clean_aug, Y_target = data
     X_pred = outputs['X_pred']
     n_rows = 3
     fig = plt.figure(figsize=(n_examples * 2.7, n_rows * 3))
@@ -896,7 +924,7 @@ def plot_generator_samples(
 
 def plot_denoiser_samples(
         manager: Manager,
-        data: Tuple[dict, Tensor, Tensor, Tensor, Dict[str, Tensor]],
+        data: DataBatch,
         outputs: Dict[str, Any],
         train_or_test: str,
         idxs: List[int],
@@ -905,7 +933,7 @@ def plot_denoiser_samples(
     Plot the image and denoiser output.
     """
     n_examples = len(idxs)
-    metas, images, images_aug, images_clean, Y_target = data
+    metas, images, images_aug, images_clean, images_clean_aug, Y_target = data
     X_dn = outputs['X_denoised']
     n_rows = 3
     fig = plt.figure(figsize=(n_examples * 2.7, n_rows * 3))
@@ -950,6 +978,99 @@ def plot_denoiser_samples(
     return fig
 
 
+def plot_keypoint_detector_samples(
+        manager: Manager,
+        data: DataBatch,
+        outputs: Dict[str, Any],
+        train_or_test: str,
+        idxs: List[int],
+) -> Figure:
+    """
+    Plot the image and keypoint heatmaps output.
+    """
+    n_examples = len(idxs)
+    metas, images, images_aug, images_clean, images_clean_aug, Y_target = data
+    n_rows = 1
+    if manager.keypoint_detector_args.kd_train_keypoints:
+        n_rows += 2
+    if manager.keypoint_detector_args.kd_train_wireframe:
+        n_rows += 2
+    fig = plt.figure(figsize=(n_examples * 2.7, n_rows * 3))
+    gs = GridSpec(
+        nrows=n_rows,
+        ncols=n_examples,
+        wspace=0.06,
+        hspace=0.03,
+        top=0.95,
+        bottom=0.004,
+        left=0.01,
+        right=0.99
+    )
+
+    loss = getattr(manager.checkpoint, f'loss_{train_or_test}')
+    fig.suptitle(
+        f'epoch={manager.checkpoint.epoch}, '
+        f'step={manager.checkpoint.step + 1}, '
+        f'loss={loss:.4E}',
+        fontweight='bold',
+        y=0.995
+    )
+
+    def add_plot(title, img, overlay=None, cmap='hot', alpha_max=0.9):
+        nonlocal row_idx
+        ax = fig.add_subplot(gs[row_idx, col_idx])
+        row_idx += 1
+        plot_image(ax, title, img, cmap)
+        if overlay is not None:
+            if overlay.ndim == 3:
+                alpha = overlay.max(axis=0)
+                if overlay.shape[0] == 2:
+                    overlay = np.concatenate([overlay, np.zeros_like(overlay[0:1])])
+                if overlay.shape[0] == 3:
+                    overlay = overlay.transpose(1, 2, 0)
+            else:
+                alpha = overlay
+            alpha = alpha**2
+            alpha = alpha / alpha.max() * alpha_max
+            if overlay.ndim == 3:
+                overlay = np.concatenate([overlay, alpha[..., None]], axis=-1)
+                ax.imshow(overlay)
+            else:
+                ax.imshow(overlay, cmap='hot', alpha=alpha)
+
+    for col_idx, idx in enumerate(idxs):
+        row_idx = 0
+        meta = metas[idx]
+        img_clean = to_numpy(images_clean[idx]).squeeze()
+
+        # Plot the (possibly augmented) input image
+        if manager.keypoint_detector_args.kd_use_clean_images:
+            img_input = to_numpy(images_clean_aug[idx]).squeeze()
+        else:
+            img_input = to_numpy(images_aug[idx]).squeeze()
+        add_plot(meta['image'].name, img_input)
+
+        if manager.keypoint_detector_args.kd_train_keypoints:
+            # Plot the clean image with target heatmap overlay
+            kp_target = to_numpy(Y_target['kp_heatmap'][idx]).squeeze()
+            add_plot('Target keypoints', img_clean, kp_target)
+
+            # Plot the clean image with predicted heatmap overlay
+            kp_pred = to_numpy(outputs['kp_pred'][idx]).squeeze()
+            add_plot('Predicted keypoints', img_clean, kp_pred)
+
+        if manager.keypoint_detector_args.kd_train_wireframe:
+            # Plot the clean image with target heatmap overlay
+            wf_target = to_numpy(Y_target['wireframe'][idx])
+            add_plot('Target wireframe', img_clean, wf_target)
+
+            # Plot the clean image with predicted heatmap overlay
+            wf_pred = to_numpy(outputs['wf_pred'][idx])
+            add_plot('Predicted wireframe', img_clean, wf_pred)
+
+    return fig
+
+
 def _plot_vaetc_examples(
         self,
         data: Tuple[dict, Tensor, Tensor, Dict[str, Tensor]],
@@ -961,7 +1082,7 @@ def _plot_vaetc_examples(
     Plot some VAE transcoder examples.
     """
     n_examples = min(self.runtime_args.plot_n_examples, self.runtime_args.batch_size)
-    metas, images, images_aug, params = data
+    metas, images, images_aug, images_clean, images_clean_aug, Y_target = data
     Yr_noisy = outputs['Yr_mu']
     Yr_clean = outputs['Yr_mu_clean']
     prop_cycle = plt.rcParams['axes.prop_cycle']
@@ -1079,17 +1200,17 @@ def _plot_vaetc_examples(
             ax_.scatter(locs + bar_width, s_clean, color=colours, marker='+', s=30)
 
     def plot_transformation(ax_, idx_):
-        xlabels = self.ds.labels_transformation.copy()
-        if self.ds.ds_args.rotation_mode == ROTATION_MODE_QUATERNION:
-            xlabels += self.ds.labels_rotation_quaternion
-        else:
-            xlabels += self.ds.labels_rotation_axisangle
+        xlabels = self.ds.labels_transformation_active.copy()
         _plot_bar_chart('transformation', idx_, ax_, xlabels, 'Transformation')
         locs = np.arange(len(xlabels))
         offset = 1.6 * bar_width
         ax_.axvspan(locs[0] - offset, locs[2] + offset, alpha=0.1, color='green')
-        ax_.axvspan(locs[3] - offset, locs[3] + offset, alpha=0.1, color='red')
-        ax_.axvspan(locs[4] - offset, locs[-1] + offset, alpha=0.1, color='blue')
+        if self.ds.dataset_args.train_scale:
+            ax_.axvspan(locs[3] - offset, locs[3] + offset, alpha=0.1, color='red')
+            r_idx = 4
+        else:
+            r_idx = 3
+        ax_.axvspan(locs[r_idx] - offset, locs[-1] + offset, alpha=0.1, color='blue')
 
     def plot_material(ax_, idx_):
         labels = []

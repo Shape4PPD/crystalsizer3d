@@ -211,7 +211,7 @@ class ControlPanel(AppPanel):
         self.lbl_ior.SetLabel(label=f'IOR: {self.crystal.material_ior.item():.2f}')
         self.lbl_scale.SetLabel(label=f'Scale: {self.crystal.scale.item():.2f}')
 
-    def on_save_crystal(self, event):
+    def on_save_crystal(self, event: wx.CommandEvent):
         """
         Save the crystal details to a json file.
         """
@@ -220,8 +220,15 @@ class ControlPanel(AppPanel):
                                style=wx.FD_SAVE | wx.FD_OVERWRITE_PROMPT)
         if dialog.ShowModal() == wx.ID_CANCEL:
             return
-        filepath = dialog.GetPath()
+        filepath = Path(dialog.GetPath())
         dialog.Destroy()
+        if filepath.suffix != '.json':
+            filepath = filepath.with_suffix('.json')
+        if filepath.exists():
+            dlg = wx.MessageDialog(self, message='File already exists. Overwrite?', caption='CrystalSizer3D',
+                                   style=wx.YES_NO | wx.NO_DEFAULT | wx.ICON_QUESTION)
+            if dlg.ShowModal() != wx.ID_YES:
+                return
         self._log(f'Saving crystal data to {filepath}')
         self.crystal.to_json(Path(filepath), overwrite=True)
         self._log(f'Crystal saved to {filepath}.')

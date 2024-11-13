@@ -12,9 +12,11 @@ setup(
     install_requires=[
         # 'cholespy >= 1.0, < 1.1',
         # 'csd-python-api >= 3.1, < 3.2',
+        'configobj >= 5.0, < 5.1',
         'einops >= 0.8, < 0.9',
         'filelock >= 3.13, < 3.14',
         'ffmpeg-python >= 0.2, < 0.3',
+        'geomloss >= 0.2, < 0.3',
         'gigagan-pytorch >= 0.2, < 0.3',
         # 'gpytoolbox >= 0.2, < 0.3',
         'kornia >= 0.7, < 0.8',
@@ -26,6 +28,7 @@ setup(
         'numpy >= 1.26, < 2',
         'opencv-python >= 4.10, < 5.0',
         'omegaconf >= 2.3, < 2.4',
+        'orjson >= 3.10, < 4.0',
         'parti-pytorch >= 0.2, < 0.3',
         'pillow >= 10.4, < 10.5',
         'pyfastnoisesimd >= 0.4, < 0.5',
@@ -36,7 +39,7 @@ setup(
         'pyyaml >= 6.0, < 6.1',
         'ruamel.yaml >= 0.18, < 1.0',
         # 'rtree >= 1.2, < 1.3',
-        'shapely >= 2.0, < 2.1',
+        'scikit-image >= 0.24, < 0.25',
         'tensorboard >= 2.17, < 2.18',
         'timm >= 1.0, < 1.1',
         'torch >= 2.4, < 2.5',  # https://pytorch.org/get-started/locally/

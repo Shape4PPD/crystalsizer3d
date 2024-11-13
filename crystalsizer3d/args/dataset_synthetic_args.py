@@ -37,6 +37,7 @@ class DatasetSyntheticArgs(BaseArgs):
             light_scale: float = 50.,
             light_radiance_min: Tuple[float, float, float] = (0.5, 0.5, 0.5),
             light_radiance_max: Tuple[float, float, float] = (0.5, 0.5, 0.5),
+            light_radiance_ptp_max: float = 0.3,
             light_texture_dim: int = 1000,
             light_perlin_freq_min: float = 0.1,
             light_perlin_freq_max: float = 10.,
@@ -74,6 +75,7 @@ class DatasetSyntheticArgs(BaseArgs):
             crystal_area_min: float = 0.05,
             crystal_area_max: float = 0.5,
             centre_crystals: bool = False,
+            rotation_max_xy: float = -1,
 
             # Crystal material properties
             min_ior: float = 1.1,
@@ -142,6 +144,7 @@ class DatasetSyntheticArgs(BaseArgs):
         self.light_scale = light_scale
         self.light_radiance_min = light_radiance_min
         self.light_radiance_max = light_radiance_max
+        self.light_radiance_ptp_max = light_radiance_ptp_max
         self.light_texture_dim = light_texture_dim
         self.light_perlin_freq_min = light_perlin_freq_min
         self.light_perlin_freq_max = light_perlin_freq_max
@@ -203,6 +206,7 @@ class DatasetSyntheticArgs(BaseArgs):
         assert crystal_area_max > crystal_area_min, f'Maximum area must be greater than minimum area. {crystal_area_max} received.'
         assert crystal_area_max < 1, f'Maximum area must be less than 1. {crystal_area_max} received.'
         self.crystal_area_max = crystal_area_max
+        self.rotation_max_xy = rotation_max_xy
 
         # Crystal material properties
         self.min_ior = min_ior
@@ -299,6 +303,8 @@ class DatasetSyntheticArgs(BaseArgs):
                            default='0.5,0.5,0.5', help='Minimum radiance.')
         group.add_argument('--light-radiance-max', type=lambda s: [float(item) for item in s.split(',')],
                            default='0.5,0.5,0.5', help='Maximum radiance.')
+        group.add_argument('--light-radiance-ptp-max', type=float, default=0.3,
+                           help='Maximum radiance point-to-point difference between the sampled RGB values.')
         group.add_argument('--light-texture-dim', type=int, default=1000,
                            help='Light texture dimension.')
         group.add_argument('--light-perlin-freq-min', type=float, default=0.01,
@@ -370,6 +376,8 @@ class DatasetSyntheticArgs(BaseArgs):
                            help='Minimum area of the image covered by the crystal.')
         group.add_argument('--crystal-area-max', type=float, default=0.3,
                            help='Maximum area of the image covered by the crystal.')
+        group.add_argument('--rotation-max-xy', type=float, default=-1,
+                           help='Maximum rotation out of the xy-plane. -1 for no limit.')
 
         # Crystal material properties
         group.add_argument('--min-ior', type=float, default=1.0,

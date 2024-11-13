@@ -98,6 +98,195 @@ def is_point_in_bounds(p: Tensor, bounds: List[Tensor], eps: float = 1e-6) -> bo
 
 
 @torch.jit.script
+def polygon_area(vertices: Tensor) -> Tensor:
+    """
+    Calculate the area of a 2D polygon given its vertices.
+    """
+    assert vertices.ndim == 2 and vertices.shape[1] == 2, f'Invalid vertices shape: {vertices.shape}'
+    x = vertices[:, 0]
+    y = vertices[:, 1]
+
+    # Calculate the area using the shoelace formula
+    area = 0.5 * torch.abs(torch.dot(x, torch.roll(y, -1)) - torch.dot(y, torch.roll(x, -1)))
+
+    return area
+
+
+@torch.jit.script
+def point_in_polygon(points: Tensor, polygon: Tensor, eps: float = 1e-6):
+    """
+    Check if points are inside a convex polygon using a vectorised ray-casting algorithm.
+    Args:
+        points: Tensor of shape (N, 2) representing N points.
+        polygon: Tensor of shape (M, 2) representing the polygon vertices.
+        eps: Small tolerance for floating-point comparisons.
+
+    Returns:
+        Tensor of shape (N,) where each entry is True if the point is inside the polygon.
+    """
+    edges_poly = torch.stack([polygon, torch.roll(polygon, -1, dims=0)], dim=1)
+
+    # Check the ray intersection count for each point
+    p = points.unsqueeze(1)  # (N, 1, 2)
+    v1 = edges_poly[:, 0]  # (M, 2)
+    v2 = edges_poly[:, 1]  # (M, 2)
+
+    # Vectorised ray-casting logic
+    cond1 = (v1[:, 1] > p[:, :, 1]) != (v2[:, 1] > p[:, :, 1])
+    slope = (v2[:, 0] - v1[:, 0]) / (v2[:, 1] - v1[:, 1] + eps)
+    cond2 = p[:, :, 0] < (v1[:, 0] + slope * (p[:, :, 1] - v1[:, 1]))
+
+    intersect_count = (cond1 & cond2).sum(dim=1)
+    return intersect_count % 2 == 1  # True if odd number of intersections
+
+
+@torch.jit.script
+def merge_vertices(vertices: Tensor, epsilon: float = 1e-3) -> Tuple[Tensor, Tensor]:
+    """
+    Cluster a set of vertices based on spatial quantisation.
+    """
+    device = vertices.device
+
+    # Subtract the mean
+    vertices_og = vertices
+    vertices = vertices - vertices.mean(dim=0)
+
+    # Compute hash key for each point based on spatial quantisation
+    hash_keys = torch.round(vertices / epsilon)
+
+    # Use hash_keys to create a unique identifier for each cluster
+    unique_clusters, cluster_indices = torch.unique(hash_keys, dim=0, return_inverse=True)
+    if len(unique_clusters) == len(vertices):
+        return vertices_og, torch.arange(len(vertices), device=device)
+
+    # Calculate mean of points within each cluster
+    clustered_vertices = torch.zeros_like(unique_clusters, dtype=vertices.dtype)
+    counts = torch.zeros(len(unique_clusters), dtype=torch.int64, device=device)
+
+    # Accumulate points and counts for each cluster
+    clustered_vertices.scatter_add_(0, cluster_indices.unsqueeze(1).expand_as(vertices), vertices_og)
+    counts.scatter_add_(0, cluster_indices, torch.ones_like(cluster_indices))
+
+    # Avoid division by zero
+    counts[counts == 0] = 1
+
+    # Calculate mean for each cluster
+    cluster_centroids = clustered_vertices / counts.unsqueeze(1).expand_as(clustered_vertices)
+
+    return cluster_centroids, cluster_indices
+
+
+@torch.jit.script
+def line_segment_intersections(edges1: Tensor, edges2: Tensor, eps: float = 1e-6):
+    """
+    Compute the intersection points of multiple line segments in batch.
+    Args:
+        edges1: Tensor of edges with shape (N, 2, 2).
+        edges2: Tensor of edges with shape (M, 2, 2).
+        eps: Small tolerance for floating-point comparisons.
+
+    Returns:
+        Tensor of shape (N, M, 2) with intersection points or NaNs if no intersection.
+    """
+    p = edges1[:, 0][:, None]  # (N, 1, 2)
+    r = (edges1[:, 1] - edges1[:, 0])[:, None]  # (N, 1, 2)
+    q = edges2[:, 0][None, ...]  # (1, M, 2)
+    s = (edges2[:, 1] - edges2[:, 0])[None, ...]  # (1, M, 2)
+
+    r_cross_s = r[..., 0] * s[..., 1] - r[..., 1] * s[..., 0]  # (N, M)
+    pq = q - p  # (N, M, 2)
+
+    t = (pq[..., 0] * s[..., 1] - pq[..., 1] * s[..., 0]) / (r_cross_s + eps)  # (N, M)
+    u = (pq[..., 0] * r[..., 1] - pq[..., 1] * r[..., 0]) / (r_cross_s + eps)  # (N, M)
+
+    intersect_mask = (t >= 0) & (t <= 1) & (u >= 0) & (u <= 1) & (r_cross_s.abs() > eps)
+    intersections = p + t[..., None] * r  # (N, M, 2)
+    intersections[~intersect_mask] = torch.nan  # NaN for no intersections
+
+    return intersections
+
+
+@torch.jit.script
+def line_segments_in_polygon(
+        edges: Tensor,
+        polygon: Tensor,
+        tol: float = 1e-2,
+        eps: float = 1e-6
+) -> Tensor:
+    """
+    Return the line segments from the input edges that are contained within or intersect the polygon.
+
+    Args:
+        edges: Tensor of shape (N, 2, 2) representing N line segments.
+        polygon: Tensor of shape (M, 2) representing the vertices of the convex polygon.
+        tol: Tolerance for considering nearby points as duplicates.
+        eps: Small tolerance for floating-point comparisons.
+
+    Returns:
+        A tensor containing line segments that are inside or intersect the polygon.
+    """
+    polygon = merge_vertices(polygon, epsilon=tol)[0]  # (M, 2)
+    p2 = polygon - polygon.mean(dim=0)
+    angles = torch.atan2(p2[:, 1], p2[:, 0])
+    sorted_idxs = torch.argsort(angles)
+    polygon = polygon[sorted_idxs]
+
+    # Check if edge endpoints are inside the polygon
+    endpoints_inside = point_in_polygon(edges.view(-1, 2), polygon)  # (N * 2,)
+    edge_start_in = endpoints_inside[::2]
+    edge_end_in = endpoints_inside[1::2]
+
+    # Get polygon edges
+    polygon_edges = torch.stack([polygon, torch.roll(polygon, -1, dims=0)], dim=1)  # (M, 2, 2)
+
+    # Calculate intersections of edges with polygon edges, filtering out the invalid ones
+    intersections = line_segment_intersections(edges, polygon_edges, eps=eps)  # (N, M, 2)
+    valid_intersections = ~torch.isnan(intersections[..., 0])  # (N, M)
+
+    # Assemble the valid segments for each edge
+    segments_list = []
+    for i in range(edges.shape[0]):
+        segment_points = []
+
+        # If the start point is inside the polygon, add it
+        if edge_start_in[i]:
+            segment_points.append(edges[i, 0])
+
+        # Add valid intersection points
+        valid_points = intersections[i][valid_intersections[i]]
+        segment_points.extend([p for p in valid_points])
+
+        # If the end point is inside the polygon, add it
+        if edge_end_in[i]:
+            segment_points.append(edges[i, 1])
+
+        # Remove duplicates considering point tolerance
+        if len(segment_points) > 0:
+            segment = torch.stack(segment_points)
+            is_close = torch.isclose(segment[None, :], segment[:, None], atol=tol).all(dim=-1)
+            unique_mask = ~is_close.triu(1).any(dim=1)
+            segment = segment[unique_mask]
+
+            # Store the segment if it has two distinct points
+            if len(segment) == 2:
+                segments_list.append(segment)
+
+    # Stack the segments into a single tensor
+    if len(segments_list) > 0:
+        segments = torch.stack(segments_list)
+    else:
+        segments = torch.empty((0, 2, 2), device=edges.device)
+
+    # Remove duplicate segments (both endpoints match to within tolerance)
+    if len(segments) > 1:
+        rounded_segments = torch.round(segments / tol) * tol
+        _, unique_indices = torch.unique(rounded_segments.view(-1, 4), dim=0, return_inverse=True)
+        segments = segments[torch.unique(unique_indices)]
+
+    return segments
+
+
+@torch.jit.script
 def geodesic_distance(R1: Tensor, R2: Tensor, eps: float = 1e-4) -> Tensor:
     """
     Compute the geodesic distance between two rotation matrices.
@@ -316,41 +505,45 @@ def calculate_relative_angles(vertices: Tensor, centroid: Tensor, tol: float = 1
     """
     vertices, success = align_points_to_xy_plane(vertices, centroid, tol=tol)
     if not success:
-        angles = torch.linspace(0, 2 * torch.pi, steps=len(vertices) + 1, device=vertices.device)[:-1]
+        angles = torch.linspace(0, 2 * torch.pi, steps=len(vertices) + 1,
+                                device=vertices.device, dtype=vertices.dtype)[:-1]
     else:
         angles = torch.atan2(vertices[:, 1], vertices[:, 0])
     return angles
 
 
 @torch.jit.script
-def merge_vertices(vertices: Tensor, epsilon: float = 1e-3) -> Tuple[Tensor, Tensor]:
+def sort_face_vertices(vertices: Tensor) -> Tensor:
     """
-    Cluster a set of vertices based on spatial quantisation.
+    Sort the vertices of a face in clockwise order.
     """
-    # Subtract the mean
-    vertices_og = vertices
-    vertices = vertices - vertices.mean(dim=0)
+    device = vertices.device
+    dtype = vertices.dtype
 
-    # Compute hash key for each point based on spatial quantisation
-    hash_keys = torch.round(vertices / epsilon)
+    # Calculate the angles of each vertex relative to the centroid
+    centroid = torch.mean(vertices, dim=0)
+    angles = calculate_relative_angles(vertices, centroid)
 
-    # Use hash_keys to create a unique identifier for each cluster
-    unique_clusters, cluster_indices = torch.unique(hash_keys, dim=0, return_inverse=True)
-    if len(unique_clusters) == len(vertices):
-        return vertices_og, torch.arange(len(vertices))
+    # Sort the vertices based on the angles
+    sorted_idxs = torch.argsort(angles)
+    sorted_vertices = vertices[sorted_idxs]
 
-    # Calculate mean of points within each cluster
-    clustered_vertices = torch.zeros_like(unique_clusters, dtype=vertices.dtype)
-    counts = torch.zeros(len(unique_clusters), dtype=torch.int64, device=vertices.device)
+    # Flip the order if the normal is pointing inwards
+    normal = torch.zeros(3, device=device, dtype=dtype)
+    normal_norm = normal.norm()
+    largest_normal = normal
+    largest_normal_norm = normal_norm
+    i = 0
+    while normal_norm < 1e-3 and i < len(sorted_vertices) - 1:
+        normal = torch.cross(sorted_vertices[i] - centroid, sorted_vertices[i + 1] - centroid, dim=0)
+        normal_norm = normal.norm()
+        if normal_norm > largest_normal_norm:
+            largest_normal = normal
+            largest_normal_norm = normal_norm
+        i += 1
+    if normal_norm < 1e-3:
+        normal = largest_normal
+    if torch.dot(normal, centroid) < 0:
+        sorted_idxs = sorted_idxs.flip(0)
 
-    # Accumulate points and counts for each cluster
-    clustered_vertices.scatter_add_(0, cluster_indices.unsqueeze(1).expand_as(vertices), vertices_og)
-    counts.scatter_add_(0, cluster_indices, torch.ones_like(cluster_indices))
-
-    # Avoid division by zero
-    counts[counts == 0] = 1
-
-    # Calculate mean for each cluster
-    cluster_centroids = clustered_vertices / counts.unsqueeze(1).expand_as(clustered_vertices)
-
-    return cluster_centroids, cluster_indices
+    return sorted_idxs

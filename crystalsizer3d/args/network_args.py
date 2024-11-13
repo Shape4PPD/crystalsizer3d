@@ -148,6 +148,8 @@ class NetworkArgs(BaseArgs):
                             help='Drop-path probability to use in the pretrained network.')
         parser.add_argument(f'--{prefix}classifier-dropout-prob', type=float, default=0.,
                             help='Dropout probability to use before classifier layers.')
+        parser.add_argument(f'--{prefix}resize-input', type=str2bool, default=True,
+                            help='Resize the input image to the pretrained model input size.')
 
     @staticmethod
     def extract_hyperparameter_args(args: Namespace) -> dict:
@@ -204,6 +206,7 @@ class NetworkArgs(BaseArgs):
                 'droppath_prob': args.droppath_prob,
                 'classifier_hidden_layers': args.classifier_hidden_layers,
                 'classifier_dropout_prob': args.classifier_dropout_prob,
+                'resize_input': args.resize_input,
             }
 
         return hyperparameters

@@ -11,6 +11,7 @@ from typing import Any, Dict, List, Optional, Tuple, Union
 import numpy as np
 import torch
 import torch.nn.functional as F
+from geomloss import SamplesLoss
 from kornia.geometry import axis_angle_to_rotation_matrix
 from matplotlib import pyplot as plt
 from matplotlib.figure import Figure
@@ -31,6 +32,7 @@ from crystalsizer3d import DATA_PATH, LOGS_PATH, START_TIMESTAMP, logger
 from crystalsizer3d.args.dataset_training_args import DatasetTrainingArgs
 from crystalsizer3d.args.denoiser_args import DenoiserArgs
 from crystalsizer3d.args.generator_args import GeneratorArgs
+from crystalsizer3d.args.keypoint_detector_args import KeypointDetectorArgs
 from crystalsizer3d.args.network_args import NetworkArgs
 from crystalsizer3d.args.optimiser_args import OptimiserArgs
 from crystalsizer3d.args.runtime_args import RuntimeArgs
@@ -39,8 +41,9 @@ from crystalsizer3d.crystal import Crystal, ROTATION_MODE_AXISANGLE, ROTATION_MO
 from crystalsizer3d.crystal_generator import CrystalGenerator
 from crystalsizer3d.crystal_renderer import CrystalRenderer
 from crystalsizer3d.nn.checkpoint import Checkpoint
-from crystalsizer3d.nn.data_loader import get_data_loader
-from crystalsizer3d.nn.dataset import Dataset, DatasetProxy
+from crystalsizer3d.nn.data_loader import DataBatch, get_data_loader
+from crystalsizer3d.nn.dataset import DatasetProxy
+from crystalsizer3d.nn.focal_loss import FocalLoss
 from crystalsizer3d.nn.models.basenet import BaseNet
 from crystalsizer3d.nn.models.densenet import DenseNet
 from crystalsizer3d.nn.models.discriminator import Discriminator
@@ -59,7 +62,8 @@ from crystalsizer3d.nn.models.vit_pretrained import ViTPretrainedNet
 from crystalsizer3d.nn.models.vitvae import ViTVAE
 from crystalsizer3d.util.ema import EMA
 from crystalsizer3d.util.geometry import geodesic_distance
-from crystalsizer3d.util.plots import plot_denoiser_samples, plot_generator_samples, plot_training_samples
+from crystalsizer3d.util.plots import plot_denoiser_samples, plot_generator_samples, plot_keypoint_detector_samples, \
+    plot_training_samples
 from crystalsizer3d.util.polyhedron import calculate_polyhedral_vertices
 from crystalsizer3d.util.utils import calculate_model_norm, is_bad, set_seed
 
@@ -77,6 +81,8 @@ class Manager:
     generator: Optional[GeneratorNet]
     discriminator: Optional[Discriminator]
     transcoder: Optional[Transcoder]
+    denoiser: Optional[VQModel]
+    keypoint_detector: Optional[VQModel]
     optimiser_p: Optimizer
     lr_scheduler_p: Scheduler
     optimiser_g: Optional[Optimizer]
@@ -94,9 +100,10 @@ class Manager:
             self,
             runtime_args: RuntimeArgs,
             dataset_args: DatasetTrainingArgs,
-            net_args: NetworkArgs,
+            network_args: NetworkArgs,
             generator_args: GeneratorArgs,
             denoiser_args: DenoiserArgs,
+            keypoint_detector_args: KeypointDetectorArgs,
             transcoder_args: TranscoderArgs,
             optimiser_args: OptimiserArgs,
             save_dir: Optional[Path] = None,
@@ -105,9 +112,10 @@ class Manager:
         # Argument groups
         self.runtime_args = runtime_args
         self.dataset_args = dataset_args
-        self.net_args = net_args
+        self.network_args = network_args
         self.generator_args = generator_args
         self.denoiser_args = denoiser_args
+        self.keypoint_detector_args = keypoint_detector_args
         self.transcoder_args = transcoder_args
         self.optimiser_args = optimiser_args
 
@@ -122,6 +130,7 @@ class Manager:
             set_seed(self.runtime_args.seed)
 
         # Load checkpoint
+        self.training = False
         self.checkpoint = self._init_checkpoint(save_dir=save_dir)
 
     @property
@@ -165,6 +174,9 @@ class Manager:
         elif name == 'denoiser':
             self._init_denoiser()
             return self.denoiser
+        elif name == 'keypoint_detector':
+            self._init_keypoint_detector()
+            return self.keypoint_detector
         elif name == 'discriminator':
             self._init_discriminator()
             return self.discriminator
@@ -178,12 +190,14 @@ class Manager:
                       'optimiser_g', 'lr_scheduler_g',
                       'optimiser_d', 'lr_scheduler_d',
                       'optimiser_dn', 'lr_scheduler_dn',
+                      'optimiser_kd', 'lr_scheduler_kd',
                       'optimiser_t', 'lr_scheduler_t']:
             options = {
                 'p': 'predictor',
                 'g': 'generator',
                 'd': 'discriminator',
                 'dn': 'denoiser',
+                'kd': 'keypointdetector',
                 't': 'transcoder'
             }
             key = name.split('_')[-1]
@@ -203,24 +217,17 @@ class Manager:
         raise AttributeError(f"'{self.__class__.__name__}' object has no attribute '{name}'")
 
     @classmethod
-    def load(
-            cls,
-            model_path: Path,
-            args_changes: Dict[str, Dict[str, Any]],
-            save_dir: Optional[Path] = None,
-            print_networks: bool = False
-    ) -> 'Manager':
+    def _load_args_from_json(cls, model_path: Path) -> Dict[str, Any]:
         """
-        Instantiate a manager from a checkpoint json file.
+        Load model arguments from a JSON file.
         """
-        logger.info(f'Loading model from {model_path}.')
         with open(model_path, 'r') as f:
             data = json.load(f)
 
         # Ensure all the required arguments are present
         required_args = ['runtime_args', 'dataset_args', 'network_args',
-                         'generator_args', 'denoiser_args', 'transcoder_args',
-                         'optimiser_args']
+                         'generator_args', 'denoiser_args', 'keypoint_detector_args',
+                         'transcoder_args', 'optimiser_args']
         for arg in required_args:
             if arg not in data:
                 data[arg] = {}
@@ -236,13 +243,30 @@ class Manager:
         args = dict(
             runtime_args=RuntimeArgs.from_args(data['runtime_args']),
             dataset_args=DatasetTrainingArgs.from_args(data['dataset_args']),
-            net_args=NetworkArgs.from_args(data['network_args']),
+            network_args=NetworkArgs.from_args(data['network_args']),
             generator_args=GeneratorArgs.from_args(data['generator_args']),
             denoiser_args=DenoiserArgs.from_args(data['denoiser_args']),
+            keypoint_detector_args=KeypointDetectorArgs.from_args(data['keypoint_detector_args']),
             transcoder_args=TranscoderArgs.from_args(data['transcoder_args']),
             optimiser_args=OptimiserArgs.from_args(data['optimiser_args']),
-            print_networks=print_networks
         )
+
+        return args
+
+    @classmethod
+    def load(
+            cls,
+            model_path: Path,
+            args_changes: Dict[str, Dict[str, Any]],
+            save_dir: Optional[Path] = None,
+            print_networks: bool = False
+    ) -> 'Manager':
+        """
+        Instantiate a manager from a checkpoint json file.
+        """
+        logger.info(f'Loading model from {model_path}.')
+        args = cls._load_args_from_json(model_path)
+        args['print_networks'] = print_networks
 
         # Update the arguments with required changes
         for arg_group, arg_changes in args_changes.items():
@@ -255,33 +279,19 @@ class Manager:
         """
         Load a network from another checkpoint.
         """
-        with open(model_path, 'r') as f:
-            data = json.load(f)
-
-        # Always set resume to True, otherwise the model won't load
-        data['runtime_args']['resume'] = True
-        data['runtime_args']['resume_only'] = True
-        data['runtime_args']['resume_from'] = model_path
-
-        # Load the checkpoint
+        args = self._load_args_from_json(model_path)
         checkpoint = Checkpoint(
             dataset=self.ds,
-            runtime_args=RuntimeArgs.from_args(data['runtime_args']),
-            dataset_args=DatasetTrainingArgs.from_args(data['dataset_args']),
-            network_args=NetworkArgs.from_args(data['network_args']),
-            generator_args=GeneratorArgs.from_args(data['generator_args']),
-            denoiser_args=DenoiserArgs.from_args(data['denoiser_args']),
-            transcoder_args=TranscoderArgs.from_args(data['transcoder_args']),
-            optimiser_args=OptimiserArgs.from_args(data['optimiser_args']),
             save_dir=self.checkpoint.save_dir,
+            **args
         )
         assert len(checkpoint.snapshots) > 0, 'No snapshots found in the checkpoint.'
 
         # Load the network and optimiser parameter states
         state_path = checkpoint.get_state_path()
-        state = torch.load(state_path, map_location=self.device)
+        state = torch.load(state_path, map_location=self.device, weights_only=True)
 
-        # Load predictor network parameters and optimiser state
+        # Load denoiser
         if network_name == 'denoiser':
             self.denoiser_args = checkpoint.denoiser_args
             if self.denoiser is None:
@@ -293,6 +303,21 @@ class Manager:
                 self._init_optimiser('denoiser')
             if self.optimiser_dn is not None:
                 self.optimiser_dn.load_state_dict(state['optimiser_dn_state_dict'])
+
+        # Load keypoint detector
+        elif network_name == 'keypointdetector':
+            self.keypoint_detector_args = checkpoint.keypoint_detector_args
+            if self.keypoint_detector is None:
+                self.dataset_args.train_keypoint_detector = True
+                self._init_keypoint_detector(load_from_checkpoint=False)
+            logger.info(f'Loading keypoint detector network parameters from {state_path}.')
+            self.keypoint_detector.load_state_dict(self._fix_state(state['net_kd_state_dict']), strict=False)
+            if self.optimiser_kd is None:
+                self._init_optimiser('keypointdetector')
+            if self.optimiser_kd is not None:
+                self.optimiser_kd.load_state_dict(state['optimiser_kd_state_dict'])
+
+        # Other networks not supported
         else:
             raise ValueError(f'Unsupported network: {network_name}')
 
@@ -352,7 +377,7 @@ class Manager:
             self.predictor = None
             return
 
-        net_args = self.net_args
+        net_args = self.network_args
         output_shape = self.parameters_shape if not self.transcoder_args.use_transcoder \
             else (self.transcoder_args.tc_latent_size,)
 
@@ -419,6 +444,7 @@ class Manager:
                 dropout_prob=params['dropout_prob'],
                 droppath_prob=params['droppath_prob'],
                 classifier_dropout_prob=params['classifier_dropout_prob'],
+                resize_input=params['resize_input'],
                 **shared_args
             )
         else:
@@ -438,10 +464,10 @@ class Manager:
         loaded = False
         if self.runtime_args.resume and len(self.checkpoint.snapshots) > 0:
             state_path = self.checkpoint.get_state_path()
-            state = torch.load(state_path, map_location=self.device)
+            state = torch.load(state_path, map_location=self.device, weights_only=True)
             if 'net_p_state_dict' in state:
                 logger.info(f'Loading predictor network parameters from {state_path}.')
-                if self.net_args.base_net in ['vitnet', 'timm'] and self.optimiser_args.freeze_pretrained:
+                if self.network_args.base_net in ['vitnet', 'timm'] and self.optimiser_args.freeze_pretrained:
                     self.predictor.classifier.load_state_dict(self._fix_state(state['net_p_state_dict']), strict=False)
                 else:
                     self.predictor.load_state_dict(self._fix_state(state['net_p_state_dict']), strict=False)
@@ -449,6 +475,7 @@ class Manager:
                 loaded = True
         if not loaded and self.runtime_args.resume_only:
             raise ValueError('Predictor network parameters not found in the checkpoint.')
+        self.predictor.eval()
 
         # Instantiate an exponential moving average tracker for the predictor loss
         self.p_loss_ema = EMA()
@@ -527,7 +554,7 @@ class Manager:
         loaded = False
         if self.runtime_args.resume and len(self.checkpoint.snapshots) > 0:
             state_path = self.checkpoint.get_state_path()
-            state = torch.load(state_path, map_location=self.device)
+            state = torch.load(state_path, map_location=self.device, weights_only=True)
             if 'net_g_state_dict' in state:
                 logger.info(f'Loading generator network parameters from {state_path}.')
                 self.generator.load_state_dict(self._fix_state(state['net_g_state_dict']), strict=False)
@@ -536,6 +563,7 @@ class Manager:
                 loaded = True
         if not loaded and self.runtime_args.resume_only:
             raise ValueError('Generator network parameters not found in the checkpoint.')
+        self.generator.eval()
 
         # Instantiate an exponential moving average tracker for the generator loss
         self.g_loss_ema = EMA()
@@ -572,7 +600,7 @@ class Manager:
         loaded = False
         if self.runtime_args.resume and len(self.checkpoint.snapshots) > 0:
             state_path = self.checkpoint.get_state_path()
-            state = torch.load(state_path, map_location=self.device)
+            state = torch.load(state_path, map_location=self.device, weights_only=True)
             if 'net_d_state_dict' in state:
                 logger.info(f'Loading discriminator network parameters from {state_path}.')
                 self.discriminator.load_state_dict(self._fix_state(state['net_d_state_dict']), strict=False)
@@ -580,6 +608,7 @@ class Manager:
                 loaded = True
         if not loaded and self.runtime_args.resume_only:
             raise ValueError('Discriminator network parameters not found in the checkpoint.')
+        self.discriminator.eval()
 
         # Instantiate an exponential moving average tracker for the discriminator loss
         self.d_loss_ema = EMA()
@@ -598,7 +627,7 @@ class Manager:
 
         def load_pips(self, name='vgg_lpips'):
             ckpt = get_ckpt_path(name, DATA_PATH / 'vgg_lpips')
-            self.load_state_dict(torch.load(ckpt, map_location=torch.device('cpu')), strict=False)
+            self.load_state_dict(torch.load(ckpt, map_location=torch.device('cpu'), weights_only=True), strict=False)
             logger.info(f'Loaded pretrained LPIPS loss from {ckpt}.')
 
         LPIPS.load_from_pretrained = load_pips
@@ -607,8 +636,8 @@ class Manager:
         config = OmegaConf.load(self.denoiser_args.dn_mv2_config_path)
         self.dn_config = config
         denoiser = VQModel(**config.model.init_args)
-        sd = torch.load(self.denoiser_args.dn_mv2_checkpoint_path, map_location='cpu')['state_dict']
-        missing, unexpected = denoiser.load_state_dict(sd, strict=False)
+        sd = torch.load(self.denoiser_args.dn_mv2_checkpoint_path, map_location='cpu', weights_only=True)['state_dict']
+        denoiser.load_state_dict(sd, strict=False)
         denoiser.eval()
 
         # Instantiate the network
@@ -625,7 +654,7 @@ class Manager:
             loaded = False
             if self.runtime_args.resume and len(self.checkpoint.snapshots) > 0:
                 state_path = self.checkpoint.get_state_path()
-                state = torch.load(state_path, map_location=self.device)
+                state = torch.load(state_path, map_location=self.device, weights_only=True)
                 if 'net_dn_state_dict' in state:
                     logger.info(f'Loading denoiser network parameters from {state_path}.')
                     self.denoiser.load_state_dict(self._fix_state(state['net_dn_state_dict']), strict=False)
@@ -633,6 +662,59 @@ class Manager:
                     loaded = True
             if not loaded and self.runtime_args.resume_only:
                 raise ValueError('Denoiser network parameters not found in the checkpoint.')
+        self.denoiser.eval()
+
+    def _init_keypoint_detector(self, load_from_checkpoint: bool = True):
+        """
+        Initialise the keypoint detector network.
+        """
+        if not self.dataset_args.train_keypoint_detector:
+            self.keypoint_detector = None
+            return
+        assert self.keypoint_detector_args.kd_model_name == 'MAGVIT2', 'Only MAGVIT2 denoiser is supported.'
+
+        # Monkey-patch the LPIPS class so it loads from a sensible place
+        from taming.modules.losses.lpips import LPIPS
+
+        def load_pips(self, name='vgg_lpips'):
+            ckpt = get_ckpt_path(name, DATA_PATH / 'vgg_lpips')
+            self.load_state_dict(torch.load(ckpt, map_location=torch.device('cpu'), weights_only=True), strict=False)
+            logger.info(f'Loaded pretrained LPIPS loss from {ckpt}.')
+
+        LPIPS.load_from_pretrained = load_pips
+
+        # Load the model checkpoint
+        config = OmegaConf.load(self.keypoint_detector_args.kd_mv2_config_path)
+        self.kd_config = config
+        keypoint_detector = VQModel(**config.model.init_args)
+        sd = torch.load(self.keypoint_detector_args.kd_mv2_checkpoint_path,
+                        map_location='cpu', weights_only=True)['state_dict']
+        keypoint_detector.load_state_dict(sd, strict=False)
+        keypoint_detector.eval()
+
+        # Instantiate the network
+        n_params = sum([p.data.nelement() for p in keypoint_detector.parameters()])
+        logger.info(f'Instantiated keypoint detector network with {n_params / 1e6:.4f}M parameters.')
+        if self.print_networks:
+            logger.debug(f'----------- Keypoint Detector Network --------------\n\n{keypoint_detector}\n\n')
+        if self.device.type == 'cuda' and torch.cuda.device_count() > 1:
+            keypoint_detector = nn.DataParallel(keypoint_detector)
+        self.keypoint_detector = keypoint_detector.to(self.device)
+
+        # Load the network parameters
+        if load_from_checkpoint:
+            loaded = False
+            if self.runtime_args.resume and len(self.checkpoint.snapshots) > 0:
+                state_path = self.checkpoint.get_state_path()
+                state = torch.load(state_path, map_location=self.device, weights_only=True)
+                if 'net_kd_state_dict' in state:
+                    logger.info(f'Loading keypoint detector network parameters from {state_path}.')
+                    self.keypoint_detector.load_state_dict(self._fix_state(state['net_kd_state_dict']), strict=False)
+                    self.optimiser_kd.load_state_dict(state['optimiser_kd_state_dict'])
+                    loaded = True
+            if not loaded and self.runtime_args.resume_only:
+                raise ValueError('Keypoint detector network parameters not found in the checkpoint.')
+        self.keypoint_detector.eval()
 
     def _init_transcoder(self):
         """
@@ -687,7 +769,7 @@ class Manager:
         loaded = False
         if self.runtime_args.resume and len(self.checkpoint.snapshots) > 0:
             state_path = self.checkpoint.get_state_path()
-            state = torch.load(state_path, map_location=self.device)
+            state = torch.load(state_path, map_location=self.device, weights_only=True)
             if 'net_t_state_dict' in state:
                 logger.info(f'Loading transcoder network parameters from {state_path}.')
                 self.transcoder.load_state_dict(self._fix_state(state['net_t_state_dict']), strict=False)
@@ -695,6 +777,7 @@ class Manager:
                 loaded = True
         if not loaded and self.runtime_args.resume_only:
             raise ValueError('Transcoder network parameters not found in the checkpoint.')
+        self.transcoder.eval()
 
         # Instantiate exponential moving average trackers for the reconstruction and regularisation losses
         self.tc_rec_loss_ema = EMA()
@@ -708,7 +791,7 @@ class Manager:
             return None
         rcf_path = self.generator_args.rcf_model_path
         rcf = RCF()
-        checkpoint = torch.load(rcf_path)
+        checkpoint = torch.load(rcf_path, weights_only=True)
         rcf.load_state_dict(checkpoint, strict=False)
         rcf.eval()
 
@@ -773,12 +856,12 @@ class Manager:
         # Predictor network
         if which == 'predictor' and self.dataset_args.train_predictor:
             # For the pretrained models, separate the feature extractor from the classifier
-            if self.net_args.base_net in ['vitnet', 'timm']:
+            if self.network_args.base_net in ['vitnet', 'timm']:
                 params = [{'params': self.predictor.classifier.parameters(), 'lr': oa.lr_init}, ]
                 if not oa.freeze_pretrained:
                     params.append({'params': self.predictor.model.parameters(), 'lr': oa.lr_pretrained_init})
             else:
-                params = [{'params': self.predictor.parameters(), 'lr': oa.lr_init},]
+                params = [{'params': self.predictor.parameters(), 'lr': oa.lr_init}, ]
             if self.transcoder_args.use_transcoder and self.transcoder_args.tc_trained_by in ['predictor', 'both']:
                 params.append({'params': self.transcoder.parameters(), 'lr': oa.lr_init})
             if self.dataset_args.train_combined:
@@ -801,7 +884,7 @@ class Manager:
             lr_scheduler, n_epochs = create_scheduler_v2(optimizer=optimiser, **shared_lrs_args)
 
         # Denoiser network
-        elif which =='denoiser' and self.dataset_args.train_denoiser:
+        elif which == 'denoiser' and self.dataset_args.train_denoiser:
             params = [
                 {'params': self.denoiser.encoder.parameters(), 'lr': oa.lr_denoiser_init},
                 {'params': self.denoiser.decoder.parameters(), 'lr': oa.lr_denoiser_init},
@@ -810,8 +893,18 @@ class Manager:
             optimiser = create_optimizer_v2(model_or_params=params, betas=(0.5, 0.9), **shared_opt_args)
             lr_scheduler, n_epochs = create_scheduler_v2(optimizer=optimiser, **shared_lrs_args)
 
+        # Keypoint detector network
+        elif which == 'keypointdetector' and self.dataset_args.train_keypoint_detector:
+            params = [
+                {'params': self.keypoint_detector.encoder.parameters(), 'lr': oa.lr_keypoint_detector_init},
+                {'params': self.keypoint_detector.decoder.parameters(), 'lr': oa.lr_keypoint_detector_init},
+                {'params': self.keypoint_detector.quantize.parameters(), 'lr': oa.lr_keypoint_detector_init},
+            ]
+            optimiser = create_optimizer_v2(model_or_params=params, betas=(0.5, 0.9), **shared_opt_args)
+            lr_scheduler, n_epochs = create_scheduler_v2(optimizer=optimiser, **shared_lrs_args)
+
         # Transcoder network
-        elif which =='transcoder' and self.transcoder_args.use_transcoder and self.transcoder_args.tc_trained_by == 'self':
+        elif which == 'transcoder' and self.transcoder_args.use_transcoder and self.transcoder_args.tc_trained_by == 'self':
             params = [{'params': self.transcoder.parameters(), 'lr': oa.lr_transcoder_init}]
             optimiser = create_optimizer_v2(model_or_params=params, **shared_opt_args)
             lr_scheduler, n_epochs = create_scheduler_v2(optimizer=optimiser, **shared_lrs_args)
@@ -848,6 +941,8 @@ class Manager:
                 metric_keys.append('losses/gan_gen')
         if self.dataset_args.train_denoiser:
             metric_keys.append('losses/denoiser')
+        if self.dataset_args.train_keypoint_detector:
+            metric_keys.append('losses/keypoint_detector')
         if self.transcoder_args.use_transcoder:
             metric_keys.append('losses/transcoder')
 
@@ -892,9 +987,10 @@ class Manager:
         checkpoint = Checkpoint(
             dataset=self.ds,
             dataset_args=self.dataset_args,
-            network_args=self.net_args,
+            network_args=self.network_args,
             generator_args=self.generator_args,
             denoiser_args=self.denoiser_args,
+            keypoint_detector_args=self.keypoint_detector_args,
             optimiser_args=self.optimiser_args,
             transcoder_args=self.transcoder_args,
             runtime_args=self.runtime_args,
@@ -959,7 +1055,8 @@ class Manager:
         """
         Put the networks in evaluation mode.
         """
-        for net_name in ['predictor', 'generator', 'discriminator', 'denoiser', 'transcoder']:
+        self.training = False
+        for net_name in ['predictor', 'generator', 'discriminator', 'denoiser', 'keypoint_detector', 'transcoder']:
             if net_name in self.__dict__:
                 net = getattr(self, net_name)
                 if net is not None:
@@ -969,6 +1066,7 @@ class Manager:
         """
         Put the networks in training mode.
         """
+        self.training = True
         if self.dataset_args.train_predictor:
             self.predictor.train()
         if self.dataset_args.train_generator:
@@ -977,6 +1075,8 @@ class Manager:
                 self.discriminator.train()
         if self.dataset_args.train_denoiser:
             self.denoiser.train()
+        if self.dataset_args.train_keypoint_detector:
+            self.keypoint_detector.train()
         if self.transcoder_args.use_transcoder:
             self.transcoder.train()
 
@@ -999,6 +1099,8 @@ class Manager:
             self.lr_scheduler_d.step(starting_epoch - 1)
         if self.lr_scheduler_dn is not None:
             self.lr_scheduler_dn.step(starting_epoch - 1)
+        if self.lr_scheduler_kd is not None:
+            self.lr_scheduler_kd.step(starting_epoch - 1)
         if self.lr_scheduler_t is not None:
             self.lr_scheduler_t.step(starting_epoch - 1)
 
@@ -1014,6 +1116,8 @@ class Manager:
                 self.tb_logger.add_scalar('lr/d', self.optimiser_d.param_groups[0]['lr'], epoch)
             if self.optimiser_dn is not None:
                 self.tb_logger.add_scalar('lr/dn', self.optimiser_dn.param_groups[0]['lr'], epoch)
+            if self.optimiser_kd is not None:
+                self.tb_logger.add_scalar('lr/kd', self.optimiser_kd.param_groups[0]['lr'], epoch)
             if self.optimiser_t is not None:
                 self.tb_logger.add_scalar('lr/t', self.optimiser_t.param_groups[0]['lr'], epoch)
 
@@ -1032,6 +1136,8 @@ class Manager:
                 self.lr_scheduler_d.step(epoch, self.checkpoint.loss_train)
             if self.lr_scheduler_dn is not None:
                 self.lr_scheduler_dn.step(epoch, self.checkpoint.loss_train)
+            if self.lr_scheduler_kd is not None:
+                self.lr_scheduler_kd.step(epoch, self.checkpoint.loss_train)
             if self.lr_scheduler_t is not None:
                 self.lr_scheduler_t.step(epoch, self.checkpoint.loss_train)
 
@@ -1055,6 +1161,8 @@ class Manager:
                 optimiser_d=self.optimiser_d,
                 net_dn=self.denoiser,
                 optimiser_dn=self.optimiser_dn,
+                net_kd=self.keypoint_detector,
+                optimiser_kd=self.optimiser_kd,
                 net_t=self.transcoder,
                 optimiser_t=self.optimiser_t,
             )
@@ -1109,6 +1217,8 @@ class Manager:
                     optimiser_d=self.optimiser_d,
                     net_dn=self.denoiser,
                     optimiser_dn=self.optimiser_dn,
+                    net_kd=self.keypoint_detector,
+                    optimiser_kd=self.optimiser_kd,
                     net_t=self.transcoder,
                     optimiser_t=self.optimiser_t,
                 )
@@ -1128,7 +1238,7 @@ class Manager:
 
     def _train_batch(
             self,
-            data: Tuple[dict, Tensor, Tensor, Optional[Tensor], Dict[str, Tensor]]
+            data: DataBatch
     ) -> Tuple[dict, float, dict]:
         """
         Train on a single batch of data.
@@ -1172,6 +1282,10 @@ class Manager:
         if self.dataset_args.train_denoiser:
             train_net(self.denoiser, self.optimiser_dn, self._process_batch_denoiser, 'dn')
 
+        # Train the keypoint detector
+        if self.dataset_args.train_keypoint_detector:
+            train_net(self.keypoint_detector, self.optimiser_kd, self._process_batch_keypoint_detector, 'kd')
+
         # Train the transcoder
         if self.transcoder_args.use_transcoder and self.transcoder_args.tc_trained_by == 'self':
             train_net(self.transcoder, self.optimiser_t, self._process_batch_transcoder, 'tc',
@@ -1206,6 +1320,12 @@ class Manager:
             assert not is_bad(weights_cumulative_norm), 'Bad parameters! (Denoiser network)'
             self.tb_logger.add_scalar('batch/train/w_norm_dn', weights_cumulative_norm.item(), self.checkpoint.step)
 
+        # Calculate L2 loss for keypoint detector network
+        if self.dataset_args.train_keypoint_detector:
+            weights_cumulative_norm = calculate_model_norm(self.keypoint_detector, device=self.device)
+            assert not is_bad(weights_cumulative_norm), 'Bad parameters! (Keypoint detector network)'
+            self.tb_logger.add_scalar('batch/train/w_norm_kd', weights_cumulative_norm.item(), self.checkpoint.step)
+
         # Calculate L2 loss for transcoder network
         if self.transcoder_args.use_transcoder:
             weights_cumulative_norm = calculate_model_norm(self.transcoder, device=self.device)
@@ -1230,6 +1350,10 @@ class Manager:
         cumulative_loss = 0.
         cumulative_stats = {k: 0. for k in self.metric_keys}
 
+        # Sinkhorn loss re-enables grad so disable and re-enable it manually
+        # https://github.com/jeanfeydy/geomloss/issues/57
+        prev_grad_enabled = torch.is_grad_enabled()
+
         with torch.no_grad():
             for i, data in enumerate(self.test_loader, 0):
                 if (i + 1) % log_freq == 0:
@@ -1237,6 +1361,9 @@ class Manager:
                 loss_total = 0.
                 outputs = {}
                 stats = {}
+
+                # todo: remove this when geomloss is fixed
+                torch.autograd.set_grad_enabled(False)
 
                 if self.dataset_args.train_predictor:
                     outputs_p, loss_p, stats_p = self._process_batch_predictor(data)
@@ -1262,6 +1389,12 @@ class Manager:
                     stats.update(stats_dn)
                     loss_total += loss_dn.item()
 
+                if self.dataset_args.train_keypoint_detector:
+                    outputs_kd, loss_kd, stats_kd = self._process_batch_keypoint_detector(data)
+                    outputs.update(outputs_kd)
+                    stats.update(stats_kd)
+                    loss_total += loss_kd.item()
+
                 if self.transcoder_args.use_transcoder and self.transcoder_args.tc_trained_by == 'self':
                     outputs_t, loss_t, stats_t = self._process_batch_transcoder(
                         data,
@@ -1276,6 +1409,9 @@ class Manager:
                         cumulative_stats[k] += stats[k]
                 cumulative_loss += loss_total
 
+        # todo: remove this when geomloss is fixed
+        torch.autograd.set_grad_enabled(prev_grad_enabled)
+
         test_loss = cumulative_loss / len(self.test_loader)
         test_stats = {k: v / len(self.test_loader) for k, v in cumulative_stats.items()}
 
@@ -1288,13 +1424,19 @@ class Manager:
 
     def _process_batch_predictor(
             self,
-            data: Tuple[dict, Tensor, Tensor, Optional[Tensor], Dict[str, Tensor]]
+            data: DataBatch
     ) -> Tuple[Dict[str, Any], Tensor, Dict]:
         """
         Take a batch of images, predict the parameters and calculate the average loss per example.
         """
-        _, _, X_target_aug, X_target_clean, Y_target = data  # Use the (possibly) augmented image as input
-        X_target_aug = X_target_aug.to(self.device)
+        _, _, X_target_aug, X_target_clean, X_target_clean_aug, Y_target = data
+
+        # Use the (possibly) augmented image as input, either clean or noisy
+        if self.dataset_args.use_clean_images:
+            X_target = X_target_clean_aug
+        else:
+            X_target = X_target_aug
+        X_target = X_target.to(self.device)
         if X_target_clean is not None:
             X_target_clean = X_target_clean.to(self.device)
         Y_target = {
@@ -1303,10 +1445,10 @@ class Manager:
         }
 
         # Predict the parameters and calculate losses
-        Y_pred = self.predict(X_target_aug)
+        Y_pred = self.predict(X_target)
         loss, metrics, X_pred2 = self.calculate_predictor_losses(Y_pred, Y_target, X_target_clean)
         outputs = {
-            'Y_pred': Y_pred,
+            'Y_pred': {k: v.detach().cpu() for k, v in Y_pred.items()},
             'X_pred2': X_pred2.detach().cpu() if X_pred2 is not None else None
         }
 
@@ -1341,14 +1483,14 @@ class Manager:
 
     def _process_batch_generator(
             self,
-            data: Tuple[dict, Tensor, Tensor, Tensor, Dict[str, Tensor]]
+            data: DataBatch
     ) -> Tuple[Dict[str, Any], Tensor, Dict]:
         """
-        Take a batch of input data, push it through the network and calculate the average loss per example.
+        Take a batch of parameters and generate images.
         """
         if self.dataset_args.train_combined:
             raise RuntimeError('Training the generator separately in train_combined mode is disabled.')
-        _, _, _, X_target, Y_target = data  # Use the clean image as the target
+        _, _, _, X_target, _, Y_target = data  # Use the clean image as the target
         X_target = X_target.to(self.device)
         Y_target = {
             k: [vi.to(self.device) for vi in v] if isinstance(v, list) else v.to(self.device)
@@ -1371,13 +1513,13 @@ class Manager:
 
     def _process_batch_discriminator(
             self,
-            data: Tuple[dict, Tensor, Tensor, Tensor, Dict[str, Tensor]],
+            data: DataBatch,
             X_pred: Tensor
     ) -> Tuple[Dict[str, Any], Tensor, Dict]:
         """
         Run the discriminator on the real and predicted images and calculate losses.
         """
-        _, _, X_target, _, _ = data  # Use the clean image as target
+        _, _, _, X_target, _, _ = data  # Use the clean image as target
         X_target = X_target.to(self.device)
 
         # Evaluate the real and fake images
@@ -1399,22 +1541,22 @@ class Manager:
 
     def _process_batch_denoiser(
             self,
-            data: Tuple[dict, Tensor, Tensor, Tensor, Dict[str, Tensor]]
+            data: DataBatch
     ) -> Tuple[Dict[str, Any], Tensor, Dict]:
         """
         Take a batch of noisy images and try to recover the clean images.
         """
-        _, _, X_target_aug, X_target_clean, Y_target = data
+        _, _, X_target_aug, X_target_clean, _, Y_target = data
         X_target_aug = X_target_aug.to(self.device)
         X_target_clean = X_target_clean.to(self.device)
 
         # Denoise the image
         X_denoised, l_codebook, l_breakdown = self.denoise(X_target_aug, restore_size=False, return_losses=True)
 
-        # Resize clean image to match denoised size
-        if X_target_clean.shape[-2:] != X_denoised.shape[-2:]:
-            X_target_clean = F.interpolate(X_target_clean, size=X_denoised.shape[-2:], mode='bilinear',
-                                           align_corners=False)
+        # Resize denoised image to match clean size
+        if X_denoised.shape[-2:] != X_target_clean.shape[-2:]:
+            X_denoised = F.interpolate(X_denoised, size=X_target_clean.shape[-2:],
+                                       mode='bilinear', align_corners=False)
 
         # Calculate losses
         dn_loss: VQLPIPSWithDiscriminator = self.denoiser.loss
@@ -1448,10 +1590,120 @@ class Manager:
 
         return outputs, loss, metrics
 
+    def _process_batch_keypoint_detector(
+            self,
+            data: DataBatch
+    ) -> Tuple[Dict[str, Any], Tensor, Dict]:
+        """
+        Take a batch of images and try to identify the crystal vertex positions and/or wireframe edges.
+        """
+        _, _, X_target_aug, _, X_target_clean_aug, Y_target = data
+        if self.keypoint_detector_args.kd_use_clean_images:
+            X_target = X_target_clean_aug.to(self.device)
+        else:
+            X_target = X_target_aug.to(self.device)
+        outputs = {}
+        metrics = {}
+        loss = 0.
+
+        # Generate a heatmap of the keypoint positions and/or wireframe
+        kp_pred, wf_pred, l_codebook, l_breakdown = self.detect_keypoints(
+            X_target,
+            restore_size=True,
+            return_losses=True
+        )
+
+        # Calculate losses
+        kd_loss: VQLPIPSWithDiscriminator = self.keypoint_detector.loss
+        focal_loss = FocalLoss(
+            alpha=self.keypoint_detector_args.kd_focal_loss_alpha,
+            gamma=self.keypoint_detector_args.kd_focal_loss_gamma
+        )
+
+        # Keypoint heatmap losses
+        if self.keypoint_detector_args.kd_train_keypoints:
+            outputs['kp_pred'] = kp_pred.detach().cpu()
+            kp_pred = kp_pred.unsqueeze(1)
+            kp_target = Y_target['kp_heatmap'].unsqueeze(1).to(self.device)
+
+            # Calculate losses
+            l_kp_l1 = (kp_target - kp_pred).abs().mean()
+            l_kp_l2 = ((kp_target - kp_pred)**2).mean()
+            l_kp_fl = focal_loss(kp_pred, kp_target)
+            if kd_loss.perceptual_weight > 0:
+                l_kp_percept = kd_loss.perceptual_loss(
+                    kp_target.contiguous(),
+                    kp_pred.contiguous()
+                ).mean()
+            else:
+                l_kp_percept = torch.tensor(0., device=self.device)
+
+            # Combine losses
+            loss_kp = self.optimiser_args.w_kp_l1 * l_kp_l1 \
+                      + self.optimiser_args.w_kp_l2 * l_kp_l2 \
+                      + self.optimiser_args.w_kp_fl * l_kp_fl \
+                      + kd_loss.perceptual_weight * l_kp_percept
+            loss = loss + loss_kp
+
+            # Track loss terms
+            metrics = {**metrics, **{
+                'kd/kp': loss_kp.item(),
+                'kd/kp/l1': l_kp_l1.item(),
+                'kd/kp/l2': l_kp_l2.item(),
+                'kd/kp/fl': l_kp_fl.item(),
+                'kd/kp/perceptual': l_kp_percept.item(),
+            }}
+
+        # Wireframe losses
+        if self.keypoint_detector_args.kd_train_wireframe:
+            outputs['wf_pred'] = wf_pred.detach().cpu()
+            wf_target = Y_target['wireframe'].to(self.device)
+
+            # Calculate losses
+            l_wf_l1 = (wf_target - wf_pred).abs().mean()
+            l_wf_l2 = ((wf_target - wf_pred)**2).mean()
+            l_wf_fl = focal_loss(wf_pred, wf_target)
+            if kd_loss.perceptual_weight > 0:
+                l_wf_percept = kd_loss.perceptual_loss(
+                    wf_target.contiguous().mean(dim=1).unsqueeze(1),
+                    wf_pred.contiguous().mean(dim=1).unsqueeze(1)
+                ).mean()
+            else:
+                l_wf_percept = torch.tensor(0., device=self.device)
+
+            # Combine losses
+            loss_wf = self.optimiser_args.w_wf_l1 * l_wf_l1 \
+                      + self.optimiser_args.w_wf_l2 * l_wf_l2 \
+                      + self.optimiser_args.w_wf_fl * l_wf_fl \
+                      + kd_loss.perceptual_weight * l_wf_percept
+            loss = loss + loss_wf
+
+            # Track loss terms
+            metrics = {**metrics, **{
+                'kd/wf': loss_wf.item(),
+                'kd/wf/l1': l_wf_l1.item(),
+                'kd/wf/l2': l_wf_l2.item(),
+                'kd/wf/fl': l_wf_fl.item(),
+                'kd/wf/perceptual': l_wf_percept.item(),
+            }}
+
+        # Combine losses
+        loss = loss \
+               + kd_loss.codebook_weight * l_codebook \
+               + kd_loss.commit_weight * l_breakdown.commitment
+
+        metrics = {**metrics, **{
+            'losses/keypoint_detector': loss.item(),
+            'kd/codebook': l_codebook.item(),
+            'kd/commitment': l_breakdown.commitment.item(),
+        }}
+
+        return outputs, loss, metrics
+
     def _process_batch_transcoder(
             self,
-            data: Tuple[dict, Tensor, Tensor, Tensor, Dict[str, Tensor]],
-            Z_pred: Optional[Tensor] = None
+            data: DataBatch,
+            Z_pred: Tensor | None = None
     ) -> Tuple[Dict[str, Any], Tensor, Dict]:
         """
         Run the transcoder on the parameter to latent mappings.
@@ -1459,7 +1711,7 @@ class Manager:
 
         # VAE transcoder
         if self.transcoder_args.tc_model_name in ['vae', 'tvae']:
-            _, _, _, _, Y_target = data
+            _, _, _, _, _, Y_target = data
             Y_target = {
                 k: [vi.to(self.device) for vi in v] if isinstance(v, list) else v.to(self.device)
                 for k, v in Y_target.items()
@@ -1614,7 +1866,7 @@ class Manager:
                 # Apply the switches
                 ignore_distances = Y_switches < .5
                 Y_dists = torch.where(ignore_distances, torch.ones_like(Y_dists) * 100, Y_dists)
-            elif self.ds.labels_distances == self.ds.labels_distances_active:
+            elif self.dataset_args.train_scale and self.ds.labels_distances == self.ds.labels_distances_active:
                 # Normalise the predictions by the maximum value per batch item
                 Ypd_max = Y_dists.amax(dim=1, keepdim=True).abs()
                 Y_dists = torch.where(Ypd_max > 0, Y_dists / Ypd_max, Y_dists)
@@ -1625,12 +1877,7 @@ class Manager:
             output['distances'] = Y_dists
 
         if self.dataset_args.train_transformation:
-            n_params = len(self.ds.labels_transformation)
-            if self.dataset_args.rotation_mode == ROTATION_MODE_QUATERNION:
-                n_params += len(self.ds.labels_rotation_quaternion)
-            else:
-                assert self.dataset_args.rotation_mode == ROTATION_MODE_AXISANGLE
-                n_params += len(self.ds.labels_rotation_axisangle)
+            n_params = len(self.ds.labels_transformation_active)
             output['transformation'] = Y[:, idx:idx + n_params]
             idx += n_params
 
@@ -1654,7 +1901,7 @@ class Manager:
             if k in ['distances', 'transformation', 'material', 'light']
         ], dim=1)
 
-    def generate(self, Y: Dict[str, Tensor]) -> Optional[Tensor]:
+    def generate(self, Y: Dict[str, Tensor]) -> Tensor | None:
         """
         Take a batch of parameters and generate a batch of images.
         """
@@ -1686,30 +1933,80 @@ class Manager:
         Take a batch of images and denoise them.
         """
         X = X.to(self.device)
+        assert X.ndim == 4 and X.shape[1] == 3, 'Input images must be in [B, 3, H, W] format.'
+        img_size = X.shape[-2:]
 
         # Resize images for input
         dn_size = self.dn_config.data.init_args.train.params.config.size
-        if self.image_shape[-1] != dn_size:
+        if self.denoiser_args.dn_resize_input and self.image_shape[-1] != dn_size:
             X = F.interpolate(X, size=(dn_size, dn_size), mode='bilinear', align_corners=False)
 
         # Denoise the images
         X_denoised, l_codebook, l_breakdown = self.denoiser(X)
 
         # Resize for output
-        if restore_size:
-            X_denoised = F.interpolate(X_denoised, size=self.image_shape[-2:], mode='bilinear', align_corners=False)
+        if restore_size and img_size != X_denoised.shape[-2:]:
+            X_denoised = F.interpolate(X_denoised, size=img_size, mode='bilinear', align_corners=False)
 
         if return_losses:
             return X_denoised, l_codebook, l_breakdown
 
         return X_denoised
 
+    def detect_keypoints(
+            self,
+            X: Tensor,
+            restore_size: bool = True,
+            return_losses: bool = False
+    ) -> Union[
+        Tuple[Tensor | None, Tensor | None],
+        Tuple[Tensor | None, Tensor | None, Tensor, Any]
+    ]:
+        """
+        Take a batch of images and detect the keypoints.
+        """
+        X = X.to(self.device)
+        assert X.ndim == 4 and X.shape[1] == 3, f'Input images must be in [B, 3, H, W] format, got {X.shape}.'
+        img_size = X.shape[-2:]
+
+        # Resize images for input
+        kd_size = self.kd_config.data.init_args.train.params.config.size
+        if self.keypoint_detector_args.kd_resize_input and img_size[0] != kd_size:
+            X = F.interpolate(X, size=(kd_size, kd_size), mode='bilinear', align_corners=False)
+
+        # Generate the vertex heatmaps and wireframes
+        keypoints, l_codebook, l_breakdown = self.keypoint_detector(X)
+        keypoints = torch.sigmoid(keypoints)
+
+        # Resize for output
+        if restore_size and img_size != keypoints.shape[-2:]:
+            keypoints = F.interpolate(keypoints, size=img_size, mode='bilinear', align_corners=False)
+
+        # Split into keypoints heatmaps and wireframe
+        kp_heatmap = None
+        wireframe = None
+        if self.keypoint_detector_args.kd_train_keypoints:
+            if self.keypoint_detector_args.kd_train_wireframe:
+                kp_heatmap = keypoints[:, 0]
+            else:
+                kp_heatmap = keypoints.mean(dim=1)
+        if self.keypoint_detector_args.kd_train_wireframe:
+            if self.keypoint_detector_args.kd_train_keypoints:
+                wireframe = keypoints[:, 1:]
+            else:
+                wireframe = keypoints[:, :2]  # Need two channels for the wireframe so just discard the third channel
+
+        if return_losses:
+            return kp_heatmap, wireframe, l_codebook, l_breakdown
+
+        return kp_heatmap, wireframe
+
     def calculate_predictor_losses(
             self,
             Y_pred: Dict[str, Tensor],
             Y_target: Dict[str, Union[Tensor, List[Tensor]]],
-            X_target_clean: Optional[Tensor],
-    ) -> Tuple[Tensor, Dict[str, Any], Optional[Tensor]]:
+            X_target_clean: Tensor | None,
+    ) -> Tuple[Tensor, Dict[str, Any], Tensor | None]:
         """
         Calculate losses.
         """
@@ -1847,10 +2144,15 @@ class Manager:
         Calculate the transformation losses.
         """
         location_loss = ((t_pred[:, :3] - t_target[:, :3])**2).mean()
-        scale_loss = ((t_pred[:, 3] - t_target[:, 3])**2).mean()
+        if self.dataset_args.train_scale:
+            scale_loss = ((t_pred[:, 3] - t_target[:, 3])**2).mean()
+            r_idx = 4
+        else:
+            scale_loss = torch.tensor(0., device=self.device)
+            r_idx = 3
 
         if self.dataset_args.rotation_mode == ROTATION_MODE_QUATERNION:
-            q_pred = t_pred[:, 4:]
+            q_pred = t_pred[:, r_idx:]
             v_norms = q_pred.norm(dim=-1, keepdim=True)
             q_pred = q_pred / v_norms
 
@@ -1872,11 +2174,11 @@ class Manager:
                     rotation_losses[i] = angular_differences[min_idx]
                 rotation_loss = rotation_losses.mean()
             else:
-                rotation_loss = ((q_pred - t_target[:, 4:])**2).mean()
+                rotation_loss = ((q_pred - t_target[:, r_idx:])**2).mean()
 
         else:
             assert self.dataset_args.rotation_mode == ROTATION_MODE_AXISANGLE
-            R_pred = axis_angle_to_rotation_matrix(t_pred[:, 4:])
+            R_pred = axis_angle_to_rotation_matrix(t_pred[:, r_idx:])
 
             # Use the sym_rotations, could be different number for each batch item so have to loop over
             if sym_rotations is not None:
@@ -1894,7 +2196,7 @@ class Manager:
                     rotation_losses[i] = angular_differences[min_idx]
                 rotation_loss = rotation_losses.mean()
             else:
-                R_target = axis_angle_to_rotation_matrix(t_target[:, 4:])
+                R_target = axis_angle_to_rotation_matrix(t_target[:, r_idx:])
                 rotation_loss = geodesic_distance(R_pred, R_target).mean()
 
         loss = location_loss + scale_loss + rotation_loss
@@ -1924,15 +2226,23 @@ class Manager:
         """
         distances = self.ds.prep_distances(
             distance_vals=Y_pred['distances'],
-            switches=Y_pred['distance_switches'] if 'distance_switches' in Y_pred else None
+            switches=Y_pred['distance_switches'] if 'distance_switches' in Y_pred else None,
+            normalise=self.dataset_args.train_scale
         )
+        origin = Y_pred['transformation'][:, :3]
+        if self.dataset_args.train_scale:
+            scale = Y_pred['transformation'][:, 3]
+            rotation = Y_pred['transformation'][:, 4:]
+        else:
+            scale = torch.ones(len(origin), device=self.device)
+            rotation = Y_pred['transformation'][:, 3:]
 
         # Calculate the polyhedral vertices for the parameters
         v_pred, v_pred_og, nv_pred, farthest_dists = calculate_polyhedral_vertices(
             distances=distances,
-            origin=Y_pred['transformation'][:, :3],
-            scale=Y_pred['transformation'][:, 3],
-            rotation=Y_pred['transformation'][:, 4:],
+            origin=origin,
+            scale=scale,
+            rotation=rotation,
             symmetry_idx=self.crystal.symmetry_idx if self.ds.dataset_args.asymmetry is None else None,
             plane_normals=self.crystal.N,
         )
@@ -1975,6 +2285,14 @@ class Manager:
         # Calculate the average minimum distance per vertex
         l_vertices = (d.sum(dim=1) / (d > 0).sum(dim=1).clip(1)).mean()
 
+        # Calculate the sinkhorn loss
+        sinkhorn_loss = SamplesLoss('sinkhorn', p=2, blur=0.01)
+        w_pred = ((torch.arange(v_pred.shape[1], device=v_pred.device)
+                   .expand(v_pred.shape[0], -1) < nv_pred.unsqueeze(1)).to(torch.float32) / nv_pred[:, None])
+        w_target = ((torch.arange(v_target.shape[1], device=v_pred.device)
+                     .expand(v_target.shape[0], -1) < nv_target.unsqueeze(1))).to(torch.float32) / nv_target[:, None]
+        l_vertices_sinkhorn = sinkhorn_loss(w_pred, v_pred, w_target, v_target).mean()
+
         # Regularise the distances so all planes are touching the polyhedron
         N_dot_v = torch.einsum('pi,bvi->bpv', self.crystal.N, v_pred_og)
         distances_min = N_dot_v.amax(dim=-1)[:, :distances.shape[1]]
@@ -1995,12 +2313,14 @@ class Manager:
             torch.zeros_like(undershoot)
         ).mean()
 
-        loss = l_vertices \
+        loss = self.optimiser_args.w_3d_v_mindists * l_vertices \
+               + self.optimiser_args.w_3d_v_sinkhorn * l_vertices_sinkhorn \
                + self.optimiser_args.w_3d_overshoot * l_overshoot \
                + self.optimiser_args.w_3d_undershoot * l_undershoot
 
         stats = {
             '3d/l_vertices': l_vertices.item(),
+            '3d/l_vertices_sinkhorn': l_vertices_sinkhorn.item(),
             '3d/l_overshoot': l_overshoot.item(),
             '3d/l_undershoot': l_undershoot.item(),
             'losses/3d': loss.item()
@@ -2082,8 +2402,8 @@ class Manager:
 
     def calculate_generator_losses(
             self,
-            X_pred: Optional[Tensor],
-            X_target: Optional[Tensor],
+            X_pred: Tensor | None,
+            X_target: Tensor | None,
             Y_target: Dict[str, Union[Tensor, List[Tensor]]],
             include_teacher_loss: bool = True,
             include_discriminator_loss: bool = True,
@@ -2462,9 +2782,10 @@ class Manager:
             idx += 1
             groups['t/origin_z'] = (idx, idx + 1)
             idx += 1
-            # Leave out scale as it is sort of dependent on the morphology
-            # groups['t/scale'] = (idx, idx + 1)
-            idx += 1
+            if self.dataset_args.train_scale:
+                # Leave out scale as it is sort of dependent on the morphology
+                # groups['t/scale'] = (idx, idx + 1)
+                idx += 1
             if self.dataset_args.rotation_mode == ROTATION_MODE_QUATERNION:
                 groups['t/rotation'] = (idx, idx + 4)
                 idx += 4
@@ -2530,7 +2851,7 @@ class Manager:
     def _calculate_com_loss(
             self,
             Z: Tensor,
-            Z_target: Optional[Tensor] = None,
+            Z_target: Tensor | None = None,
             Y_target: Optional[Dict[str, Union[Tensor, List[Tensor]]]] = None,
             use_sym_rotations: bool = True
     ):
@@ -2571,7 +2892,7 @@ class Manager:
 
     def _make_plots(
             self,
-            data: Tuple[dict, Tensor, Tensor, Tensor, Dict[str, Tensor]],
+            data: DataBatch,
             outputs: Dict[str, Any],
             stats: Dict[str, Tensor],
             train_or_test: str,
@@ -2597,6 +2918,9 @@ class Manager:
             if self.dataset_args.train_denoiser:
                 fig = plot_denoiser_samples(self, data, outputs, train_or_test, idxs)
                 self._save_plot(fig, 'denoiser', train_or_test)
+            if self.dataset_args.train_keypoint_detector:
+                fig = plot_keypoint_detector_samples(self, data, outputs, train_or_test, idxs)
+                self._save_plot(fig, 'keypoint_detector', train_or_test)
             # if self.transcoder_args.use_transcoder: todo - fix
             #     fig = plot_vaetc_examples(data, outputs, train_or_test, idxs)
             #     self._save_plot(fig, 'vaetc_examples', train_or_test)

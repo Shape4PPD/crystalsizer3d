@@ -1,5 +1,6 @@
 import re
-from multiprocessing import Pool
+import time
+from multiprocessing import Manager, Pool
 from typing import List, Optional, Tuple, Union
 
 import numpy as np
@@ -167,11 +168,18 @@ def _generate_crystal(
         crystal = Crystal(distances=distances, **crystal_args, merge_vertices=True)
     areas = np.array([crystal.areas[hkl] for hkl in miller_indices])
 
+    logger.info(f'Generated crystal {idx} in {n_attempts} attempts.')
+
     return distances, areas, np.array([si, il]), mesh
 
 
-def _generate_crystal_wrapper(args):
-    return _generate_crystal(**args)
+def _generate_crystal_wrapper(args, termination_event):
+    try:
+        return _generate_crystal(**args)
+    except Exception as e:
+        logger.error(f'Error generating crystal: {e}')
+        termination_event.set()
+        raise
 
 
 class CrystalGenerator:
@@ -284,16 +292,31 @@ class CrystalGenerator:
             symmetry_idx=self.crystal.symmetry_idx.tolist(),
             all_miller_indices=self.crystal.all_miller_indices.tolist(),
             zingg_bbox=self.zingg_bbox,
-            max_attempts=max_attempts
+            max_attempts=max_attempts,
         )
 
         if self.n_workers > 1:
             logger.info(f'Generating crystals in parallel, worker pool size: {self.n_workers}')
-            args = []
-            for i in range(num):
-                args.append({'idx': i, 'seed': get_seed() + i, **shared_args})
-            with Pool(processes=self.n_workers) as pool:
-                crystals = pool.map(_generate_crystal_wrapper, args)
+            with Manager() as manager:
+                termination_event = manager.Event()
+                args = []
+                for i in range(num):
+                    args.append(({'idx': i, 'seed': get_seed() + i, **shared_args}, termination_event))
+                with Pool(processes=self.n_workers) as pool:
+                    result = pool.starmap_async(_generate_crystal_wrapper, args)
+
+                    # Monitor the pool for any errors
+                    while not result.ready():
+                        if termination_event.is_set():
+                            logger.error('Terminating pool due to worker error.')
+                            pool.terminate()
+                            raise RuntimeError('Error generating crystals.')
+                        time.sleep(0.5)
+
+                    # Get the results
+                    crystals = result.get()
+
+        # Generate crystals sequentially
         else:
             crystals = []
             for i in range(num):

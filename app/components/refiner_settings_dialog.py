@@ -1,12 +1,16 @@
 from abc import ABCMeta, abstractmethod
 from argparse import ArgumentParser
 from decimal import Decimal, getcontext
+from pathlib import Path
 from typing import List, Optional, Tuple, Union
 
 import wx
+import yaml
+from ruamel.yaml import YAML
 from ruamel.yaml.scalarfloat import ScalarFloat
 from wx.lib.scrolledpanel import ScrolledPanel
 
+from app import REFINER_ARGS_PATH
 from crystalsizer3d.args.refiner_args import RefinerArgs
 
 CATEGORY_SELECTOR_HEADING_FONT_COLOUR = '#be3a3a'
@@ -398,6 +402,17 @@ class RefinerSettings(SettingsPanel):
             'Use rcf model',
             'bool',
         )
+        self.add_field(
+            'use_keypoints',
+            'Use keypoints detection',
+            'bool',
+        )
+        self.add_field(
+            'keypoints_model_path',
+            'Keypoints detector model path',
+            'path',
+            file_picker_wildcard='JSON files (*.json)|*.json',
+        )
 
         def toggle_inverse_rendering(event=None):
             """
@@ -463,6 +478,7 @@ class OptimiserSettings(SettingsPanel):
             'max_steps',
             'Maximum steps',
             'int',
+            max_value=1000000,
         )
         self.add_field(
             'multiscale',
@@ -759,6 +775,11 @@ class LossWeightingsSettings(SettingsPanel):
             'scientific',
         )
         self.add_field(
+            'w_keypoints',
+            'Keypoints distances loss',
+            'scientific',
+        )
+        self.add_field(
             'w_anchors',
             'Anchors loss',
             'scientific',
@@ -905,8 +926,14 @@ class RefinerSettingsDialog(wx.Dialog):
         # Control buttons
         btn_sizer = self.CreateButtonSizer(wx.OK | wx.CANCEL)
         reset_btn = wx.Button(self, label='Reset to defaults')
-        btn_sizer.Insert(0, reset_btn, flag=wx.RIGHT)
+        load_btn = wx.Button(self, label='Load settings')
+        save_btn = wx.Button(self, label='Save settings')
+        btn_sizer.Insert(0, reset_btn, flag=wx.RIGHT, border=0)
+        btn_sizer.Insert(0, load_btn, flag=wx.RIGHT, border=5)
+        btn_sizer.Insert(0, save_btn, flag=wx.RIGHT, border=5)
         reset_btn.Bind(wx.EVT_BUTTON, self.on_reset)
+        load_btn.Bind(wx.EVT_BUTTON, self.on_load)
+        save_btn.Bind(wx.EVT_BUTTON, self.on_save)
 
         # Layout
         self.panel = SettingsSplitterPanel(self, self.refiner_args)
@@ -937,4 +964,87 @@ class RefinerSettingsDialog(wx.Dialog):
         self.Layout()
         self.panel.categories.category_selector.SetSelection(active_panel_idx)
         self.panel.show_category(active_panel_idx)
+        event.Skip()
+
+    def on_load(self, event: wx.CommandEvent):
+        """
+        Load settings from a file.
+        """
+        with wx.FileDialog(
+                self,
+                message='Load settings',
+                wildcard='YAML files (*.yaml, *.yml)|*.yaml;*.yml',
+                style=wx.FD_OPEN | wx.FD_FILE_MUST_EXIST
+        ) as file_dialog:
+            if file_dialog.ShowModal() == wx.ID_CANCEL:
+                return
+            current_args = self.refiner_args.clone()
+            filepath = Path(file_dialog.GetPath())
+            try:
+                with open(filepath, 'r') as f:
+                    args_yml = yaml.load(f, Loader=yaml.FullLoader)
+                for k, v in args_yml.items():
+                    if hasattr(self.refiner_args, k):
+                        old_value = getattr(self.refiner_args, k)
+                        v_type = type(old_value)
+                        new_type = type(v)
+                        if v_type is ScalarFloat:
+                            v_type = float
+                        if v_type is not None and v_type is not new_type:
+                            v = v_type(v)
+                        setattr(self.refiner_args, k, v)
+
+                # Update the UI
+                active_panel_idx = self.panel.categories.category_selector.GetSelection()
+                self.panel.Destroy()
+                self._init_components()
+                self.Layout()
+                self.panel.categories.category_selector.SetSelection(active_panel_idx)
+                self.panel.show_category(active_panel_idx)
+
+                # Show success message
+                wx.MessageBox(f'Settings loaded from {filepath}', 'Success', wx.ICON_INFORMATION)
+            except Exception as e:
+                self.refiner_args = current_args
+                wx.MessageBox(f'Error loading settings: {e}', 'Error', wx.ICON_ERROR)
+                return
+
+        event.Skip()
+
+    def on_save(self, event: wx.CommandEvent):
+        """
+        Save the settings to a file.
+        """
+        with wx.FileDialog(
+                self,
+                message='Save settings',
+                wildcard='YAML files (*.yaml, *.yml)|*.yaml;*.yml',
+                style=wx.FD_SAVE
+        ) as file_dialog:
+            if file_dialog.ShowModal() == wx.ID_CANCEL:
+                return
+            filepath = Path(file_dialog.GetPath())
+            if filepath.suffix != '.yml':
+                filepath = filepath.with_suffix('.yml')
+            if filepath.exists():
+                dlg = wx.MessageDialog(self, message='File already exists. Overwrite?', caption='CrystalSizer3D',
+                                       style=wx.YES_NO | wx.NO_DEFAULT | wx.ICON_QUESTION)
+                if dlg.ShowModal() != wx.ID_YES:
+                    return
+            try:
+                yaml = YAML()
+                yaml.preserve_quotes = True
+                args_dict = self.refiner_args.to_dict()
+
+                # Update just the values present in the refiner args file
+                with open(REFINER_ARGS_PATH, 'r') as f:
+                    args_yml = yaml.load(f)
+                for k, v in args_dict.items():
+                    if k in args_yml:
+                        args_yml[k] = v
+                with open(filepath, 'w') as f:
+                    yaml.dump(args_yml, f)
+                wx.MessageBox(f'Settings saved to {filepath}', 'Success', wx.ICON_INFORMATION)
+            except Exception as e:
+                wx.MessageBox(f'Error saving settings: {e}', 'Error', wx.ICON_ERROR)
         event.Skip()

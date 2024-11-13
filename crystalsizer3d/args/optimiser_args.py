@@ -22,6 +22,7 @@ class OptimiserArgs(BaseArgs):
             lr_generator_init: float = 0.1,
             lr_discriminator_init: float = 0.1,
             lr_denoiser_init: float = 0.1,
+            lr_keypoint_detector_init: float = 0.1,
             lr_transcoder_init: float = 0.1,
             lr_scheduler: str = 'cosine',
             lr_min: float = 1e-6,
@@ -52,6 +53,8 @@ class OptimiserArgs(BaseArgs):
             w_distances: float = 1.0,
             w_transformation: float = 1.0,
             w_3d: float = 1.0,
+            w_3d_v_mindists: float = 1.0,
+            w_3d_v_sinkhorn: float = 1.0,
             w_3d_overshoot: float = 0.,
             w_3d_undershoot: float = 0.,
             w_material: float = 1.0,
@@ -65,6 +68,13 @@ class OptimiserArgs(BaseArgs):
             w_transcoder_gen: float = 1.0,
             w_com_X: float = 0.,
             w_com_Y: float = 0.,
+
+            w_kp_l1: float = 1.0,
+            w_kp_l2: float = 1.0,
+            w_kp_fl: float = 1.0,
+            w_wf_l1: float = 1.0,
+            w_wf_l2: float = 1.0,
+            w_wf_fl: float = 1.0,
 
             **kwargs
     ):
@@ -97,6 +107,7 @@ class OptimiserArgs(BaseArgs):
         self.lr_generator_init = lr_generator_init
         self.lr_discriminator_init = lr_discriminator_init
         self.lr_denoiser_init = lr_denoiser_init
+        self.lr_keypoint_detector_init = lr_keypoint_detector_init
         self.lr_transcoder_init = lr_transcoder_init
         self.lr_scheduler = lr_scheduler
         self.lr_min = lr_min
@@ -139,6 +150,8 @@ class OptimiserArgs(BaseArgs):
         self.w_distances = w_distances
         self.w_transformation = w_transformation
         self.w_3d = w_3d
+        self.w_3d_v_mindists = w_3d_v_mindists
+        self.w_3d_v_sinkhorn = w_3d_v_sinkhorn
         self.w_3d_overshoot = w_3d_overshoot
         self.w_3d_undershoot = w_3d_undershoot
         self.w_material = w_material
@@ -152,6 +165,14 @@ class OptimiserArgs(BaseArgs):
         self.w_transcoder_gen = w_transcoder_gen
         self.w_com_X = w_com_X
         self.w_com_Y = w_com_Y
+
+        # Keypoint detector loss weightings
+        self.w_kp_l1 = w_kp_l1
+        self.w_kp_l2 = w_kp_l2
+        self.w_kp_fl = w_kp_fl
+        self.w_wf_l1 = w_wf_l1
+        self.w_wf_l2 = w_wf_l2
+        self.w_wf_fl = w_wf_fl
 
     @classmethod
     def add_args(cls, parser: ArgumentParser) -> _ArgumentGroup:
@@ -172,6 +193,8 @@ class OptimiserArgs(BaseArgs):
                            help='Learning rate for discriminator network.')
         group.add_argument('--lr-denoiser-init', type=float, default=0.1,
                            help='Learning rate for denoiser network.')
+        group.add_argument('--lr-keypoint-detector-init', type=float, default=0.1,
+                           help='Learning rate for keypoint detector network.')
         group.add_argument('--lr-transcoder-init', type=float, default=0.1,
                            help='Learning rate for transcoder network (if trained by self).')
         group.add_argument('--lr-scheduler', type=str, default='cosine',
@@ -229,6 +252,10 @@ class OptimiserArgs(BaseArgs):
                            help='Weight for transformation loss.')
         group.add_argument('--w-3d', type=float, default=1.0,
                            help='Weight for 3D loss.')
+        group.add_argument('--w-3d-v-mindists', type=float, default=1.0,
+                           help='Weight for 3D vertices loss calculated with min distances between vertices.')
+        group.add_argument('--w-3d-v-sinkhorn', type=float, default=0.,
+                           help='Weight for 3D vertices loss calculated with Sinkhorn distances between vertices.')
         group.add_argument('--w-3d-overshoot', type=float, default=0.,
                            help='Weight for overshoot component of the 3D loss (gets applied to the 3d loss before w_3d applied to the whole 3d loss).')
         group.add_argument('--w-3d-undershoot', type=float, default=0.,
@@ -255,5 +282,18 @@ class OptimiserArgs(BaseArgs):
                            help='Weight for combined X loss - used in train_combined mode.')
         group.add_argument('--w-com-Y', type=float, default=0.,
                            help='Weight for combined Y loss - used in train_combined mode.')
+
+        group.add_argument('--w-kp-l1', type=float, default=0,
+                           help='Weight for L1 loss in keypoint heatmaps.')
+        group.add_argument('--w-kp-l2', type=float, default=0,
+                           help='Weight for L2 loss in keypoint heatmaps.')
+        group.add_argument('--w-kp-fl', type=float, default=1.0,
+                           help='Weight for focal loss in keypoint heatmaps.')
+        group.add_argument('--w-wf-l1', type=float, default=0,
+                           help='Weight for L1 loss in wireframe images.')
+        group.add_argument('--w-wf-l2', type=float, default=0,
+                           help='Weight for L2 loss in wireframe images.')
+        group.add_argument('--w-wf-fl', type=float, default=1.0,
+                           help='Weight for focal loss in wireframe images.')
 
         return group

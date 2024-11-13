@@ -67,7 +67,7 @@ class TranscoderMaskInv(Transcoder):
             update_mask(n_dist_params)
 
         if self.ds.ds_args.train_transformation:
-            n_trans_params = len(self.ds.labels_transformation)
+            n_trans_params = len(self.ds.labels_transformation_active)
             if self.dataset_args.rotation_mode == ROTATION_MODE_QUATERNION:
                 n_trans_params += len(self.ds.labels_rotation_quaternion)
             else:

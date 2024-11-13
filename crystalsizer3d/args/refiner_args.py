@@ -6,6 +6,27 @@ from crystalsizer3d import DATA_PATH
 from crystalsizer3d.args.base_args import BaseArgs
 from crystalsizer3d.util.utils import str2bool
 
+DENOISER_ARG_NAMES = [
+    'denoiser_model_path', 'denoiser_n_tiles', 'denoiser_tile_overlap',
+    'denoiser_oversize_input', 'denoiser_max_img_size', 'denoiser_batch_size',
+]
+
+KEYPOINTS_ARG_NAMES = [
+    'keypoints_model_path', 'keypoints_oversize_input', 'keypoints_max_img_size', 'keypoints_batch_size',
+    'keypoints_min_distance', 'keypoints_threshold', 'keypoints_exclude_border', 'keypoints_blur_kernel_relative_size',
+    'keypoints_n_patches', 'keypoints_patch_size', 'keypoints_patch_search_res', 'keypoints_attenuation_sigma',
+    'keypoints_max_attenuation_factor', 'keypoints_low_res_catchment_distance', 'keypoints_loss_type'
+]
+
+PREDICTOR_ARG_NAMES = [
+    'predictor_model_path', 'initial_pred_noise_min', 'initial_pred_noise_max', 'initial_pred_oversize_input',
+    'initial_pred_max_img_size', 'multiscale', 'use_keypoints', 'n_patches', 'w_img_l1', 'w_img_l2', 'w_perceptual',
+    'w_latent', 'w_rcf', 'w_overshoot', 'w_symmetry', 'w_z_pos', 'w_rotation_xy', 'w_patches', 'w_fullsize',
+    'w_switch_probs', 'w_keypoints', 'w_anchors', 'l_decay_l1', 'l_decay_l2', 'l_decay_perceptual', 'l_decay_latent',
+    'l_decay_rcf', 'perceptual_model', 'latents_model', 'mv2_config_path', 'mv2_checkpoint_path', 'rcf_model_path',
+    'rcf_loss_type', 'keypoints_loss_type'
+]
+
 
 class RefinerArgs(BaseArgs):
     def __init__(
@@ -18,22 +39,45 @@ class RefinerArgs(BaseArgs):
             denoiser_model_path: Optional[Path] = None,
             denoiser_n_tiles: int = 4,
             denoiser_tile_overlap: float = 0.1,
+            denoiser_oversize_input: bool = True,
+            denoiser_max_img_size: int = 512,
             denoiser_batch_size: int = 4,
 
             # Initial prediction settings
-            initial_pred_from: str = 'denoised',
             initial_pred_batch_size: int = 16,
             initial_pred_noise_min: float = 0.0,
             initial_pred_noise_max: float = 0.2,
+            initial_pred_oversize_input: bool = True,
+            initial_pred_max_img_size: int = 512,
+
+            # Keypoint detection settings
+            keypoints_model_path: Optional[Path] = None,
+            keypoints_oversize_input: bool = False,
+            keypoints_max_img_size: int = 1024,
+            keypoints_batch_size: int = 4,
+            keypoints_min_distance: int = 5,
+            keypoints_threshold: float = 0.5,
+            keypoints_exclude_border: float = 0.05,
+            keypoints_blur_kernel_relative_size: float = 0.01,
+            keypoints_n_patches: int = 16,
+            keypoints_patch_size: int = 700,
+            keypoints_patch_search_res: int = 256,
+            keypoints_attenuation_sigma: float = 0.5,
+            keypoints_max_attenuation_factor: float = 1.5,
+            keypoints_low_res_catchment_distance: int = 100,
+            keypoints_loss_type: str = 'mindists',
 
             # Refining settings
             use_inverse_rendering: bool = True,
             use_perceptual_model: bool = True,
             use_latents_model: bool = True,
             use_rcf_model: bool = True,
+            use_keypoints: bool = False,
 
             # Rendering settings
-            working_image_size: int = 200,
+            ir_wait_n_steps: int = 0,
+            ir_loss_placeholder: float = 0,
+            rendering_size: int = 200,
             spp: int = 64,
             integrator_max_depth: int = 16,
             integrator_rr_depth: int = 5,
@@ -49,6 +93,12 @@ class RefinerArgs(BaseArgs):
             acc_grad_steps: int = 1,
             clip_grad_norm: float = 0.0,
             opt_algorithm: str = 'sgd',
+
+            # Convergence detector settings
+            convergence_tau_fast: int = 20,
+            convergence_tau_slow: int = 100,
+            convergence_threshold: float = 0.05,
+            convergence_patience: int = 100,
 
             # Noise
             image_noise_std: float = 0.0,
@@ -101,6 +151,8 @@ class RefinerArgs(BaseArgs):
             w_patches: float = 1.0,
             w_fullsize: float = 1.0,
             w_switch_probs: float = 1.0,
+            w_temporal: float = 1.0,
+            w_keypoints: float = 1.0,
             w_anchors: float = 1.0,
 
             # Loss decay factors
@@ -113,6 +165,7 @@ class RefinerArgs(BaseArgs):
             # Helper models
             perceptual_model: Optional[str] = None,
             latents_model: Optional[str] = None,
+            latents_input_size: int = 0,
             mv2_config_path: Optional[Path] = DATA_PATH / 'MAGVIT2' / 'imagenet_lfqgan_256_B.yaml',
             mv2_checkpoint_path: Optional[Path] = DATA_PATH / 'MAGVIT2' / 'imagenet_256_B.ckpt',
             rcf_model_path: Optional[Path] = DATA_PATH / 'bsds500_pascal_model.pth',
@@ -120,9 +173,10 @@ class RefinerArgs(BaseArgs):
 
             # Runtime args
             log_every_n_steps: int = 1,
-            plot_every_n_steps: int = 10,
 
             # Plotting args
+            plot_every_n_steps: int = 10,
+            plot_to_tensorboard: bool = False,
             plot_n_samples: int = 2,
             plot_n_patches: int = -1,
             plot_rcf_feats: List[int] = [0, 5],
@@ -150,6 +204,8 @@ class RefinerArgs(BaseArgs):
             image_path = Path(image_path)
         if isinstance(denoiser_model_path, str):
             denoiser_model_path = Path(denoiser_model_path)
+        if isinstance(keypoints_model_path, str):
+            keypoints_model_path = Path(keypoints_model_path)
         if isinstance(mv2_config_path, str):
             mv2_config_path = Path(mv2_config_path)
         if isinstance(mv2_checkpoint_path, str):
@@ -173,22 +229,47 @@ class RefinerArgs(BaseArgs):
         self.denoiser_model_path = denoiser_model_path
         self.denoiser_n_tiles = denoiser_n_tiles
         self.denoiser_tile_overlap = denoiser_tile_overlap
+        self.denoiser_oversize_input = denoiser_oversize_input
+        self.denoiser_max_img_size = denoiser_max_img_size
         self.denoiser_batch_size = denoiser_batch_size
 
         # Initial prediction settings
-        self.initial_pred_from = initial_pred_from
         self.initial_pred_batch_size = initial_pred_batch_size
         self.initial_pred_noise_min = initial_pred_noise_min
         self.initial_pred_noise_max = initial_pred_noise_max
+        self.initial_pred_oversize_input = initial_pred_oversize_input
+        self.initial_pred_max_img_size = initial_pred_max_img_size
+
+        # Keypoint detection settings
+        if keypoints_model_path is not None:
+            assert keypoints_model_path.exists(), f'Keypoints model path does not exist: {keypoints_model_path}'
+        self.keypoints_model_path = keypoints_model_path
+        self.keypoints_oversize_input = keypoints_oversize_input
+        self.keypoints_max_img_size = keypoints_max_img_size
+        self.keypoints_batch_size = keypoints_batch_size
+        self.keypoints_min_distance = keypoints_min_distance
+        self.keypoints_threshold = keypoints_threshold
+        self.keypoints_exclude_border = keypoints_exclude_border
+        self.keypoints_blur_kernel_relative_size = keypoints_blur_kernel_relative_size
+        self.keypoints_n_patches = keypoints_n_patches
+        self.keypoints_patch_size = keypoints_patch_size
+        self.keypoints_patch_search_res = keypoints_patch_search_res
+        self.keypoints_attenuation_sigma = keypoints_attenuation_sigma
+        self.keypoints_max_attenuation_factor = keypoints_max_attenuation_factor
+        self.keypoints_low_res_catchment_distance = keypoints_low_res_catchment_distance
+        self.keypoints_loss_type = keypoints_loss_type
 
         # Refining settings
         self.use_inverse_rendering = use_inverse_rendering
         self.use_perceptual_model = use_inverse_rendering & use_perceptual_model
         self.use_latents_model = use_inverse_rendering & use_latents_model
         self.use_rcf_model = use_inverse_rendering & use_rcf_model
+        self.use_keypoints = use_keypoints
 
         # Rendering settings
-        self.working_image_size = working_image_size
+        self.ir_wait_n_steps = ir_wait_n_steps
+        self.ir_loss_placeholder = ir_loss_placeholder
+        self.rendering_size = rendering_size
         self.spp = spp
         self.integrator_max_depth = integrator_max_depth
         self.integrator_rr_depth = integrator_rr_depth
@@ -204,6 +285,12 @@ class RefinerArgs(BaseArgs):
         self.acc_grad_steps = acc_grad_steps
         self.clip_grad_norm = clip_grad_norm
         self.opt_algorithm = opt_algorithm
+
+        # Convergence detector settings
+        self.convergence_tau_fast = convergence_tau_fast
+        self.convergence_tau_slow = convergence_tau_slow
+        self.convergence_threshold = convergence_threshold
+        self.convergence_patience = convergence_patience
 
         # Noise
         self.image_noise_std = image_noise_std
@@ -260,6 +347,8 @@ class RefinerArgs(BaseArgs):
         self.w_patches = w_patches
         self.w_fullsize = w_fullsize
         self.w_switch_probs = w_switch_probs
+        self.w_temporal = w_temporal
+        self.w_keypoints = w_keypoints
         self.w_anchors = w_anchors
 
         # Loss decay factors
@@ -272,6 +361,7 @@ class RefinerArgs(BaseArgs):
         # Helper models
         self.perceptual_model = perceptual_model
         self.latents_model = latents_model
+        self.latents_input_size = latents_input_size
         self.mv2_config_path = mv2_config_path
         self.mv2_checkpoint_path = mv2_checkpoint_path
         self.rcf_model_path = rcf_model_path
@@ -279,9 +369,10 @@ class RefinerArgs(BaseArgs):
 
         # Runtime args
         self.log_every_n_steps = log_every_n_steps
-        self.plot_every_n_steps = plot_every_n_steps
 
         # Plotting args
+        self.plot_every_n_steps = plot_every_n_steps
+        self.plot_to_tensorboard = plot_to_tensorboard
         self.plot_n_samples = plot_n_samples
         self.plot_n_patches = plot_n_patches
         self.plot_rcf_feats = plot_rcf_feats
@@ -308,7 +399,7 @@ class RefinerArgs(BaseArgs):
         Add arguments to a command parser.
         """
         group = parser.add_argument_group('Refiner Args')
-        group.add_argument('--predictor-model-path', type=Path, required=True,
+        group.add_argument('--predictor-model-path', type=Path,
                            help='Path to the model\'s json file.')
         group.add_argument('--image-path', type=Path,
                            help='Path to the image to process. If set, will override the dataset entry.')
@@ -322,18 +413,57 @@ class RefinerArgs(BaseArgs):
                            help='Number of tiles to split the image into for denoising.')
         group.add_argument('--denoiser-tile-overlap', type=float, default=0.05,
                            help='Ratio of overlap between tiles for denoising.')
+        group.add_argument('--denoiser-oversize-input', type=str2bool, default=True,
+                           help='Whether to resize the input images to the training dataset image size.')
+        group.add_argument('--denoiser-max-img-size', type=int, default=512,
+                           help='Maximum image size for denoising.')
         group.add_argument('--denoiser-batch-size', type=int, default=3,
                            help='Number of tiles to denoise at a time.')
 
         # Initial prediction settings
-        group.add_argument('--initial-pred-from', type=str, default='denoised', choices=['denoised', 'original'],
-                           help='Calculate the initial prediction from either the original or denoised image.')
         group.add_argument('--initial-pred-batch-size', type=int, default=8,
                            help='Batch size for the initial prediction.')
         group.add_argument('--initial-pred-noise-min', type=float, default=0.0,
                            help='Minimum amount of noise to add to the batch of images used to generate the initial prediction.')
         group.add_argument('--initial-pred-noise-max', type=float, default=0.1,
                            help='Minimum amount of noise to add to the batch of images used to generate the initial prediction.')
+        group.add_argument('--initial-pred-oversize-input', type=str2bool, default=True,
+                           help='Whether to resize the input images to the training dataset image size.')
+        group.add_argument('--initial-pred-max-img-size', type=int, default=512,
+                           help='Maximum image size for initial prediction.')
+
+        # Keypoint detection settings
+        group.add_argument('--keypoints-model-path', type=Path,
+                           help='Path to the keypoints model checkpoint.')
+        group.add_argument('--keypoints-oversize-input', type=str2bool, default=False,
+                           help='Whether to resize the input images to the training dataset image size.')
+        group.add_argument('--keypoints-max-img-size', type=int, default=1024,
+                           help='Maximum image size for keypoint detection.')
+        group.add_argument('--keypoints-batch-size', type=int, default=3,
+                           help='Number of tiles to detect keypoints at a time.')
+        group.add_argument('--keypoints-min-distance', type=int, default=5,
+                           help='Minimum pixel distance between keypoints.')
+        group.add_argument('--keypoints-threshold', type=float, default=0.5,
+                           help='Threshold for keypoints detection.')
+        group.add_argument('--keypoints-exclude-border', type=float, default=0.05,
+                           help='Exclude keypoints within this ratio of the border.')
+        group.add_argument('--keypoints-blur-kernel-relative-size', type=float, default=0.01,
+                           help='Relative size of the blur kernel for initial keypoints detection from low res, denoised image.')
+        group.add_argument('--keypoints-n-patches', type=int, default=16,
+                           help='Number of patches to crop from the image for high res keypoints detection.')
+        group.add_argument('--keypoints-patch-size', type=int, default=700,
+                           help='Size of the crop patches.')
+        group.add_argument('--keypoints-patch-search-res', type=int, default=256,
+                           help='Resolution of the low-res keypoints heatmap to use for determining where to crop the patches.')
+        group.add_argument('--keypoints-attenuation-sigma', type=float, default=0.5,
+                           help='Sigma parameter for the Gaussian blob used to iteratively attenuate the keypoints heatmap.')
+        group.add_argument('--keypoints-max-attenuation-factor', type=float, default=1.5,
+                           help='Maximum Gaussian peak height used for the attenuation function.')
+        group.add_argument('--keypoints-low-res-catchment-distance', type=int, default=100,
+                           help='Catchment distance (in pixels) for high res keypoints from the original low res keypoints.')
+        group.add_argument('--keypoints-loss-type', type=str, default='mindists',
+                           choices=['mindists', 'sinkhorn', 'hausdorff'],
+                           help='Type of loss to use for keypoints refinement.')
 
         # Refining settings
         group.add_argument('--use-inverse-rendering', type=str2bool, default=True,
@@ -344,9 +474,16 @@ class RefinerArgs(BaseArgs):
                            help='Use a latents model. Requires inverse rendering.')
         group.add_argument('--use-rcf-model', type=str2bool, default=True,
                            help='Use the RCF model. Requires inverse rendering.')
+        group.add_argument('--use-keypoints', type=str2bool, default=False,
+                           help='Use the keypoints detection method.')
 
         # Rendering settings
-        group.add_argument('--working-image-size', type=int, default=300,
+        group.add_argument('--ir-wait-n-steps', type=int, default=0,
+                           help='Number of optimisation steps to wait before turning inverse rendering on '
+                                '(if --use-inverse-rendering=True).')
+        group.add_argument('--ir-loss-placeholder', type=float, default=0,
+                           help='Placeholder loss value for inverse rendering.')
+        group.add_argument('--rendering-size', type=int, default=300,
                            help='Resolution of the (square) rendered image in pixels. '
                                 'Larger images are slower to render and use more resources, but may be more accurate.')
         group.add_argument('--spp', type=int, default=32,
@@ -375,6 +512,16 @@ class RefinerArgs(BaseArgs):
                            help='Clip the gradient norm of the distances to this value.')
         group.add_argument('--opt-algorithm', type=str, default='adabelief',
                            help='Optimisation algorithm to use.')
+
+        # Convergence detector settings
+        group.add_argument('--convergence-tau-fast', type=int, default=20,
+                           help='Fast convergence detector time constant.')
+        group.add_argument('--convergence-tau-slow', type=int, default=100,
+                           help='Slow convergence detector time constant.')
+        group.add_argument('--convergence-threshold', type=float, default=0.05,
+                           help='Convergence threshold.')
+        group.add_argument('--convergence-patience', type=int, default=100,
+                           help='Convergence patience.')
 
         # Noise
         group.add_argument('--image-noise-std', type=float, default=0.0,
@@ -480,6 +627,10 @@ class RefinerArgs(BaseArgs):
                            help='Weight of the combined losses on the full sized image. Only used when using patches.')
         group.add_argument('--w-switch-probs', type=float, default=0.1,
                            help='Weight of the conjugate face switching probabilities loss regulariser term.')
+        group.add_argument('--w-temporal', type=float, default=1.,
+                           help='Weight of the temporal regularisation term, used to penalise changes from a previous solution.')
+        group.add_argument('--w-keypoints', type=float, default=1.,
+                           help='Weight of the keypoints loss. Only used when using keypoints model.')
         group.add_argument('--w-anchors', type=float, default=1.,
                            help='Weight of the manually-defined anchors loss.')
 
@@ -500,6 +651,9 @@ class RefinerArgs(BaseArgs):
                            help='Perceptual model to use. Must start with "timm/".')
         group.add_argument('--latents-model', type=str, default='MAGVIT2',
                            help='Latent encoder model to use. Only MAGVIT2 supported.')
+        group.add_argument('--latents-input-size', type=int, default=0,
+                           help='Size of the input images to the latents model. '
+                                '0: resize to training image size (256). -1: use rendered image size.')
         group.add_argument('--mv2-config-path', type=Path,
                            default=DATA_PATH / 'MAGVIT2' / 'imagenet_lfqgan_256_B.yaml',
                            help='Path to the MAGVIT2 config file to use.')
@@ -513,10 +667,12 @@ class RefinerArgs(BaseArgs):
         # Runtime args
         group.add_argument('--log-every-n-steps', type=int, default=1,
                            help='Log every n batches.')
-        group.add_argument('--plot-every-n-steps', type=int, default=10,
-                           help='Plot every n batches.')
 
         # Plotting args
+        group.add_argument('--plot-every-n-steps', type=int, default=10,
+                           help='Plot every n batches.')
+        group.add_argument('--plot-to-tensorboard', type=str2bool, default=False,
+                           help='Save plots to tensorboard (as well as to disk).')
         group.add_argument('--plot-n-samples', type=int, default=2,
                            help='Number of multi-scale or probabilistic samples to plot.')
         group.add_argument('--plot-n-patches', type=int, default=-1,

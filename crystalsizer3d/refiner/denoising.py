@@ -6,75 +6,10 @@ import torch.nn.functional as F
 from torch import Tensor
 
 from crystalsizer3d.nn.manager import Manager
+from crystalsizer3d.refiner.tiling import stitch_image, tile_image
 
-
-def tile_image(image: Tensor, n_tiles: int, overlap: float = 0.):
-    """
-    Split an image into a square grid of patches.
-    """
-    assert int(np.sqrt(n_tiles))**2 == n_tiles, 'n_tiles must be a square number.'
-    img_size = image.shape[-1]
-    n_patches_per_side = int(np.sqrt(n_tiles))
-    overlap = round(overlap * img_size)
-    patch_size = (img_size + overlap * (n_patches_per_side - 1)) // n_patches_per_side
-    patches = []
-    patch_positions = []
-    patch_coords = []
-
-    for i in range(n_patches_per_side):
-        start_x = round(i * (patch_size - overlap))
-        start_x = max(0, min(start_x, img_size - patch_size))
-        end_x = start_x + patch_size
-
-        for j in range(n_patches_per_side):
-            start_y = round(j * (patch_size - overlap))
-            start_y = max(0, min(start_y, img_size - patch_size))
-            end_y = start_y + patch_size
-
-            patch = image[:, start_x:end_x, start_y:end_y]
-            patches.append(patch)
-            patch_positions.append((i, j))
-            patch_coords.append((start_x, start_y, end_x, end_y))
-
-    return torch.stack(patches), patch_positions
-
-
-def stitch_image(patches: Tensor, patch_positions: List[Tuple[int, int]], overlap: float = 0.):
-    """
-    Stitch patches back together into a single image.
-    """
-    n_patches_per_side = int(np.sqrt(len(patch_positions)))
-    patch_size = patches.shape[-1]
-    img_size = round(n_patches_per_side * patch_size / (1 + (n_patches_per_side - 1) * overlap))
-    overlap = round(overlap * img_size)
-    stitched_image = torch.zeros((patches.shape[1], img_size, img_size), device=patches.device)
-    full_weights = torch.zeros(img_size, img_size, device=patches.device)
-
-    for patch, (i, j) in zip(patches, patch_positions):
-        start_x = round(i * (patch_size - overlap))
-        start_x = max(0, min(start_x, img_size - patch_size))
-        end_x = start_x + patch_size
-
-        start_y = round(j * (patch_size - overlap))
-        start_y = max(0, min(start_y, img_size - patch_size))
-        end_y = start_y + patch_size
-
-        # Blend the patch into the stitched image
-        weights = torch.ones(patch_size, patch_size, device=patches.device)
-        for k in range(overlap):
-            f = (k + 1) / (overlap + 1)
-            if i > 0:
-                weights[k, :] *= f
-            if j > 0:
-                weights[:, k] *= f
-            if i < n_patches_per_side - 1:
-                weights[-(k + 1), :] *= f
-            if j < n_patches_per_side - 1:
-                weights[:, -(k + 1)] *= f
-        stitched_image[:, start_x:end_x, start_y:end_y] += patch * weights
-        full_weights[start_x:end_x, start_y:end_y] += weights
-
-    return stitched_image
+# Resize arguments used for interpolation
+resize_args = dict(mode='bilinear', align_corners=False)
 
 
 @torch.no_grad()
@@ -90,13 +25,17 @@ def denoise_batch(manager: Manager, X: Tensor, batch_size: int = -1):
     return torch.cat(X_denoised, dim=0)
 
 
+@torch.no_grad()
 def denoise_image(
         manager: Manager,
         X: Tensor,
         n_tiles: int = 1,
         overlap: float = 0.,
-        batch_size: int = -1
-) -> Tensor:
+        oversize_input: bool = False,
+        max_img_size: int = 1024,
+        batch_size: int = -1,
+        return_patches: bool = False
+) -> Tensor | Tuple[Tensor, Tensor, Tensor, List[Tuple[int, int]]]:
     """
     Denoise the image by splitting it into patches, denoising the patches, and stitching them back together.
     """
@@ -104,29 +43,32 @@ def denoise_image(
     assert 0 <= overlap < 1, 'Overlap must be in [0, 1).'
     assert X.shape[-1] == X.shape[-2], 'Image must be square.'
 
+    # Set up the resizing
+    resize_input_old = manager.denoiser_args.dn_resize_input
+    manager.denoiser_args.dn_resize_input = False
+    img_size = max_img_size if oversize_input else manager.image_shape[-1]
+
     # Split it up into patches
     X_patches, patch_positions = tile_image(X, n_tiles=n_tiles, overlap=overlap)
 
-    # Resize the patches to the working image size
-    X_patches = F.interpolate(
-        X_patches,
-        size=manager.image_shape[-1],
-        mode='bilinear',
-        align_corners=False
-    ).to(manager.device)
+    # Resize the patches to the input image size
+    if oversize_input and X_patches.shape[-1] > img_size \
+            or not oversize_input and X_patches.shape[-1] != img_size:
+        X_patches = F.interpolate(X_patches, size=img_size, **resize_args)
 
     # Denoise the patches
-    X_patches_denoised = denoise_batch(manager, X_patches, batch_size=batch_size)
+    X_patches_denoised = denoise_batch(manager, X_patches.to(manager.device), batch_size=batch_size)
 
-    # Plot the reconstituted image from the patches
+    # Stitch the image back together from the patches
     X_stitched = stitch_image(X_patches_denoised, patch_positions, overlap=overlap)
 
-    # Resize the reconstituted denoised image to the working image size
-    X_denoised = F.interpolate(
-        X_stitched[None, ...],
-        size=manager.image_shape[-1],
-        mode='bilinear',
-        align_corners=False
-    )[0]
+    # Resize the reconstituted denoised image to the input image size
+    X_denoised = F.interpolate(X_stitched[None, ...], size=X.shape[-1], **resize_args)[0]
+
+    # Reset the resizing
+    manager.denoiser_args.dn_resize_input = resize_input_old
+
+    if return_patches:
+        return X_denoised, X_patches, X_patches_denoised, patch_positions
 
     return X_denoised

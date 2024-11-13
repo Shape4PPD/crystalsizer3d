@@ -132,11 +132,12 @@ def get_projection_components(mi_scene: mi.Scene) -> Tuple[torch.Tensor, int]:
     return projection_components_cache[mi_scene.ptr]
 
 
-def orthographic_scale_factor(scene: 'Scene') -> float:
+def orthographic_scale_factor(scene: 'Scene', z: Optional[float] = None) -> float:
     """
     Estimate the unit scale factor for orthographic projection
     """
-    z = scene.crystal.vertices[:, 2].mean()
+    if z is None:
+        z = scene.crystal.vertices[:, 2].mean()
     pts = torch.tensor([[0, -1, z], [0, 1, z]], device=scene.device)
     uv_pts = project_to_image(scene.mi_scene, pts)
     zoom = torch.abs(uv_pts[0, 1] - uv_pts[1, 1]) / scene.res

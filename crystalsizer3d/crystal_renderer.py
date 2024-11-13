@@ -306,7 +306,12 @@ def _render_batch(
                 scene.bubbles = []
 
             # Sample the light radiance
-            scene.light_radiance = np.random.uniform(da.light_radiance_min, da.light_radiance_max)
+            radiance = np.random.uniform(da.light_radiance_min, da.light_radiance_max)
+            if np.ptp(radiance) > da.light_radiance_ptp_max:
+                mean_rad = radiance.mean()
+                radiance = (radiance - mean_rad) * (da.light_radiance_ptp_max / np.ptp(radiance))
+                radiance = radiance + mean_rad
+            scene.light_radiance = radiance
 
             # Randomise the light texture
             if da.light_texture_dim > -1:
@@ -340,6 +345,7 @@ def _render_batch(
                     min_area=da.crystal_area_min,
                     max_area=da.crystal_area_max,
                     centre_crystal=da.centre_crystals,
+                    rotation_max_xy=da.rotation_max_xy,
                     rebuild_scene=False,
                 )
                 scene.place_bubbles(
@@ -355,12 +361,11 @@ def _render_batch(
                 bubble.to(device)
             scene.build_mi_scene()
             img = scene.render(seed=seed + idx)
-            img = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)  # todo: do we need this?
             cv2.imwrite(str(output_dir / params['image']), img)
             scene_params = scene.to_dict()
             rendering_params[idx] = {
                 'seed': seed + idx,
-                'light_radiance': scene_params['light_radiance'].tolist(),
+                'light_radiance': scene_params['light_radiance'],
                 'light_st_texture': scene_params['light_st_texture'],
                 'cell_bumpmap': scene_params['cell_bumpmap'],
                 'cell_bumpmap_idx': scene_params['cell_bumpmap_idx'],
@@ -383,7 +388,6 @@ def _render_batch(
             if da.generate_clean:
                 scene.clear_interference()
                 img_clean = scene.render(seed=seed + idx)
-                img_clean = cv2.cvtColor(img_clean, cv2.COLOR_RGB2BGR)
                 cv2.imwrite(str(output_dir / params['image']) + '_clean', img_clean)
 
         except RenderError as e:
@@ -914,7 +918,6 @@ class CrystalRenderer:
             **self.dataset_args.to_dict(),
         )
         img = scene.render(seed=params['seed'] if 'seed' in params else get_seed())
-        img = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)  # todo: do we need this?
 
         if return_scene:
             return img, scene

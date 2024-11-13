@@ -5,7 +5,7 @@ import shutil
 import time
 from datetime import timedelta
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple, Union
+from typing import Callable, Dict, List, Optional, Tuple, Union
 
 import cv2
 import drjit as dr
@@ -16,10 +16,12 @@ import torch
 import torch.nn.functional as F
 import yaml
 from PIL import Image
+from geomloss import SamplesLoss
 from matplotlib import pyplot as plt
 from matplotlib.axes import Axes
 from matplotlib.figure import Figure
 from matplotlib.patches import Rectangle
+from skimage.feature import peak_local_max
 from omegaconf import OmegaConf
 from taming.models.lfqgan import VQModel
 from taming.util import get_ckpt_path
@@ -40,9 +42,13 @@ from crystalsizer3d.nn.manager import Manager
 from crystalsizer3d.nn.models.rcf import RCF
 from crystalsizer3d.projector import ProjectedVertexKey, Projector
 from crystalsizer3d.refiner.denoising import denoise_image
+from crystalsizer3d.refiner.keypoint_detection import find_keypoints, generate_attention_patches, \
+    to_absolute_coordinates
 from crystalsizer3d.scene_components.scene import Scene
 from crystalsizer3d.scene_components.utils import orthographic_scale_factor
-from crystalsizer3d.util.plots import _add_bars, plot_material, plot_transformation
+from crystalsizer3d.util.convergence_detector import ConvergenceDetector
+from crystalsizer3d.util.image_helpers import save_img, save_img_grid, save_img_with_keypoint_markers
+from crystalsizer3d.util.plots import _add_bars, plot_light, plot_material, plot_transformation
 from crystalsizer3d.util.utils import get_seed, gumbel_sigmoid, hash_data, init_tensor, is_bad, set_seed, to_multiscale, \
     to_numpy
 
@@ -60,12 +66,15 @@ class Refiner:
     loss: float = 0.
 
     X_target: Union[Tensor, List[Tensor]]
+    X_target_wis: Union[Tensor, List[Tensor]]
     X_target_denoised: Optional[Union[Tensor, List[Tensor]]]
+    X_target_denoised_wis: Optional[Union[Tensor, List[Tensor]]]
     X_target_aug: Union[Tensor, List[Tensor]]
     X_target_patches: Optional[Tensor]
+
     X_pred: Tensor = None
-    X_pred_patches: Optional[Tensor] = None
-    patch_centres: Optional[List[Tuple[int, int]]] = None
+    X_pred_patches: Tensor | None = None
+    patch_centres: Tensor | None = None
 
     scene: Scene = None
     scene_params: mi.SceneParameters = None
@@ -74,16 +83,28 @@ class Refiner:
     symmetry_idx: Tensor
     conj_pairs: List[Tuple[int, int]]
     conj_switch_probs: Tensor
+    param_group_keys: List[str]
 
+    keypoint_targets: Optional[Tensor] = None
     anchors: Dict[ProjectedVertexKey, Tensor] = {}
+    distances_est: Optional[Tensor] = None
+    distances_min: Optional[Tensor] = None
 
     rcf_feats_og: Optional[List[Tensor]]
     rcf_feats: Optional[List[Tensor]]
 
+    convergence_detector: ConvergenceDetector
+    convergence_detector_param_names: List[str]
+
     def __init__(
             self,
             args: RefinerArgs,
-            output_dir: Optional[Path] = None,
+            output_dir: Path | None = None,
+            output_dir_base: Path | None = None,
+            destroy_denoiser: bool = True,
+            destroy_keypoint_detector: bool = True,
+            destroy_predictor: bool = True,
+            do_init: bool = True
     ):
         self.args = args
 
@@ -91,20 +112,26 @@ class Refiner:
         if self.args.seed is not None:
             set_seed(self.args.seed)
 
-        # Set up the log directory
-        self._init_save_dir(output_dir)
+        # Whether to destroy the models after use
+        self.destroy_denoiser = destroy_denoiser
+        self.destroy_keypoint_detector = destroy_keypoint_detector
+        self.destroy_predictor = destroy_predictor
 
-        # Load the optimisation targets
-        self._init_X_target()
-        self._init_X_target_denoised()
-        self._init_Y_target()
+        if do_init:
+            # Set up the log directory
+            self.init_save_dir(output_dir, output_dir_base)
+
+            # Load the optimisation targets
+            self.init_X_target()
+            self.init_X_target_denoised()
+            self._init_Y_target()
 
     def __getattr__(self, name: str):
         """
         Lazy loading of the components.
         """
         if name == 'save_dir':
-            self._init_save_dir()
+            self.init_save_dir()
             return self.save_dir
         elif name == 'manager':
             self._init_manager()
@@ -134,7 +161,7 @@ class Refiner:
             self.metric_keys = self._init_metrics()
             return self.metric_keys
         elif name == 'tb_logger':
-            self._init_tb_logger()
+            self.init_tb_logger()
             return self.tb_logger
         elif name == 'device':
             self.device = self.manager.device
@@ -147,48 +174,79 @@ class Refiner:
             return getattr(self, name)
         raise AttributeError(f"'{self.__class__.__name__}' object has no attribute '{name}'")
 
-    def _init_save_dir(self, output_dir: Optional[Path] = None):
+    def get_parameter_vector(self, include_switch_probs: bool = True) -> Tensor:
+        """
+        Return a vector of the parameters.
+        """
+        params = torch.concatenate([
+            self.crystal.distances.detach().cpu(),
+            self.crystal.origin.detach().cpu(),
+            self.crystal.scale[None, ...].detach().cpu(),
+            self.crystal.rotation.detach().cpu(),
+            self.crystal.material_roughness[None, ...].detach().cpu(),
+            self.crystal.material_ior[None, ...].detach().cpu(),
+            self.scene.light_radiance.detach().cpu(),
+        ])
+        if include_switch_probs:
+            params = torch.concatenate([params, self.conj_switch_probs.detach().cpu()])
+
+        return params
+
+    def init_save_dir(self, output_dir: Path | None = None, output_dir_base: Path | None = None):
         """
         Set up the output directory.
         """
         logger.info('Initialising output directory.')
+        assert not (output_dir is not None and output_dir_base is not None), \
+            'Can\'t set both the output_dir and the output_dir_base.'
+        copy_dirs = ['cache', 'initial_prediction', 'denoise_patches', 'keypoints']
 
-        if self.args.image_path is None:
-            target_str = str(self.args.ds_idx)
-        else:
-            target_str = self.args.image_path.stem
-        model_str = self.args.predictor_model_path.stem[:4] \
-                    + (
-                        f'_{self.args.denoiser_model_path.stem[:4]}' if self.args.denoiser_model_path is not None else '')
-        base_params_str = (f'spp{self.args.spp}' +
-                           f'_res{self.args.working_image_size}' +
-                           (f'_ms' if self.args.multiscale else '') +
-                           f'_{self.args.opt_algorithm}')
         if output_dir is None:
-            base_dir = LOGS_PATH
-        else:
-            base_dir = output_dir
-        base_dir = base_dir / model_str / target_str / base_params_str
-        dir_name = hash_data(self.args.to_dict())
+            if self.args.image_path is None:
+                target_str = str(self.args.ds_idx)
+            else:
+                target_str = self.args.image_path.stem
+            model_str = self.args.predictor_model_path.stem[:4] + \
+                        (f'_{self.args.denoiser_model_path.stem[:4]}'
+                         if self.args.denoiser_model_path is not None else '') + \
+                        (f'_{self.args.keypoints_model_path.stem[:4]}'
+                         if self.args.keypoints_model_path is not None and self.args.use_keypoints else '')
+            base_params_str = (f'spp{self.args.spp}' +
+                               f'_res{self.args.rendering_size}' +
+                               (f'_ms' if self.args.multiscale else '') +
+                               f'_{self.args.opt_algorithm}')
+            if output_dir_base is None:
+                base_dir = LOGS_PATH
+            else:
+                base_dir = output_dir_base
+            base_dir = base_dir / model_str / target_str / base_params_str
+            dir_name = hash_data(self.args.to_dict())
 
-        # Check for existing directory
-        if base_dir.exists():
-            pattern = re.compile(rf'{dir_name}.*')
-            existing_dirs = [d for d in base_dir.iterdir() if pattern.match(d.name)]
-            if len(existing_dirs) > 0:
-                logger.warning(f'Found existing directory: {existing_dirs[0]}. Overwriting.')
-                cache_dir = existing_dirs[0] / 'cache'
-                if cache_dir.exists():
-                    shutil.move(cache_dir, base_dir / 'cache_tmp')
-                shutil.rmtree(existing_dirs[0])
+            # Check for existing directory
+            if base_dir.exists():
+                pattern = re.compile(rf'{dir_name}.*')
+                existing_dirs = [d for d in base_dir.iterdir() if pattern.match(d.name)]
+                if len(existing_dirs) > 0:
+                    logger.warning(f'Found existing directory: {existing_dirs[0]}. Overwriting.')
+                    for d in copy_dirs:
+                        if (existing_dirs[0] / d).exists():
+                            shutil.move(existing_dirs[0] / d, base_dir / f'{d}_tmp')
+                    shutil.rmtree(existing_dirs[0])
 
-        # Make the new save directory
-        self.save_dir = base_dir / (dir_name + f'_{START_TIMESTAMP}')
-        self.save_dir.mkdir(parents=True, exist_ok=True)
-        if (base_dir / 'cache_tmp').exists():
-            shutil.move(base_dir / 'cache_tmp', self.save_dir / 'cache')
+            # Make the new save directory
+            self.save_dir = base_dir / (dir_name + f'_{START_TIMESTAMP}')
+            self.save_dir.mkdir(parents=True, exist_ok=True)
+            for d in copy_dirs:
+                if (base_dir / f'{d}_tmp').exists():
+                    shutil.move(base_dir / f'{d}_tmp', self.save_dir / d)
+                else:
+                    (self.save_dir / d).mkdir()
+
         else:
-            (self.save_dir / 'cache').mkdir()
+            self.save_dir = output_dir
+            self.save_dir.mkdir(parents=True, exist_ok=True)
+            for d in copy_dirs:
+                (self.save_dir / d).mkdir(exist_ok=True)
 
         # Save arguments to yml file
         with open(self.save_dir / 'args.yml', 'w') as f:
@@ -218,8 +276,10 @@ class Refiner:
         """
         self.projector = Projector(
             crystal=self.crystal,
-            image_size=(self.args.working_image_size, self.args.working_image_size),
-            zoom=orthographic_scale_factor(self.scene)
+            image_size=(400, 400),
+            zoom=orthographic_scale_factor(self.scene),
+            multi_line=True,
+            rtol=1e-2
         )
 
     def _init_blur(self):
@@ -335,14 +395,40 @@ class Refiner:
         if self.rcf is None:
             self.rcf_feats_og = None
         else:
-            model_input = self.X_target[None, ...].permute(0, 3, 1, 2)
+            model_input = self.X_target_wis[None, ...].permute(0, 3, 1, 2)
             self.rcf_feats_og = self.rcf(model_input, apply_sigmoid=False)
 
-    def _resize_to_wis(self, X: Tensor) -> Tensor:
+    def _init_convergence_detector(self):
+        """
+        Initialise the convergence detector.
+        """
+        self.convergence_detector_param_names = [
+            # 'loss',
+            *[f'd_{i:02d}' for i in range(self.crystal.distances.shape[0])],
+            'roughness',
+            'ior',
+            *[f'light_{"rgb"[i]}' for i in range(3)],
+        ]
+        self.convergence_detector = ConvergenceDetector(
+            shape=(len(self.convergence_detector_param_names),),
+            tau_fast=self.args.convergence_tau_fast,
+            tau_slow=self.args.convergence_tau_slow,
+            threshold=self.args.convergence_threshold,
+            patience=self.args.convergence_patience,
+            min_absolute_threshold=1e-4
+        )
+
+    def _resize(self, X: Tensor, size: int | None = None) -> Tensor:
         """
         Resize the image to the working image size.
         """
+        if size is None:
+            size = self.args.rendering_size
+        trim_channel_dim = False
         trim_batch_dim = False
+        if X.ndim == 2:
+            X = X[None, ...]
+            trim_channel_dim = True
         if X.ndim == 3:
             X = X[None, ...]
             trim_batch_dim = True
@@ -352,8 +438,8 @@ class Refiner:
         if X.shape[-1] == 3:  # HWC
             X = X.permute(0, 3, 1, 2)
             out_hwc = True
-        if X.shape[-1] != self.args.working_image_size:
-            wis = (self.args.working_image_size, self.args.working_image_size)
+        if X.shape[-1] != size:
+            wis = (size, size)
             X = F.interpolate(
                 X,
                 size=wis,
@@ -364,9 +450,11 @@ class Refiner:
             X = X.permute(0, 2, 3, 1)
         if trim_batch_dim:
             X = X[0]
+        if trim_channel_dim:
+            X = X[0]
         return X
 
-    def _init_X_target(self):
+    def init_X_target(self):
         """
         Load the input image.
         """
@@ -374,8 +462,8 @@ class Refiner:
         if cache_path.exists():
             try:
                 X_target = torch.load(cache_path, weights_only=True)
-                X_target = self._resize_to_wis(X_target)
                 self.X_target = X_target.to(self.device)
+                self.X_target_wis = self._resize(self.X_target)
                 logger.info('Loaded target image.')
                 return
             except Exception as e:
@@ -394,68 +482,78 @@ class Refiner:
             X_target = center_crop(X_target, min(X_target.shape[-2:]))
 
         # Resize target image to the working image size for inverse rendering
-        X_target = X_target.to(self.device)
-        wis = (self.args.working_image_size, self.args.working_image_size)
-        X_target = self._resize_to_wis(X_target)
         X_target = X_target.permute(1, 2, 0)  # HWC
+        self.X_target = X_target.to(self.device)
+        self.X_target_wis = self._resize(self.X_target)
 
         # Multiscale
         if self.args.multiscale:
+            raise NotImplementedError('Multiscale not implemented.')
             X_target = to_multiscale(X_target, self.blur)
             resolution_pyramid = [t.shape[0] for t in X_target[::-1]]
             logger.info(f'Resolution pyramid has {len(X_target)} levels: '
                         f'{", ".join([str(res) for res in resolution_pyramid])}')
 
         # Save the target image
-        torch.save(X_target, cache_path)
-        self.X_target = X_target
+        torch.save(self.X_target, cache_path)
 
-    def _init_X_target_denoised(self):
+    def init_X_target_denoised(self):
         """
         Generate or load the denoised target.
         """
         cache_path = self.save_dir / 'cache' / 'X_target_denoised.pt'
         if cache_path.exists():
             try:
-                X_target_denoised = torch.load(cache_path, weights_only=True)
-                X_target_denoised = self._resize_to_wis(X_target_denoised)
-                self.X_target_denoised = X_target_denoised.to(self.device)
+                X_target_dn = torch.load(cache_path, weights_only=True)
+                self.X_target_denoised = X_target_dn.to(self.device)
+                self.X_target_denoised_wis = self._resize(self.X_target_denoised)
                 logger.info('Loaded denoised target image.')
                 return
             except Exception as e:
                 logger.warning(f'Failed to load cached denoised target image: {e}')
                 cache_path.unlink()
+        save_dir = self.save_dir / 'denoise_patches'
+        save_dir.mkdir(parents=True, exist_ok=True)
 
         # Load the denoiser model if set
         if self.args.denoiser_model_path is not None:
             assert self.args.denoiser_model_path.exists(), f'Denoiser model path does not exist: {self.args.denoiser_model_path}.'
             self.manager.load_network(self.args.denoiser_model_path, 'denoiser')
 
-        # Denoise the input image if a denoiser is available
-        if self.manager.denoiser is not None:
-            logger.info('Denoising input image.')
-            with torch.no_grad():
-                X_denoised = denoise_image(
-                    manager=self.manager,
-                    X=self.X_target.permute(2, 0, 1),
-                    n_tiles=self.args.denoiser_n_tiles,
-                    overlap=self.args.denoiser_tile_overlap,
-                    batch_size=self.args.denoiser_batch_size
-                )
-
-            # Destroy the denoiser to free up space
-            logger.info('Destroying denoiser to free up space.')
-            self.manager.denoiser = None
-            del self.manager.denoiser
-            torch.cuda.empty_cache()
-            gc.collect()
-        else:
-            assert self.args.initial_pred_from != 'denoised', 'No denoiser set, so can\'t predict using a denoised image'
+        # If no denoiser is set, return here
+        if self.manager.denoiser is None:
             return None
 
-        # Resize target image to the working image size for inverse rendering
-        X_denoised = self._resize_to_wis(X_denoised)
-        X_denoised = X_denoised.permute(1, 2, 0)
+        # Denoise the input image if a denoiser is available
+        logger.info('Denoising input image.')
+        with torch.no_grad():
+            X_denoised, X_patches, X_patches_denoised, patch_positions = denoise_image(
+                manager=self.manager,
+                X=self.X_target.permute(2, 0, 1),
+                n_tiles=self.args.denoiser_n_tiles,
+                overlap=self.args.denoiser_tile_overlap,
+                oversize_input=self.args.denoiser_oversize_input,
+                max_img_size=self.args.denoiser_max_img_size,
+                batch_size=self.args.denoiser_batch_size,
+                return_patches=True
+            )
+
+            # Resize target image to the working image size for inverse rendering
+            X_denoised = X_denoised.permute(1, 2, 0)
+            X_denoised_wis = self._resize(X_denoised)
+
+        # Save the denoiser output (and input)
+        save_img(self.X_target, 'X_original', save_dir)
+        save_img(X_denoised, 'X_denoised', save_dir)
+        save_img_grid(X_patches, 'X_patches_original', save_dir)
+        save_img_grid(X_patches_denoised, 'X_patches_denoised', save_dir)
+
+        # Destroy the denoiser to free up space
+        if self.destroy_denoiser:
+            logger.info('Destroying denoiser to free up space.')
+            self.manager.denoiser = None
+            torch.cuda.empty_cache()
+            gc.collect()
 
         # Multiscale
         if self.args.multiscale:
@@ -464,6 +562,7 @@ class Refiner:
         # Save the denoised target
         torch.save(X_denoised, cache_path)
         self.X_target_denoised = X_denoised
+        self.X_target_denoised_wis = X_denoised_wis
 
     def _init_Y_target(self):
         """
@@ -513,25 +612,115 @@ class Refiner:
             requires_grad=True
         )
 
+    def init_keypoint_targets(self):
+        """
+        Initialise the keypoint targets.
+        """
+        if not self.args.use_keypoints:
+            self.keypoint_targets = None
+            return
+
+        # Try to load the keypoints data from cache
+        res = None
+        cache_path = self.save_dir / 'cache' / 'keypoints.pt'
+        if cache_path.exists():
+            try:
+                res = torch.load(cache_path, weights_only=True)
+                logger.info(f'Loaded target keypoints data from {cache_path}')
+            except Exception as e:
+                logger.warning(f'Failed to load cached keypoints data: {e}')
+                cache_path.unlink()
+
+        if res is None:
+            logger.info('No cached keypoints data found. Finding keypoints.')
+
+            # Load the keypoint detector
+            self.manager.load_network(self.args.keypoints_model_path, 'keypointdetector')
+            assert self.manager.keypoint_detector is not None, 'No keypoints model loaded, so can\'t predict keypoints.'
+
+            # Predict the keypoints from the input image
+            res = find_keypoints(
+                X_target=self.X_target,
+                X_target_denoised=self.X_target_denoised,
+                manager=self.manager,
+                oversize_input=self.args.keypoints_oversize_input,
+                max_img_size=self.args.keypoints_max_img_size,
+                batch_size=self.args.keypoints_batch_size,
+                min_distance=self.args.keypoints_min_distance,
+                threshold=self.args.keypoints_threshold,
+                exclude_border=self.args.keypoints_exclude_border,
+                blur_kernel_relative_size=self.args.keypoints_blur_kernel_relative_size,
+                n_patches=self.args.keypoints_n_patches,
+                patch_size=self.args.keypoints_patch_size,
+                patch_search_res=self.args.keypoints_patch_search_res,
+                attenuation_sigma=self.args.keypoints_attenuation_sigma,
+                max_attenuation_factor=self.args.keypoints_max_attenuation_factor,
+                low_res_catchment_distance=self.args.keypoints_low_res_catchment_distance,
+                return_everything=True,
+            )
+
+            # Save the keypoints data to cache
+            torch.save(res, cache_path)
+
+            # Destroy the keypoint detector to free up space
+            if self.destroy_keypoint_detector:
+                logger.info('Destroying keypoint detector to free up space.')
+                self.manager.keypoint_detector = None
+                torch.cuda.empty_cache()
+                gc.collect()
+
+        # Save the images and heatmaps
+        save_dir = self.save_dir / 'keypoints'
+        kp_img_args = dict(save_dir=save_dir, marker_type='o', suffix='')
+        save_img(res['X_lr_kp'], 'kp_low_res', save_dir)
+        save_img_with_keypoint_markers(self.X_target, res['Y_lr'], 'original_lowres_markers', **kp_img_args)
+        save_img_with_keypoint_markers(res['X_lr'], res['Y_lr'], 'denoised_lowres_markers', **kp_img_args)
+
+        # Save the patches as a grid
+        save_img_grid(res['X_patches'], 'patches_og', save_dir, coords=res['Y_patches'])
+        save_img_grid(res['X_patches_kp'], 'patches_og_kp', save_dir)
+        save_img_grid(res['X_patches_dn'], 'patches_dn', save_dir, coords=res['Y_patches_dn'])
+        save_img_grid(res['X_patches_dn_kp'], 'patches_dn_kp', save_dir)
+
+        # Plot the combined keypoints
+        save_img_with_keypoint_markers(self.X_target, res['Y_candidates_all'], 'Y_candidates_0_all', **kp_img_args)
+        save_img_with_keypoint_markers(self.X_target, res['Y_candidates_merged'], 'Y_candidates_1_merged',
+                                       **kp_img_args)
+        save_img_with_keypoint_markers(self.X_target, res['Y_candidates_final'], 'Y_candidates_2_final', **kp_img_args)
+
+        # Save the keypoint targets
+        self.keypoint_targets = res['Y_candidates_final_rel']
+        logger.info(f'Found {len(self.keypoint_targets)} keypoints in image.')
+
     def _init_optimiser(self):
         """
         Set up the optimiser and learning rate scheduler.
         """
         logger.info('Initialising optimiser.')
+
+        param_groups = []
+        self.param_group_keys = []
+        for k in ['distances', 'origin', 'rotation', 'material', 'light', 'switches']:
+            lr = getattr(self.args, f'lr_{k}')
+            if lr == 0:
+                continue
+            if k in ['distances', 'origin', 'rotation']:
+                params = [getattr(self.crystal, k)]
+            elif k == 'material':
+                params = [self.crystal.material_roughness, self.crystal.material_ior]
+            elif k == 'light':
+                params = [self.scene.light_radiance]
+            elif k == 'switches':
+                if not self.args.use_conj_switching:
+                    continue
+                params = [self.conj_switch_probs]
+            param_groups.append({'params': params, 'lr': lr})
+            self.param_group_keys.append(k)
+
         optimiser = create_optimizer_v2(
             opt=self.args.opt_algorithm,
             weight_decay=0,
-            model_or_params=[
-                # {'params': [self.crystal.scale], 'lr': self.args.lr_scale},
-                {'params': [self.crystal.distances], 'lr': self.args.lr_distances},
-                {'params': [self.crystal.origin], 'lr': self.args.lr_origin},
-                {'params': [self.crystal.rotation], 'lr': self.args.lr_rotation},
-                {'params': [self.crystal.material_roughness, self.crystal.material_ior], 'lr': self.args.lr_material},
-                # {'params': [self.crystal.material_roughness], 'lr': self.args.lr_material / 10},
-                # {'params': [self.crystal.material_ior], 'lr': self.args.lr_material},
-                {'params': [self.scene.light_radiance], 'lr': self.args.lr_light},
-                {'params': [self.conj_switch_probs], 'lr': self.args.lr_switches},
-            ],
+            model_or_params=param_groups,
         )
 
         # For cycle based schedulers (cosine, tanh, poly) adjust total steps for cycles and cooldown
@@ -563,7 +752,8 @@ class Refiner:
             cycle_mul=self.args.lr_cycle_mul,
             cycle_decay=self.args.lr_cycle_decay,
             cycle_limit=self.args.lr_cycle_limit,
-            k_decay=self.args.lr_k_decay
+            k_decay=self.args.lr_k_decay,
+            plateau_mode='min'
         )
 
         self.optimiser = optimiser
@@ -573,17 +763,21 @@ class Refiner:
         """
         Set up the metrics to track.
         """
-        metric_keys = [
-            'losses/l1',
-            'losses/l2',
-            'losses/perceptual',
-            'losses/latent',
-            'losses/rcf',
-            'losses/anchors',
-        ]
+        metric_keys = ['losses/anchors', ]
+        if self.args.use_inverse_rendering:
+            metric_keys += ['losses/l1', 'losses/l2']
+            if self.args.use_perceptual_model:
+                metric_keys.append('losses/perceptual')
+            if self.args.use_latents_model:
+                metric_keys.append('losses/latent')
+            if self.args.use_rcf_model:
+                metric_keys.append('losses/rcf')
+        if self.args.use_keypoints:
+            metric_keys.append('losses/keypoints')
+
         return metric_keys
 
-    def _init_tb_logger(self):
+    def init_tb_logger(self):
         """Initialise the tensorboard writer."""
         self.tb_logger = SummaryWriter(self.save_dir, flush_secs=5)
 
@@ -607,8 +801,7 @@ class Refiner:
             else:
                 self.crystal.copy_parameters_from(scene.crystal)
                 scene.crystal = self.crystal
-            # self.crystal.to('cpu')
-            self.crystal.to(self.device)
+            self.crystal.to('cpu')
             scene.light_radiance = nn.Parameter(init_tensor(scene.light_radiance, device=self.device),
                                                 requires_grad=True)
             scene.build_mi_scene()
@@ -617,12 +810,11 @@ class Refiner:
 
             # Render the scene to get the initial X_pred
             X_pred = scene.render(seed=get_seed())
-            X_pred = cv2.cvtColor(X_pred, cv2.COLOR_RGB2BGR)
             X_pred = X_pred.astype(np.float32) / 255.
             X_pred = torch.from_numpy(X_pred).permute(2, 0, 1).to(self.device)
             X_pred = F.interpolate(
                 X_pred[None, ...],
-                size=self.args.working_image_size,
+                size=self.args.rendering_size,
                 mode='bilinear',
                 align_corners=False
             )[0].permute(1, 2, 0)
@@ -643,11 +835,25 @@ class Refiner:
         cache_dir = self.save_dir / 'cache'
         scene_path = cache_dir / 'scene.yml'
         X_pred_path = cache_dir / 'X_pred.pt'
+
+        def update_scene_parameters(scene_: Scene):
+            # Update the scene rendering parameters for optimisation
+            scene_.res = self.args.rendering_size
+            scene_.spp = self.args.spp
+            scene_.camera_type = 'perspective'  # thinlens doesn't work for inverse rendering
+            scene_.integrator_max_depth = self.args.integrator_max_depth
+            scene_.integrator_rr_depth = self.args.integrator_rr_depth
+            scene_.light_radiance = nn.Parameter(init_tensor(scene.light_radiance, device=scene.device),
+                                                 requires_grad=True)
+            scene_.build_mi_scene()
+            scene_.crystal.to('cpu')
+            return scene_
+
         if scene_path.exists():
             try:
                 self.X_pred = torch.load(X_pred_path, weights_only=True)
-                self.scene = Scene.from_yml(scene_path)
-                self.scene.crystal.to('cpu')
+                scene = Scene.from_yml(scene_path)
+                self.scene = update_scene_parameters(scene)
                 self.scene_params = mi.traverse(self.scene.mi_scene)
                 self.crystal = self.scene.crystal
                 logger.info('Loaded initial prediction from cache.')
@@ -656,23 +862,26 @@ class Refiner:
                 logger.warning(f'Failed to load cached initial prediction: {e}')
                 scene_path.unlink()
                 X_pred_path.unlink()
-
-        # Use either the original or denoised image as input
         logger.info('Predicting parameters.')
-        if self.args.initial_pred_from == 'original':
-            X_target = self.X_target
-        elif self.args.initial_pred_from == 'denoised':
-            assert self.X_target_denoised is not None, 'Denoised image not available.'
-            X_target = self.X_target_denoised
-        else:
-            raise ValueError(f'Invalid initial_pred_from: {self.args.initial_pred_from}')
-        self.X_target_aug = X_target
-        if isinstance(X_target, list):
-            X_target = X_target[0]
+
+        # Use both the original and denoised image as inputs
+        X_target = torch.stack([self.X_target, self.X_target_denoised]).permute(0, 3, 1, 2)
+
+        # Set up the resizing
+        resize_args = dict(mode='bilinear', align_corners=False)
+        resize_input_old = self.manager.predictor.resize_input
+        self.manager.predictor.resize_input = False
+        oversize_input = self.args.initial_pred_oversize_input
+        img_size = self.args.initial_pred_max_img_size if oversize_input else self.manager.image_shape[-1]
+
+        # Resize the input if needed
+        if oversize_input and X_target.shape[-1] > img_size \
+                or not oversize_input and X_target.shape[-1] != img_size:
+            X_target = F.interpolate(X_target, size=img_size, **resize_args)
 
         # Create a batch
-        bs = self.args.initial_pred_batch_size
-        X_target_batch = X_target.permute(2, 0, 1).repeat(bs, 1, 1, 1)
+        bs = self.args.initial_pred_batch_size // 2
+        X_target_batch = X_target[None, ...].repeat(bs, 1, 1, 1, 1)
 
         # Add some noise to the batch
         noise_scale = torch.linspace(
@@ -681,17 +890,35 @@ class Refiner:
             bs,
             device=self.device
         )
-        X_target_batch += torch.randn_like(X_target_batch) * noise_scale[:, None, None, None]
+        X_target_batch += torch.randn_like(X_target_batch) * noise_scale[:, None, None, None, None]
+
+        # Reshape so the first half of the batch is the original images and the second half is the denoised images
+        X_target_batch = torch.cat([X_target_batch[:, 0], X_target_batch[:, 1]])
 
         # Predict the parameters
         Y_pred_batch = self.manager.predict(X_target_batch)
 
+        # Restore the resize input setting
+        self.manager.predictor.resize_input = resize_input_old
+
         # Destroy the predictor to free up space
-        logger.info('Destroying predictor to free up space.')
-        self.manager.predictor = None
-        del self.manager.predictor
-        torch.cuda.empty_cache()
-        gc.collect()
+        if self.destroy_predictor:
+            logger.info('Destroying predictor to free up space.')
+            self.manager.predictor = None
+            torch.cuda.empty_cache()
+            gc.collect()
+
+        # Set the target image for loss calculations
+        render_size = self.manager.crystal_renderer.dataset_args.image_size  # Use the rendering size the predictor was trained on
+        self.X_target_aug = self._resize(self.X_target_denoised, render_size)
+
+        # Ensure the inverse rendering losses are turned on
+        use_inverse_rendering = self.args.use_inverse_rendering
+        self.args.use_inverse_rendering = True
+        use_latents_model = self.args.use_latents_model
+        self.args.use_latents_model = self.args.w_latent > 0
+        use_perceptual_model = self.args.use_perceptual_model
+        self.args.use_perceptual_model = self.args.w_perceptual > 0
 
         # Generate some images from the parameters
         X_pred_batch = []
@@ -703,24 +930,27 @@ class Refiner:
             X_pred_i, scene_i = self.manager.crystal_renderer.render_from_parameters(r_params, return_scene=True)
             scene_batch.append(scene_i)
 
-            # Resize the image to the working image size
+            # Add the image to the batch
             X_pred_i = X_pred_i.astype(np.float32) / 255.
-            X_pred_i = torch.from_numpy(X_pred_i).permute(2, 0, 1).to(self.device)
-            X_pred_i = F.interpolate(
-                X_pred_i[None, ...],
-                size=self.args.working_image_size,
-                mode='bilinear',
-                align_corners=False
-            )[0].permute(1, 2, 0)
+            X_pred_i = torch.from_numpy(X_pred_i).to(self.device)
             X_pred_batch.append(X_pred_i)
 
             # Multiscale
             if self.args.multiscale:
                 X_pred_i = to_multiscale(X_pred_i, self.blur)
 
-            # Calculate losses
+            # Set the variables temporarily
             self.X_pred = X_pred_i
+            self.scene = scene_i
             self.crystal = scene_i.crystal
+            self.crystal.to('cpu')
+
+            # Project the crystal mesh - reinitialise the projector for the new scene
+            if self.args.use_keypoints and len(self.keypoint_targets) > 0:
+                self._init_projector()
+                self.projector.project(generate_image=False)
+
+            # Calculate losses
             loss_i, _ = self._calculate_losses()
             losses.append(loss_i.item())
 
@@ -728,6 +958,12 @@ class Refiner:
             X = X_pred_i[0] if isinstance(X_pred_i, list) else X_pred_i
             img = Image.fromarray(to_numpy(X * 255).astype(np.uint8))
             img.save(save_dir / f'{i:02d}_noise={noise_scale[i]:.3f}_loss={loss_i:.4E}.png')
+
+        # Restore the inverse rendering losses setting
+        del self.projector
+        self.args.use_inverse_rendering = use_inverse_rendering
+        self.args.use_latents_model = use_latents_model
+        self.args.use_perceptual_model = use_perceptual_model
 
         # Pick the best image
         best_idx = np.argmin(losses)
@@ -739,14 +975,7 @@ class Refiner:
         img.save(save_dir / f'best_idx={best_idx}.png')
 
         # Update the scene rendering parameters for optimisation
-        wis = (self.args.working_image_size, self.args.working_image_size)
-        scene.res = wis[0]
-        scene.spp = self.args.spp
-        scene.integrator_max_depth = self.args.integrator_max_depth
-        scene.integrator_rr_depth = self.args.integrator_rr_depth
-        scene.camera_type = 'perspective'  # thinlens doesn't work for inverse rendering
-        scene.light_radiance = nn.Parameter(init_tensor(scene.light_radiance, device=scene.device), requires_grad=True)
-        scene.build_mi_scene()
+        scene = update_scene_parameters(scene)
         scene_params = mi.traverse(scene.mi_scene)
 
         # Render the new scene
@@ -757,7 +986,7 @@ class Refiner:
         scene.crystal.to('cpu')
 
         # Save variables
-        scene.to_yml(scene_path)
+        scene.to_yml(scene_path, overwrite=True)
         torch.save(X_pred, X_pred_path)
 
         # Set variables
@@ -765,43 +994,79 @@ class Refiner:
         self.scene = scene
         self.scene_params = scene_params
         self.crystal = scene.crystal
+        self._init_projector()
 
-    def train(self, callback: Optional[callable] = None):
+    def train(
+            self,
+            callback: Callable | None = None,
+            distances_est: Tensor | None = None,
+            distances_min: Tensor | None = None,
+    ):
         """
         Train the parameters for a number of steps.
         """
+        if self.args.use_keypoints and self.keypoint_targets is None:
+            self.init_keypoint_targets()
         if self.scene is None:
             self.make_initial_prediction()
         n_steps = self.args.max_steps
         start_step = self.step
         end_step = start_step + n_steps
-        logger.info(f'Training for {n_steps} steps. Starting at step {start_step}.')
+        logger.info(f'Training for max {n_steps} steps. Starting at step {start_step}.')
         logger.info(f'Logs path: {self.save_dir}.')
         log_freq = self.args.log_every_n_steps
         running_loss = 0.
         running_metrics = {k: 0. for k in self.metric_keys}
         running_tps = 0
+        use_inverse_rendering = self.args.use_inverse_rendering  # Save the inverse rendering setting
+        self.distances_est = distances_est
+        self.distances_min = distances_min
+
+        # (Re-)initialise the optimiser, learning rate scheduler and convergence detector
+        self._init_optimiser()
+        self._init_convergence_detector()
+
+        # Plot initial prediction
+        self.step = start_step - 1
+        self._make_plots(force=True)
 
         for step in range(start_step, end_step):
             start_time = time.time()
             self.step = step
+
+            # Conditionally enable the inverse rendering
+            self.args.use_inverse_rendering = use_inverse_rendering and step >= self.args.ir_wait_n_steps
+
+            # Train for a single step
             loss, stats = self._train_step()
 
-            # Log the material parameter values
+            # Adjust tracking loss to include the IR loss placeholder
+            loss_track = loss.detach().cpu()
+            if use_inverse_rendering and not self.args.use_inverse_rendering and self.args.ir_loss_placeholder > 0:
+                loss_track += self.args.ir_loss_placeholder
+            self.tb_logger.add_scalar('losses/total_tracked', loss_track.item(), step)
+
+            # Log the parameter values
             self.tb_logger.add_scalar('params/roughness', self.crystal.material_roughness.item(), step)
             self.tb_logger.add_scalar('params/ior', self.crystal.material_ior.item(), step)
-
-            # Log the conjugate switching probabilities
+            for i, val in enumerate(self.scene.light_radiance):
+                self.tb_logger.add_scalar(f'params/light_{"rgb"[i]}', val.item(), step)
             if self.args.use_conj_switching:
                 for i, (pair, prob) in enumerate(zip(self.conj_pairs, self.conj_switch_probs)):
                     ab = ','.join([f'{k}' for k in self.crystal.all_miller_indices[pair[0]][:2].tolist()])
                     self.tb_logger.add_scalar(f'params/conj_switch_probs/{ab}', prob.item(), step)
 
             # Log learning rates and update them
-            for i, param_group in enumerate(['distances', 'origin', 'rotation', 'material', 'light']):
+            for i, param_group in enumerate(self.param_group_keys):
                 self.tb_logger.add_scalar(f'lr/{param_group}', self.optimiser.param_groups[i]['lr'], step)
             if self.args.lr_scheduler != 'none':
-                self.lr_scheduler.step(step, loss)
+                self.lr_scheduler.step(step, loss_track)
+
+            # Log convergence statistics
+            for i, val in enumerate(self.convergence_detector.convergence_count):
+                param_name = self.convergence_detector_param_names[i]
+                self.tb_logger.add_scalar(f'convergence/{i:02d}_{param_name}', val, step)
+            self.tb_logger.add_scalar(f'convergence/bad_epochs', self.lr_scheduler.lr_scheduler.num_bad_epochs, step)
 
             # Track running loss and metrics
             running_loss += loss
@@ -813,31 +1078,48 @@ class Refiner:
 
             # Log statistics every X steps
             if (step + 1) % log_freq == 0:
-                log_msg = f'[{step + 1}/{n_steps}]' \
-                          f'\tLoss: {running_loss / log_freq:.4E}'
+                log_msg = f'[{step + 1}/{n_steps}]\tLoss: {running_loss / log_freq:.4E}'
                 for k, v in running_metrics.items():
                     k = k.replace('losses/', '')
                     log_msg += f'\t{k}: {v / log_freq:.4E}'
                 logger.info(log_msg)
                 running_loss = 0.
                 running_metrics = {k: 0. for k in self.metric_keys}
-                seconds_left = float((self.args.max_steps - step) * time_per_step / log_freq)
+                average_tps = running_tps / log_freq
+                running_tps = 0
+                seconds_left = float((self.args.max_steps - step) * average_tps)
                 logger.info('Time per step: {}, Est. complete in: {}'.format(
-                    str(timedelta(seconds=time_per_step)),
+                    str(timedelta(seconds=average_tps)),
                     str(timedelta(seconds=seconds_left))))
 
             # Plots
-            self._make_plots(force=step == 0)
+            self._make_plots()
 
             # Callback
             if callback is not None:
-                continue_signal = callback(step)
+                continue_signal = callback(step, loss, stats)
                 if continue_signal is False:
                     logger.info('Received stop signal. Stopping training.')
                     break
 
+            # Check for convergence
+            check_vals = torch.concatenate([
+                # loss_track[None, ...],
+                self.crystal.distances.detach().cpu(),
+                self.crystal.material_roughness[None, ...].detach().cpu(),
+                self.crystal.material_ior[None, ...].detach().cpu(),
+                self.scene.light_radiance.detach().cpu(),
+            ])
+            self.convergence_detector.forward(check_vals, first_val=step == 0)
+            if self.convergence_detector.converged.all():
+                logger.info(f'Converged after {step + 1} iterations.')
+                break
+
         # Final plots
         self._make_plots(force=True)
+
+        # Restore the inverse rendering losses setting
+        self.args.use_inverse_rendering = use_inverse_rendering
 
         logger.info('Training complete.')
 
@@ -852,20 +1134,32 @@ class Refiner:
 
         # Take optimisation step
         if (self.step + 1) % self.args.acc_grad_steps == 0:
+            # Clip gradients
             if self.args.clip_grad_norm > 0:
                 nn.utils.clip_grad_norm_([self.crystal.distances], max_norm=self.args.clip_grad_norm)
+                nn.utils.clip_grad_norm_([self.crystal.rotation], max_norm=self.args.clip_grad_norm)
+
+            # Check for bad gradients
             for group in self.optimiser.param_groups:
                 for param in group['params']:
                     if param.grad is not None:
-                        assert not is_bad(param.grad), 'Bad gradients detected!'
+                        if is_bad(param.grad):
+                            logger.warning('Bad gradients detected!')
+                            param.grad.zero_()
+
+            # Optimisation step
             self.optimiser.step()
             self.optimiser.zero_grad()
+
+            # Clamp parameters
             self.crystal.clamp_parameters(rescale=False)
             self.conj_switch_probs.data = torch.clamp(
                 self.conj_switch_probs,
                 min=self.args.conj_switch_prob_min,
                 max=self.args.conj_switch_prob_max
             )
+            if self.distances_min is not None:
+                self.crystal.distances.data = self.crystal.distances.clamp(min=self.distances_min)
 
             # Actually switch the distances where the switch prob is high enough
             if self.args.use_conj_switching:
@@ -886,7 +1180,6 @@ class Refiner:
         """
         Process a single step.
         """
-        device = self.scene.device
         rotation = self.crystal.rotation
         distances = self.crystal.distances
         roughness = self.crystal.material_roughness
@@ -937,23 +1230,24 @@ class Refiner:
 
         # Rebuild the mesh
         v, f = self.crystal.build_mesh(distances=distances, rotation=rotation, update_uv_map=False)
-        v, f = v.to(device), f.to(device)
-        eta = ior.to(device) / self.scene.crystal_material_bsdf['ext_ior']
-        roughness = roughness.to(device).clone()
-        radiance = radiance.to(device).clone()
 
         # Render new image
         if self.args.use_inverse_rendering:
+            device = self.scene.device
+            v, f = v.to(device), f.to(device)
+            eta = ior.to(device) / self.scene.crystal_material_bsdf['ext_ior']
+            roughness = roughness.to(device).clone()
+            radiance = radiance.to(device).clone()
             X_pred = self._render_image(v, f, eta, roughness, radiance, seed=self.step)
             X_pred = torch.clip(X_pred, 0, 1)
             if self.args.multiscale:
                 X_pred = to_multiscale(X_pred, self.blur)
         else:
-            X_pred = torch.zeros_like(self.X_target)
+            X_pred = torch.zeros_like(self.X_target_wis)
         self.X_pred = X_pred
 
         # Use denoised target if available
-        X_target = self.X_target_denoised if self.X_target_denoised is not None else self.X_target
+        X_target = self.X_target_denoised_wis if self.X_target_denoised is not None else self.X_target_wis
 
         # Add some noise to the target image
         if isinstance(X_target, list):
@@ -964,6 +1258,10 @@ class Refiner:
             X_target_aug.clip_(0, 1)
         self.X_target_aug = X_target_aug
 
+        # Project the crystal mesh
+        if (self.args.use_keypoints and len(self.keypoint_targets) > 0) or len(self.anchors) > 0:
+            self.projector.project(generate_image=False)
+
         # Calculate losses
         loss, stats = self._calculate_losses(distances=distances)
         self.loss = loss.item()
@@ -971,14 +1269,24 @@ class Refiner:
         return loss, stats
 
     @dr.wrap_ad(source='torch', target='drjit')
-    def _render_image(self, vertices, faces, eta, roughness, radiance, seed=1):
+    def _render_image(
+            self,
+            vertices: mi.TensorXf,
+            faces: mi.TensorXi64,
+            eta: mi.TensorXf,
+            roughness: mi.TensorXf,
+            radiance: mi.TensorXf,
+            seed: int = 1
+    ):
+        if seed < 0:
+            seed = 0
         self.scene_params[Scene.VERTEX_KEY] = dr.ravel(vertices)
         self.scene_params[Scene.FACES_KEY] = dr.ravel(faces)
         self.scene_params[Scene.ETA_KEY] = dr.ravel(eta)
         self.scene_params[Scene.ROUGHNESS_KEY] = dr.ravel(roughness)
         self.scene_params[Scene.RADIANCE_KEY] = dr.unravel(mi.Color3f, radiance)
         self.scene_params.update()
-        return mi.render(self.scene.mi_scene, self.scene_params, seed=seed)
+        return mi.render(self.scene.mi_scene, self.scene_params, seed=max(0, seed))
 
     def _calculate_losses(
             self,
@@ -988,50 +1296,72 @@ class Refiner:
         """
         Calculate losses.
         """
+
+        # Inverse rendering losses
         if self.args.use_inverse_rendering:
             l1_loss, l1_stats = self._img_loss(X_target=self.X_target_aug, X_pred=self.X_pred, loss_type='l1',
                                                decay_factor=self.args.l_decay_l1)
             l2_loss, l2_stats = self._img_loss(X_target=self.X_target_aug, X_pred=self.X_pred, loss_type='l2',
                                                decay_factor=self.args.l_decay_l2)
+            percept_loss, percept_stats = self._perceptual_loss()
+            latent_loss, latent_stats = self._latents_loss()
+            rcf_loss, rcf_stats = self._rcf_loss(is_patch=is_patch)
         else:
             l1_loss, l1_stats = torch.tensor(0.), {}
             l2_loss, l2_stats = torch.tensor(0.), {}
-        percept_loss, percept_stats = self._perceptual_loss()
-        latent_loss, latent_stats = self._latents_loss()
-        rcf_loss, rcf_stats = self._rcf_loss(is_patch=is_patch)
-        overshoot_loss, overshoot_stats = self._overshoot_loss(distances=distances)
-        symmetry_loss, symmetry_stats = self._symmetry_loss()
-        z_pos_loss, z_pos_stats = self._z_pos_loss()
-        rxy_loss, rxy_stats = self._rotation_xy_loss()
+            percept_loss, percept_stats = torch.tensor(0.), {}
+            latent_loss, latent_stats = torch.tensor(0.), {}
+            rcf_loss, rcf_stats = torch.tensor(0.), {}
+
+        # Combine image losses
+        image_loss = l1_loss.cpu() * self.args.w_img_l1 \
+                     + l2_loss.cpu() * self.args.w_img_l2 \
+                     + percept_loss.cpu() * self.args.w_perceptual \
+                     + latent_loss.cpu() * self.args.w_latent \
+                     + rcf_loss.cpu() * self.args.w_rcf
+
         if not is_patch:
+            # Regularisations
+            overshoot_loss, overshoot_stats = self._overshoot_loss(distances=distances)
+            symmetry_loss, symmetry_stats = self._symmetry_loss()
+            z_pos_loss, z_pos_stats = self._z_pos_loss()
+            rxy_loss, rxy_stats = self._rotation_xy_loss()
+            switch_loss, switch_stats = self._switch_loss()
+            temporal_loss, temporal_stats = self._temporal_loss()
+
+            # Keypoints and anchors
+            keypoints_loss, keypoints_stats = self._keypoints_loss()
+            anchors_loss, anchors_stats = self._anchors_loss()
+
+            # Combine losses
+            loss = image_loss \
+                   + overshoot_loss * self.args.w_overshoot \
+                   + symmetry_loss * self.args.w_symmetry \
+                   + z_pos_loss * self.args.w_z_pos \
+                   + rxy_loss * self.args.w_rotation_xy \
+                   + switch_loss * self.args.w_switch_probs \
+                   + temporal_loss * self.args.w_temporal \
+                   + keypoints_loss * self.args.w_keypoints \
+                   + anchors_loss * self.args.w_anchors
+
+            # Patches - recalculate the image losses for each patch
             patch_loss, patch_stats = self._patches_loss()
-        switch_loss, switch_stats = self._switch_loss()
-        anchors_loss, anchors_stats = self._anchors_loss()
-
-        # Combine losses
-        loss = l1_loss * self.args.w_img_l1 \
-               + l2_loss * self.args.w_img_l2 \
-               + percept_loss * self.args.w_perceptual \
-               + latent_loss * self.args.w_latent \
-               + rcf_loss * self.args.w_rcf \
-               + overshoot_loss * self.args.w_overshoot \
-               + symmetry_loss * self.args.w_symmetry \
-               + z_pos_loss * self.args.w_z_pos \
-               + rxy_loss * self.args.w_rotation_xy \
-               + switch_loss * self.args.w_switch_probs \
-               + anchors_loss * self.args.w_anchors
-
-        if not is_patch:
             loss = loss * self.args.w_fullsize + patch_loss * self.args.w_patches
-        assert not is_bad(loss), 'Bad loss!'
 
-        stats = {
-            'losses/total': loss.item(),
-            **l1_stats, **l2_stats, **percept_stats, **latent_stats, **rcf_stats, **overshoot_stats, **symmetry_stats,
-            **z_pos_stats, **rxy_stats, **switch_stats, **anchors_stats
-        }
-        if not is_patch:
-            stats.update(patch_stats)
+            # Combine stats
+            stats = {
+                'losses/total': loss.item(),
+                **l1_stats, **l2_stats, **percept_stats, **latent_stats, **rcf_stats, **overshoot_stats,
+                **symmetry_stats,
+                **z_pos_stats, **rxy_stats, **switch_stats, **temporal_stats, **keypoints_stats, **anchors_stats,
+                **patch_stats
+            }
+
+        else:
+            loss = image_loss
+            stats = {**l1_stats, **l2_stats, **percept_stats, **latent_stats, **rcf_stats}
+
+        assert not is_bad(loss), 'Bad loss!'
 
         return loss, stats
 
@@ -1060,8 +1390,8 @@ class Refiner:
                 X_target = X_target[None, ...].expand_as(X_pred)
             else:
                 assert X_target.ndim == 4, f'Image shapes do not match: {X_target.shape} != {X_pred.shape}'
-                assert len(
-                    X_target) == 1, f'Target image must be a single image, not a batch. {len(X_target)} received.'
+                assert len(X_target) == 1, \
+                    f'Target image must be a single image, not a batch. {len(X_target)} received.'
                 X_target = X_target.expand_as(X_pred[0])
 
         # Multiscale losses
@@ -1153,7 +1483,12 @@ class Refiner:
         model_input = torch.cat([X_target, X_pred]).permute(0, 3, 1, 2)
 
         # Resize images for input
-        input_size = self.dn_config.data.init_args.train.params.config.size
+        if self.args.latents_input_size == 0:
+            input_size = self.dn_config.data.init_args.train.params.config.size
+        elif self.args.latents_input_size == -1:
+            input_size = model_input.shape[-1]
+        else:
+            input_size = self.args.latents_input_size
         if model_input.shape[-1] != input_size:
             model_input = F.interpolate(model_input, size=(input_size, input_size), mode='bilinear',
                                         align_corners=False)
@@ -1232,7 +1567,7 @@ class Refiner:
         """
         Calculate the symmetry loss - how close are the face distances within each group.
         """
-        loss = torch.tensor(0., device=self.device)
+        loss = torch.tensor(0., device=self.crystal.origin.device)
         if self.symmetry_idx is None:
             return loss, {}
         for i, hkl in enumerate(self.manager.ds.dataset_args.miller_indices):
@@ -1267,12 +1602,13 @@ class Refiner:
         """
         loss = torch.tensor(0., device=self.device)
         stats = {}
-        if self.args.n_patches is None or self.args.n_patches <= 0:
+        if not self.args.use_inverse_rendering or self.args.n_patches is None or self.args.n_patches <= 0 or self.scene_params is None:
             return loss, stats
 
         ps = self.args.patch_size
         ps2 = ps // 2
-        wis = self.args.working_image_size
+        wis = self.args.rendering_size
+        device = self.scene.device
 
         # If multiscale, just use the first (largest) image
         X_target_og = self.X_target_aug
@@ -1285,47 +1621,56 @@ class Refiner:
             X_target = X_target_og.clone()
             X_pred = X_pred_og.clone()
 
-        # Use the L1 error map to select the best patches
-        l1 = (X_pred - X_target).abs().mean(dim=-1).detach()
-        patch_centres = []
+        # Use the L2 error map to select the best patches
+        with torch.no_grad():
+            l2 = ((X_pred - X_target)**2).mean(dim=-1).detach()
+            error_map = F.interpolate(
+                l2[None, None, ...], size=self.X_target.shape[0],
+                mode='bilinear', align_corners=False
+            )[0, 0]
+            X_target_patches, patch_centres = generate_attention_patches(
+                X=self.X_target_denoised.permute(2, 0, 1),
+                X_kp=error_map,
+                patch_search_res=256,
+                n_patches=self.args.n_patches,
+                patch_size=ps,
+                attenuation_sigma=0.5,
+                max_attenuation_factor=1.5,
+            )
+            X_target_patches = F.interpolate(
+                X_target_patches[0],
+                size=(wis, wis),
+                mode='bilinear', align_corners=False
+            ).permute(0, 2, 3, 1)
+
+        # Update the film size parameters
+        sf = wis / ps
+        self.scene_params[Scene.FILM_SIZE_KEY] = round(self.X_target.shape[0] * sf)
+        self.scene_params[Scene.FILM_CROP_SIZE_KEY] = self.args.rendering_size
+
+        # Render the patches
         X_pred_patches = []
-        X_target_patches = []
-        for i in range(self.args.n_patches):
-            with torch.no_grad():
-                # Calculate the sum of errors for each possible patch position
-                l1_patch_sums = F.conv2d(l1[None, ...], torch.ones(1, 1, ps, ps).to(self.device), padding=ps2)[0]
-                if l1_patch_sums.shape[0] != wis:
-                    l1_patch_sums = F.interpolate(
-                        l1_patch_sums[None, None, ...],
-                        size=wis,
-                        mode='bilinear',
-                        align_corners=False
-                    )[0, 0]
+        for i, patch_centre in enumerate(patch_centres):
+            vertices = self.crystal.mesh_vertices.to(device)
+            faces = self.crystal.mesh_faces.to(device)
+            eta = self.crystal.material_ior.to(device) / self.scene.crystal_material_bsdf['ext_ior']
+            roughness = self.crystal.material_roughness.to(device).clone()
+            radiance = self.scene.light_radiance.to(device).clone()
+            self.scene_params[Scene.FILM_CROP_OFFSET_KEY] = (patch_centre * sf - wis / 2).round().int().tolist()
+            X_pred_patch = self._render_image(
+                vertices, faces, eta, roughness, radiance,
+                seed=self.step + i
+            )
+            X_pred_patches.append(X_pred_patch)
+        X_pred_patches = torch.stack(X_pred_patches)
 
-                # Find the index of the maximum error sum
-                max_idx = torch.argmax(l1_patch_sums).item()
-                y = max_idx // wis
-                x = max_idx % wis
-                y = min(max(ps2, y), wis - ps2)
-                x = min(max(ps2, x), wis - ps2)
-                patch_centres.append((x, y))
-
-            # Crop patches
-            X_pred_patch = X_pred[y - ps2:y + ps2, x - ps2:x + ps2]
-            X_target_patch = X_target[y - ps2:y + ps2, x - ps2:x + ps2]
-            X_pred_patches.append(X_pred_patch.detach())
-            X_target_patches.append(X_target_patch.detach())
-
-            # Reduce the error map around the selected patch
-            l1[y - ps2:y + ps2, x - ps2:x + ps2] /= 1.5
-
-        # Upscale the patches to the working image size
-        patches = torch.stack(X_pred_patches + X_target_patches).permute(0, 3, 1, 2)
-        upscaled_patches = F.interpolate(patches, size=wis, mode='bilinear', align_corners=False)
+        # Restore full-size rendering parameters
+        self.scene_params[Scene.FILM_SIZE_KEY] = self.args.rendering_size
+        self.scene_params[Scene.FILM_CROP_OFFSET_KEY] = [0, 0]
 
         # Calculate losses for each pair of patches
-        self.X_pred = upscaled_patches[:self.args.n_patches].permute(0, 2, 3, 1)
-        self.X_target_aug = upscaled_patches[self.args.n_patches:].permute(0, 2, 3, 1)
+        self.X_pred = X_pred_patches
+        self.X_target_aug = X_target_patches
         patch_loss, patch_stats = self._calculate_losses(is_patch=True)
         patch_stats = {f'patches/{k.replace("losses/", "")}/{i}': v for k, v in patch_stats.items() if 'losses/' in k}
         stats.update(patch_stats)
@@ -1339,8 +1684,8 @@ class Refiner:
 
         # Save the patches
         self.patch_centres = patch_centres
-        self.X_pred_patches = torch.stack(X_pred_patches)
-        self.X_target_patches = torch.stack(X_target_patches)
+        self.X_pred_patches = X_pred_patches
+        self.X_target_patches = X_target_patches
 
         return loss, stats
 
@@ -1348,7 +1693,7 @@ class Refiner:
         """
         Calculate the conjugate switching loss.
         """
-        loss = torch.tensor(0., device=self.device)
+        loss = torch.tensor(0., device=self.conj_switch_probs.device)
         stats = {}
         if not self.args.use_conj_switching or self.conj_switch_probs is None:
             return loss, stats
@@ -1363,25 +1708,79 @@ class Refiner:
 
         return loss, stats
 
+    def _temporal_loss(self) -> Tuple[Tensor, Dict[str, float]]:
+        """
+        Calculate the temporal regularisation loss.
+        """
+        loss = torch.tensor(0., device=self.crystal.distances.device)
+        stats = {}
+        if self.distances_est is None:
+            return loss, stats
+
+        # L2 loss between the current distances and estimated from the sequence history
+        loss = torch.mean((self.crystal.distances - self.distances_est)**2)
+        stats['losses/temporal_dists'] = loss.item()
+
+        return loss, stats
+
+    def _keypoints_loss(self):
+        """
+        Calculate the keypoints loss.
+        """
+        loss = torch.tensor(0., device=self.keypoint_targets.device)
+        stats = {}
+        if not self.args.use_keypoints or self.keypoint_targets is None or len(self.keypoint_targets) == 0:
+            return loss, stats
+
+        # Calculate the closest distances between the projected keypoints and the detected targets
+        k_pred = self.projector.keypoints_rel
+        k_target = self.keypoint_targets
+        if self.args.keypoints_loss_type == 'mindists':
+            distances = torch.cdist(k_pred, k_target)
+            d_target_to_pred = distances.amin(dim=0)
+            d_pred_to_target = distances.amin(dim=1)
+            loss = d_target_to_pred.mean() + d_pred_to_target.mean()
+
+        # Calculate the sinkhorn loss
+        elif self.args.keypoints_loss_type == 'sinkhorn':
+            loss_mod = SamplesLoss('sinkhorn', p=2, blur=0.0001, reach=0.1)
+            loss = loss_mod(k_pred, k_target)
+
+        # Calculate the hausdorff loss
+        elif self.args.keypoints_loss_type == 'hausdorff':
+            loss_mod = SamplesLoss('hausdorff', p=2, blur=0.01)
+            loss = loss_mod(k_pred, k_target)
+
+        else:
+            raise RuntimeError(f'Unknown keypoints loss type: {self.args.keypoints_loss_type}.')
+
+        stats[f'losses/keypoints'] = loss.item()
+
+        return loss, stats
+
     def _anchors_loss(self):
         """
         Calculate the loss for manual constraints.
         """
-        loss = torch.tensor(0., device=self.device)
+        loss = torch.tensor(0.)
         stats = {}
         if len(self.anchors) == 0:
             return loss, stats
 
-        # Project the vertices
-        self.projector.project(generate_image=False)
-
         # Calculate the loss for each anchor
         losses = []
         for vertex_key, anchor_coords in self.anchors.items():
+            vertex_id, face_idx = vertex_key
+            cluster_idx = self.projector.cluster_idxs[self.projector.vertex_ids == vertex_id]
+            is_visible = False
+            if len(cluster_idx) > 0:
+                cluster_key = (cluster_idx.item(), face_idx)
+                is_visible = cluster_key in self.projector.projected_vertex_keys
+
             # Vertex is visible, so calculate the distance between the vertex and the target anchor location
-            if vertex_key in self.projector.projected_vertex_keys:
-                idx = self.projector.projected_vertex_keys.index(vertex_key)
-                v_coords = self.projector.projected_vertex_coords[idx]
+            if is_visible:
+                idx = self.projector.projected_vertex_keys.index(cluster_key)
+                v_coords = self.projector.projected_vertices_rel[idx]
                 l = (v_coords - anchor_coords).norm()
                 losses.append(l)
 
@@ -1415,9 +1814,9 @@ class Refiner:
             with torch.no_grad():
                 fig = self._plot_comparison()
                 self._save_plot(fig, 'optimisation')
-            # if self.patch_centres is not None:
-            #     fig = self._plot_patches()
-            #     self._save_plot(fig, 'patches')
+            if self.patch_centres is not None:
+                fig = self._plot_patches()
+                self._save_plot(fig, 'patches')
 
     @torch.no_grad()
     def _plot_comparison(self) -> Figure:
@@ -1425,9 +1824,15 @@ class Refiner:
         Plot the target and optimised images side by side.
         """
         X_target_og = self.X_target if isinstance(self.X_target, Tensor) else self.X_target[0]
-        X_target_aug = self.X_target_aug if isinstance(self.X_target_aug, Tensor) else self.X_target_aug[0]
-        X_pred = [self.X_pred] if isinstance(self.X_pred, Tensor) else self.X_pred
-        Xs = [X_target_og, X_target_aug, *X_pred]
+        X_target_dn = self.X_target_denoised if isinstance(self.X_target_denoised, Tensor) \
+            else self.X_target_denoised[0]
+        Xs = [X_target_og, X_target_dn]
+        if self.args.use_inverse_rendering:
+            X_pred = [self.X_pred] if isinstance(self.X_pred, Tensor) else self.X_pred
+            Xs.extend(X_pred)
+        if self.args.use_keypoints:
+            Xs.append(X_target_dn)
+        n_cols = len(Xs)
 
         n_rows = 3
         rcf_feats = None
@@ -1440,12 +1845,6 @@ class Refiner:
                 assert len(f) >= 3, 'Number of RCF features must match the number of images.'
             n_rows += len(self.args.plot_rcf_feats)
 
-        n_cols = 3
-        if self.args.plot_n_samples == -1:
-            n_cols += len(X_pred) - 1
-        else:
-            n_cols += min(len(X_pred) - 1, self.args.plot_n_samples)
-
         fig, axes = plt.subplots(n_rows, n_cols, figsize=(n_cols * 2.3, n_rows * 2.4), squeeze=False)
         for i in range(n_cols):
             img = Xs[i]
@@ -1457,21 +1856,48 @@ class Refiner:
             ax.axis('off')
 
             # Show the patches
-            if i == 2 and self.patch_centres is not None:
-                ps = self.args.patch_size
-                ax.scatter(*np.array(self.patch_centres).T, c='r', s=25, marker='x')
-                for x, y in self.patch_centres:
-                    ax.scatter(x, y, c='r', s=25, marker='x')
-                    rect = Rectangle((x - ps // 2, y - ps // 2), ps, ps, linewidth=1, edgecolor='r', facecolor='none',
-                                     linestyle='--')
+            if i == 2 and self.args.use_inverse_rendering and self.patch_centres is not None:
+                sf = X_target_og.shape[0] / img.shape[0]
+                patch_centres = to_numpy(self.patch_centres) / sf
+                ps = self.args.patch_size / X_target_og.shape[0] * img.shape[0]
+                for x, y in patch_centres:
+                    ax.scatter(x, y, c='darkblue', s=20, marker='x', alpha=0.7)
+                    rect = Rectangle((x - ps // 2, y - ps // 2), ps, ps, linewidth=0.7, edgecolor='darkblue',
+                                     facecolor='none', linestyle='--', alpha=0.7)
                     ax.add_patch(rect)
+
+            # Show the target and predicted keypoints
+            if self.args.use_keypoints and i == len(Xs) - 1 and self.keypoint_targets is not None:
+                kp_target_abs = to_numpy(to_absolute_coordinates(self.keypoint_targets, img.shape[0]))
+                kp_pred_abs = to_numpy(to_absolute_coordinates(self.projector.keypoints_rel, img.shape[0]))
+                ax.scatter(*kp_target_abs.T,
+                           facecolors=(0, 0.7, 0, 0.2),
+                           edgecolors=(0, 0.7, 0, 0.5),
+                           linewidths=0.5, s=25)
+                ax.scatter(*kp_target_abs.T, marker='x', c='g', s=0.2, alpha=0.5)
+                ax.scatter(*kp_pred_abs.T,
+                           facecolors=(1, 0, 0, 0.2),
+                           edgecolors=(1, 0, 0, 0.5),
+                           linewidths=0.5, s=25)
+                ax.scatter(*kp_pred_abs.T, marker='x', c='r', s=0.2, alpha=0.5)
 
             # Add wireframe overlay
             ax = axes[1, i]
+            if img.ndim == 2:
+                img = np.stack([img] * 3, axis=-1)
             self.projector.set_background(img)
-            img_overlay = to_numpy(self.projector.project() * 255).astype(np.uint8).squeeze().transpose(1, 2, 0)
+            img_overlay = to_numpy(self.projector.generate_image() * 255).astype(np.uint8).squeeze().transpose(1, 2, 0)
             ax.imshow(img_overlay)
             ax.axis('off')
+
+            # Show the target keypoints
+            if self.args.use_keypoints and i == len(Xs) - 1 and self.keypoint_targets is not None:
+                kp_target_abs = to_numpy(to_absolute_coordinates(self.keypoint_targets, img_overlay.shape[0]))
+                ax.scatter(*kp_target_abs.T,
+                           facecolors=(0, 0.7, 0, 0.2),
+                           edgecolors=(0, 0.7, 0, 0.5),
+                           linewidths=0.5, s=25)
+                ax.scatter(*kp_target_abs.T, marker='x', c='g', s=0.2, alpha=0.5)
 
             # RCF features
             if rcf_feats is not None:
@@ -1492,16 +1918,23 @@ class Refiner:
         shared_args = dict(
             manager=self.manager,
             Y_pred={
-                'transformation': torch.cat(
-                    [self.crystal.origin, self.crystal.scale[None, ...], self.crystal.rotation]),
-                'material': torch.cat(
-                    [self.crystal.material_ior[None, ...], self.crystal.material_roughness[None, ...]])
+                'transformation': torch.cat([
+                    self.crystal.origin, self.crystal.scale[None, ...], self.crystal.rotation
+                ]),
+                'material': torch.cat([
+                    self.crystal.material_ior[None, ...], self.crystal.material_roughness[None, ...]
+                ]),
+                'light': self.scene.light_radiance
             },
             colour_pred=self.args.plot_colour_pred,
             show_legend=False
         )
         plot_transformation(axes[n_rows - 1, 1], **shared_args)
         plot_material(axes[n_rows - 1, 2], **shared_args)
+        if n_cols > 3:
+            ax = axes[n_rows - 1, 3]
+            plot_light(ax, **shared_args)
+            ax.set_ylim(0, 1)
 
         fig.suptitle(f'Step {self.step + 1} Loss: {self.loss:.4E}')
         fig.tight_layout()
@@ -1555,13 +1988,12 @@ class Refiner:
         """
         Plot the target and optimised patches side by side.
         """
-        X_target = self.X_target_aug if isinstance(self.X_target_aug, Tensor) else self.X_target_aug[0]
+        X_target = self.X_target if isinstance(self.X_target, Tensor) else self.X_target[0]
         X_target = np.clip(to_numpy(X_target), 0, 1)
         X_pred = self.X_pred if isinstance(self.X_pred, Tensor) else self.X_pred[0]
         X_pred = np.clip(to_numpy(X_pred), 0, 1)
-        ps = self.args.patch_size
 
-        n_cols = 4
+        n_cols = 5
         if self.args.n_patches > 0 and self.args.plot_n_patches == -1:
             n_rows = self.args.n_patches
         else:
@@ -1570,22 +2002,26 @@ class Refiner:
         fig, axes = plt.subplots(n_rows, n_cols, figsize=(n_cols * 2.3, n_rows * 2.4), squeeze=False)
         for i in range(n_rows):
             x, y = self.patch_centres[i]
+            ps = self.args.patch_size
 
-            # Show the augmented target image with a patch overlay
+            # Show the original target image with a patch overlay
             ax = axes[i, 0]
             ax.imshow(X_target)
-            ax.scatter(x, y, c='r', s=25, marker='x')
-            rect = Rectangle((x - ps // 2, y - ps // 2), ps, ps, linewidth=1, edgecolor='r', facecolor='none',
-                             linestyle='--')
+            ax.scatter(x, y, c='darkblue', s=20, marker='x', alpha=0.7)
+            rect = Rectangle((x - ps // 2, y - ps // 2), ps, ps, linewidth=0.7, edgecolor='darkblue',
+                             facecolor='none', linestyle='--', alpha=0.7)
             ax.add_patch(rect)
             ax.axis('off')
 
-            # Show the optimised image with a patch overlay
+            # Show the rendered image with a patch overlay
+            sf = X_target.shape[0] / X_pred.shape[0]
+            x, y = x / sf, y / sf
+            ps = ps / sf
             ax = axes[i, 1]
             ax.imshow(X_pred)
-            ax.scatter(x, y, c='r', s=25, marker='x')
-            rect = Rectangle((x - ps // 2, y - ps // 2), ps, ps, linewidth=1, edgecolor='r', facecolor='none',
-                             linestyle='--')
+            ax.scatter(x, y, c='darkblue', s=20, marker='x', alpha=0.7)
+            rect = Rectangle((x - ps // 2, y - ps // 2), ps, ps, linewidth=0.7, edgecolor='darkblue',
+                             facecolor='none', linestyle='--', alpha=0.7)
             ax.add_patch(rect)
             ax.axis('off')
 
@@ -1599,6 +2035,12 @@ class Refiner:
             ax = axes[i, 3]
             X_pred_patch = np.clip(to_numpy(self.X_pred_patches[i]), 0, 1)
             ax.imshow(X_pred_patch)
+            ax.axis('off')
+
+            # Show an L2 error map
+            ax = axes[i, 4]
+            error_map = ((X_pred_patch - X_target_patch)**2).sum(axis=-1)
+            ax.imshow(error_map)
             ax.axis('off')
 
         fig.suptitle(f'Step {self.step + 1} Loss: {self.loss:.4E}')
@@ -1616,7 +2058,8 @@ class Refiner:
         plt.savefig(path, bbox_inches='tight')
 
         # Log to tensorboard
-        self.tb_logger.add_figure(plot_type, fig, self.step)
-        self.tb_logger.flush()
+        if self.args.plot_to_tensorboard:
+            self.tb_logger.add_figure(plot_type, fig, self.step)
+            self.tb_logger.flush()
 
         plt.close(fig)

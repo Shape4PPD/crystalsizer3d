@@ -69,7 +69,7 @@ def load_rcf(model_path: Path) -> RCF:
     assert model_path.exists(), f'RCF checkpoint not found at {model_path}'
     logger.info(f'Loading RCF model checkpoint from {model_path}.')
     rcf = RCF()
-    checkpoint = torch.load(model_path)
+    checkpoint = torch.load(model_path, weights_only=True)
     rcf.load_state_dict(checkpoint, strict=False)
     rcf = torch.jit.script(rcf)
     rcf.to(device)

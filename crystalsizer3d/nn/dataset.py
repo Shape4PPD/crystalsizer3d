@@ -5,6 +5,7 @@ from itertools import product
 from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
+import orjson
 import torch
 import yaml
 from PIL import Image
@@ -67,7 +68,8 @@ def plot_symmetry_group(mesh, symm_group):
 
 class Dataset:
     labels_zingg = ['si', 'il']
-    labels_transformation = ['x', 'y', 'z', 's']
+    labels_origin = ['x', 'y', 'z']
+    labels_scale = ['s', ]
     labels_rotation_quaternion = ['rw', 'rx', 'ry', 'rz']
     labels_rotation_axisangle = ['rax', 'ray', 'raz']
     labels_material = ['ior', 'r']
@@ -108,13 +110,14 @@ class Dataset:
             if self.dst_args.use_distance_switches:
                 labels += self.labels_distance_switches
         if self.dst_args.train_transformation:
-            labels += self.labels_transformation
+            labels += self.labels_origin
+            if self.dst_args.train_scale:
+                labels += self.labels_scale
             if self.dst_args.rotation_mode == ROTATION_MODE_QUATERNION:
                 labels += self.labels_rotation_quaternion
             else:
                 assert self.dst_args.rotation_mode == ROTATION_MODE_AXISANGLE
                 labels += self.labels_rotation_axisangle
-
         if self.dst_args.train_material:
             labels += self.labels_material
         if self.dst_args.train_light:
@@ -125,7 +128,7 @@ class Dataset:
         for k in labels:
             if k[:2] == 'ds':
                 continue
-            if k not in self.labels_transformation and self.ds_stats[k]['var'] == 0:
+            if k not in self.labels_origin + self.labels_scale and self.ds_stats[k]['var'] == 0:
                 logger.warning(f'Removing key {k} from parameters as it has 0 variance.')
                 fixed_parameters[k] = self.ds_stats[k]['mean']
                 if k in self.labels_distances and self.dst_args.use_distance_switches:
@@ -140,7 +143,8 @@ class Dataset:
         self.labels_distances_active = [k for k in self.labels_distances if k in self.labels]
         self.labels_distance_switches_active = [k for k in self.labels_distance_switches if k in self.labels]
         self.labels_transformation_active = [k for k in
-                                             self.labels_transformation + self.labels_rotation_quaternion + self.labels_rotation_axisangle
+                                             self.labels_origin + self.labels_scale
+                                             + self.labels_rotation_quaternion + self.labels_rotation_axisangle
                                              if k in self.labels]
         self.labels_material_active = [k for k in self.labels_material if k in self.labels]
         self.labels_light_active = [k for k in self.labels_light if k in self.labels]
@@ -166,8 +170,8 @@ class Dataset:
         # Load rendering parameters (but don't fail if they don't exist)
         r_params_file = self.path / 'rendering_parameters.json'
         if r_params_file.exists():
-            with open(r_params_file, 'r') as f:
-                rendering_parameters = json.load(f)
+            with open(r_params_file, 'rb') as f:
+                rendering_parameters = orjson.loads(f.read())
             rendering_parameters = {int(k): v for k, v in rendering_parameters.items()}
         else:
             logger.warning(f'Rendering parameters file {r_params_file} does not exist.')
@@ -176,8 +180,8 @@ class Dataset:
         # Load crystal vertices
         vertices_file = self.path / 'vertices.json'
         if vertices_file.exists():
-            with open(vertices_file, 'r') as f:
-                vertices = json.load(f)
+            with open(vertices_file, 'rb') as f:
+                vertices = orjson.loads(f.read())
             vertices = {int(k): v for k, v in vertices.items()}
         else:
             logger.warning(f'Vertices file {vertices_file} does not exist.')
@@ -189,6 +193,12 @@ class Dataset:
             self.headers = reader.fieldnames
             self.labels_distances = [h for h in self.headers if h[0] == 'd']
             self.labels_distance_switches = [f'ds{i}' for i in range(len(self.labels_distances))]
+
+            # Set miller indices
+            self.miller_indices = self.dataset_args.miller_indices
+            if self.dataset_args.asymmetry is not None:
+                self.miller_indices = [tuple(map(int, re.findall(r'-?\d', h.split('_')[1])))
+                                       for h in self.labels_distances]
 
             self.data = {}
             for i, row in enumerate(reader):
@@ -232,21 +242,21 @@ class Dataset:
                 if vertices is not None:
                     item['vertices'] = vertices[idx]
 
-                self.data[idx] = item
+                # Add the keypoints image path if required
+                if self.dst_args.train_keypoint_detector or self.dst_args.train_edge_detector:
+                    keypoints_dir = self.path / f'keypoints_wfv={self.dst_args.wireframe_blur_variance:.1f}_kpv={self.dst_args.heatmap_blob_variance:.1f}'
+                    keypoints_path = keypoints_dir / f'{row["image"][:-4]}.png'
+                    item['keypoints_image'] = keypoints_path
 
-        # Set miller indices
-        self.miller_indices = self.dataset_args.miller_indices
-        if self.dataset_args.asymmetry is not None:
-            self.miller_indices = [tuple(map(int, re.findall(r'-?\d', h.split('_')[1])))
-                                   for h in self.labels_distances]
+                self.data[idx] = item
 
     def _load_ds_stats(self):
         """
         Generate or load dataset statistics for normalisation.
         """
         path = self.path / 'ds_stats.yml'
-        keys = (self.labels_zingg + self.labels_distances +
-                self.labels_transformation + self.labels_material + self.labels_light)
+        keys = (self.labels_zingg + self.labels_distances + self.labels_origin +
+                self.labels_scale + self.labels_material + self.labels_light)
         if self.dataset_args.rotation_mode == ROTATION_MODE_AXISANGLE:
             keys += self.labels_rotation_axisangle
         else:
@@ -276,12 +286,10 @@ class Dataset:
                 logger.info(f'Processed {i + 1} / {len(self.data)} items.')
             r_params = item['rendering_parameters']
             for k in keys:
-                if k in self.labels_transformation:
-                    if k in ['x', 'y', 'z']:
-                        val = r_params['crystal']['origin']['xyz'.index(k)]
-                    else:
-                        assert k == 's'
-                        val = r_params['crystal']['scale']
+                if k in self.labels_origin:
+                    val = r_params['crystal']['origin']['xyz'.index(k)]
+                elif k in self.labels_scale:
+                    val = r_params['crystal']['scale']
                 elif k in self.labels_rotation_quaternion:
                     quat = r_params['crystal']['rotation']
                     val = quat['wxyz'.index(k[1])]
@@ -328,11 +336,11 @@ class Dataset:
         tt_split_path = self.path / f'train_test_split_{self.train_test_split_target:.2f}.json'
         if tt_split_path.exists():
             logger.info(f'Loading train/test splits from {tt_split_path}')
-            with open(tt_split_path, 'r') as f:
-                tt_split = json.load(f)
-                self.train_test_split_actual = tt_split['train_test_split_actual']
-                self.train_idxs = np.array(tt_split['train_idxs'])
-                self.test_idxs = np.array(tt_split['test_idxs'])
+            with open(tt_split_path, 'rb') as f:
+                tt_split = orjson.loads(f.read())
+            self.train_test_split_actual = tt_split['train_test_split_actual']
+            self.train_idxs = np.array(tt_split['train_idxs'])
+            self.test_idxs = np.array(tt_split['test_idxs'])
             return
 
         # Otherwise, split the dataset
@@ -374,14 +382,9 @@ class Dataset:
         item = self.data[idx]
         r_params = item['rendering_parameters']
 
-        # Load the image
-        if self.dst_args.use_clean_images:
-            img = Image.open(item['image_clean'])
-        else:
-            img = Image.open(item['image'])
-
-        # Load the clean image too if training the generator
-        if self.dst_args.train_generator or self.dst_args.train_denoiser:
+        # Load the noisy and clean images
+        img = Image.open(item['image'])
+        if item['image_clean'].exists():
             img_clean = Image.open(item['image_clean'])
         else:
             img_clean = None
@@ -426,9 +429,15 @@ class Dataset:
             ranges = l_max - l_min
             range_max = ranges.max()
             origin = 2 * (origin - l_min - ranges / 2) / range_max
+            transformation = [*origin, ]
 
-            # Standardise the scale to [eps, 1]
-            scale = eps_1_normalise(r_params['crystal']['scale'], 's', MIN_NORMALISED_SCALE)
+            if self.dst_args.train_scale:
+                # Standardise the scale to [eps, 1]
+                scale = eps_1_normalise(r_params['crystal']['scale'], 's', MIN_NORMALISED_SCALE)
+                transformation.append(scale)
+            else:
+                # Multiply the distances by the scale
+                params['distances'] *= r_params['crystal']['scale']
 
             # Rotation representation in the dataset
             if self.dataset_args.rotation_mode == ROTATION_MODE_QUATERNION:
@@ -443,12 +452,8 @@ class Dataset:
             else:
                 assert self.dst_args.rotation_mode == ROTATION_MODE_AXISANGLE
                 rotation = R0.as_rotvec()
-
-            params['transformation'] = np.array([
-                *origin,
-                scale,
-                *rotation
-            ])
+            transformation.extend(list(rotation))
+            params['transformation'] = np.array(transformation)
 
             # Apply the rotation to the symmetry group
             if self.dst_args.check_symmetries > 0:
@@ -501,6 +506,16 @@ class Dataset:
                 z_transform(r_params['light_radiance'][i], f'e{rgb}')
                 for i, rgb in enumerate('rgb')
             ])
+
+        # Include the projected vertex positions for the keypoint detector
+        if self.dst_args.train_keypoint_detector:
+            path = item['keypoints_image']
+            assert path.exists(), \
+                f'Keypoints image path does not exist: {path}. Run `scripts/generate_synthetic_dataset_keypoints.py` to generate keypoints images.'
+            kp_img = np.array(Image.open(item['keypoints_image'])).astype(np.float32) / 255
+            kp_img = np.clip(kp_img, 0, 1)
+            params['wireframe'] = kp_img[..., :2].transpose(2, 0, 1)
+            params['kp_heatmap'] = kp_img[..., 2]
 
         return item, img, img_clean, params
 
@@ -639,7 +654,8 @@ class Dataset:
             self,
             distance_vals: torch.Tensor,
             switches: Optional[torch.Tensor] = None,
-            missing_distance_val: float = 100.
+            missing_distance_val: float = 100.,
+            normalise: bool = True
     ) -> torch.Tensor:
         """
         Prepare the distance values.
@@ -653,6 +669,7 @@ class Dataset:
             distance_vals=distance_vals,
             switches=switches,
             missing_distance_val=missing_distance_val,
+            normalise=normalise,
         )
 
 
@@ -666,7 +683,7 @@ class DatasetProxy:
     ):
         self.dst_args = dst_args
         self.path = dst_args.dataset_path
-        self.cache_path = DATASET_PROXY_PATH / f'{hash_data(str(self.path))}.json'
+        self.cache_path = DATASET_PROXY_PATH / f'{dst_args.hash()}.json'
         if not self._load_cache():
             self._load_dataset()
 
@@ -699,8 +716,8 @@ class DatasetProxy:
         if not self.cache_path.exists():
             return False
         try:
-            with open(self.cache_path, 'r') as f:
-                self.ds_cache = json.load(f)
+            with open(self.cache_path, 'rb') as f:
+                self.ds_cache = orjson.loads(f.read())
         except Exception as e:
             logger.error(f'Could not load cache from {self.cache_path}: {e}. Removing file.')
             self.cache_path.unlink()
@@ -744,7 +761,8 @@ class DatasetProxy:
             self,
             distance_vals: torch.Tensor,
             switches: Optional[torch.Tensor] = None,
-            missing_distance_val: float = 100.
+            missing_distance_val: float = 100.,
+            normalise: bool = True
     ) -> torch.Tensor:
         """
         Prepare the distance values.
@@ -758,6 +776,7 @@ class DatasetProxy:
             distance_vals=distance_vals,
             switches=switches,
             missing_distance_val=missing_distance_val,
+            normalise=normalise,
         )
 
 
@@ -807,6 +826,7 @@ def denormalise_rendering_params(
         distance_vals=dist,
         switches=switches,
         missing_distance_val=missing_distance_val,
+        normalise=dst_args.train_scale
     ).tolist()
 
     # Transformation parameters
@@ -823,10 +843,15 @@ def denormalise_rendering_params(
         c_params['origin'] = location.tolist()
 
         # Invert the scale back to the original scale
-        c_params['scale'] = inverse_eps_1_normalise(trans[3].item(), 's', MIN_NORMALISED_SCALE)
+        if dst_args.train_scale:
+            c_params['scale'] = inverse_eps_1_normalise(trans[3].item(), 's', MIN_NORMALISED_SCALE)
+            r_idx = 4
+        else:
+            c_params['scale'] = 1
+            r_idx = 3
 
         # Rotation angles
-        c_params['rotation'] = trans[4:].tolist()
+        c_params['rotation'] = trans[r_idx:].tolist()
     else:
         assert default_rendering_params is not None, 'Need to provide defaults for missing transformation parameters.'
         assert 'crystal' in default_rendering_params, 'Need to provide defaults for missing transformation parameters.'
@@ -906,7 +931,8 @@ def prep_distances(
         labels_distances_active: List[str],
         distance_vals: torch.Tensor,
         switches: Optional[torch.Tensor] = None,
-        missing_distance_val: float = 100.
+        missing_distance_val: float = 100.,
+        normalise: bool = True
 ) -> torch.Tensor:
     """
     Prepare the distance values.
@@ -929,19 +955,20 @@ def prep_distances(
         distances[:, pos] = distance_vals[:, i]
 
     # Add any distances that are not in the active set
-    if (dataset_args.asymmetry is None and labels_distances != labels_distances_active):
+    if dataset_args.asymmetry is None and labels_distances != labels_distances_active:
         for d_lbl in labels_distances:
             if d_lbl not in labels_distances_active:
                 d_pos = labels_distances.index(d_lbl)
                 distances[:, d_pos] = ds_stats[d_lbl]['mean']
 
     # Normalise the distances by the maximum (in each batch element)
-    d_max = distances.amax(dim=1, keepdim=True)
-    distances = torch.where(
-        d_max > 1e-8,
-        distances / d_max,
-        distances
-    )
+    if normalise:
+        d_max = distances.amax(dim=1, keepdim=True)
+        distances = torch.where(
+            d_max > 1e-8,
+            distances / d_max,
+            distances
+        )
 
     # Ensure negative distances are set to the missing value
     distance_vals[distance_vals < 0] = missing_distance_val
