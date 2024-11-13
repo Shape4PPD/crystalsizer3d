@@ -6,6 +6,27 @@ from crystalsizer3d import DATA_PATH
 from crystalsizer3d.args.base_args import BaseArgs
 from crystalsizer3d.util.utils import str2bool
 
+DENOISER_ARG_NAMES = [
+    'denoiser_model_path', 'denoiser_n_tiles', 'denoiser_tile_overlap',
+    'denoiser_oversize_input', 'denoiser_max_img_size', 'denoiser_batch_size',
+]
+
+KEYPOINTS_ARG_NAMES = [
+    'keypoints_model_path', 'keypoints_oversize_input', 'keypoints_max_img_size', 'keypoints_batch_size',
+    'keypoints_min_distance', 'keypoints_threshold', 'keypoints_exclude_border', 'keypoints_blur_kernel_relative_size',
+    'keypoints_n_patches', 'keypoints_patch_size', 'keypoints_patch_search_res', 'keypoints_attenuation_sigma',
+    'keypoints_max_attenuation_factor', 'keypoints_low_res_catchment_distance', 'keypoints_loss_type'
+]
+
+PREDICTOR_ARG_NAMES = [
+    'predictor_model_path', 'initial_pred_noise_min', 'initial_pred_noise_max', 'initial_pred_oversize_input',
+    'initial_pred_max_img_size', 'multiscale', 'use_keypoints', 'n_patches', 'w_img_l1', 'w_img_l2', 'w_perceptual',
+    'w_latent', 'w_rcf', 'w_overshoot', 'w_symmetry', 'w_z_pos', 'w_rotation_xy', 'w_patches', 'w_fullsize',
+    'w_switch_probs', 'w_keypoints', 'w_anchors', 'l_decay_l1', 'l_decay_l2', 'l_decay_perceptual', 'l_decay_latent',
+    'l_decay_rcf', 'perceptual_model', 'latents_model', 'mv2_config_path', 'mv2_checkpoint_path', 'rcf_model_path',
+    'rcf_loss_type', 'keypoints_loss_type'
+]
+
 
 class RefinerArgs(BaseArgs):
     def __init__(

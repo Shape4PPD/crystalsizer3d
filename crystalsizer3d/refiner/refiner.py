@@ -42,7 +42,8 @@ from crystalsizer3d.nn.manager import Manager
 from crystalsizer3d.nn.models.rcf import RCF
 from crystalsizer3d.projector import ProjectedVertexKey, Projector
 from crystalsizer3d.refiner.denoising import denoise_image
-from crystalsizer3d.refiner.keypoint_detection import find_keypoints, to_absolute_coordinates
+from crystalsizer3d.refiner.keypoint_detection import find_keypoints, generate_attention_patches, \
+    to_absolute_coordinates
 from crystalsizer3d.refiner.edge_matching import ContourDistanceNormalLoss
 from crystalsizer3d.scene_components.scene import Scene
 from crystalsizer3d.scene_components.utils import orthographic_scale_factor
@@ -73,8 +74,8 @@ class Refiner:
     X_target_patches: Optional[Tensor]
 
     X_pred: Tensor = None
-    X_pred_patches: Optional[Tensor] = None
-    patch_centres: Optional[List[Tuple[int, int]]] = None
+    X_pred_patches: Tensor | None = None
+    patch_centres: Tensor | None = None
 
     scene: Scene = None
     scene_params: mi.SceneParameters = None
@@ -83,10 +84,12 @@ class Refiner:
     symmetry_idx: Tensor
     conj_pairs: List[Tuple[int, int]]
     conj_switch_probs: Tensor
+    param_group_keys: List[str]
 
     keypoint_targets: Optional[Tensor] = None
     anchors: Dict[ProjectedVertexKey, Tensor] = {}
-    prev_distances: Optional[Tensor] = None
+    distances_est: Optional[Tensor] = None
+    distances_min: Optional[Tensor] = None
 
     rcf_feats_og: Optional[List[Tensor]]
     rcf_feats: Optional[List[Tensor]]
@@ -409,7 +412,7 @@ class Refiner:
         Initialise the convergence detector.
         """
         self.convergence_detector_param_names = [
-            'loss',
+            # 'loss',
             *[f'd_{i:02d}' for i in range(self.crystal.distances.shape[0])],
             'roughness',
             'ior',
@@ -703,20 +706,30 @@ class Refiner:
         Set up the optimiser and learning rate scheduler.
         """
         logger.info('Initialising optimiser.')
+
+        param_groups = []
+        self.param_group_keys = []
+        for k in ['distances', 'origin', 'rotation', 'material', 'light', 'switches']:
+            lr = getattr(self.args, f'lr_{k}')
+            if lr == 0:
+                continue
+            if k in ['distances', 'origin', 'rotation']:
+                params = [getattr(self.crystal, k)]
+            elif k == 'material':
+                params = [self.crystal.material_roughness, self.crystal.material_ior]
+            elif k == 'light':
+                params = [self.scene.light_radiance]
+            elif k == 'switches':
+                if not self.args.use_conj_switching:
+                    continue
+                params = [self.conj_switch_probs]
+            param_groups.append({'params': params, 'lr': lr})
+            self.param_group_keys.append(k)
+
         optimiser = create_optimizer_v2(
             opt=self.args.opt_algorithm,
             weight_decay=0,
-            model_or_params=[
-                # {'params': [self.crystal.scale], 'lr': self.args.lr_scale},
-                {'params': [self.crystal.distances], 'lr': self.args.lr_distances},
-                {'params': [self.crystal.origin], 'lr': self.args.lr_origin},
-                {'params': [self.crystal.rotation], 'lr': self.args.lr_rotation},
-                {'params': [self.crystal.material_roughness, self.crystal.material_ior], 'lr': self.args.lr_material},
-                # {'params': [self.crystal.material_roughness], 'lr': self.args.lr_material / 10},
-                # {'params': [self.crystal.material_ior], 'lr': self.args.lr_material},
-                {'params': [self.scene.light_radiance], 'lr': self.args.lr_light},
-                {'params': [self.conj_switch_probs], 'lr': self.args.lr_switches},
-            ],
+            model_or_params=param_groups,
         )
 
         # For cycle based schedulers (cosine, tanh, poly) adjust total steps for cycles and cooldown
@@ -971,7 +984,6 @@ class Refiner:
         img.save(save_dir / f'best_idx={best_idx}.png')
 
         # Update the scene rendering parameters for optimisation
-        wis = (self.args.rendering_size, self.args.rendering_size)
         scene = update_scene_parameters(scene)
         scene_params = mi.traverse(scene.mi_scene)
 
@@ -993,7 +1005,12 @@ class Refiner:
         self.crystal = scene.crystal
         self._init_projector()
 
-    def train(self, callback: Callable | None = None, prev_distances: Tensor | None = None):
+    def train(
+            self,
+            callback: Callable | None = None,
+            distances_est: Tensor | None = None,
+            distances_min: Tensor | None = None,
+    ):
         """
         Train the parameters for a number of steps.
         """
@@ -1011,7 +1028,8 @@ class Refiner:
         running_metrics = {k: 0. for k in self.metric_keys}
         running_tps = 0
         use_inverse_rendering = self.args.use_inverse_rendering  # Save the inverse rendering setting
-        self.prev_distances = prev_distances
+        self.distances_est = distances_est
+        self.distances_min = distances_min
 
         # (Re-)initialise the optimiser, learning rate scheduler and convergence detector
         self._init_optimiser()
@@ -1048,7 +1066,7 @@ class Refiner:
                     self.tb_logger.add_scalar(f'params/conj_switch_probs/{ab}', prob.item(), step)
 
             # Log learning rates and update them
-            for i, param_group in enumerate(['distances', 'origin', 'rotation', 'material', 'light']):
+            for i, param_group in enumerate(self.param_group_keys):
                 self.tb_logger.add_scalar(f'lr/{param_group}', self.optimiser.param_groups[i]['lr'], step)
             if self.args.lr_scheduler != 'none':
                 self.lr_scheduler.step(step, loss_track)
@@ -1095,7 +1113,7 @@ class Refiner:
 
             # Check for convergence
             check_vals = torch.concatenate([
-                loss_track[None, ...],
+                # loss_track[None, ...],
                 self.crystal.distances.detach().cpu(),
                 self.crystal.material_roughness[None, ...].detach().cpu(),
                 self.crystal.material_ior[None, ...].detach().cpu(),
@@ -1125,23 +1143,32 @@ class Refiner:
 
         # Take optimisation step
         if (self.step + 1) % self.args.acc_grad_steps == 0:
+            # Clip gradients
             if self.args.clip_grad_norm > 0:
                 nn.utils.clip_grad_norm_([self.crystal.distances], max_norm=self.args.clip_grad_norm)
                 nn.utils.clip_grad_norm_([self.crystal.rotation], max_norm=self.args.clip_grad_norm)
+
+            # Check for bad gradients
             for group in self.optimiser.param_groups:
                 for param in group['params']:
                     if param.grad is not None:
                         if is_bad(param.grad):
                             logger.warning('Bad gradients detected!')
                             param.grad.zero_()
+
+            # Optimisation step
             self.optimiser.step()
             self.optimiser.zero_grad()
+
+            # Clamp parameters
             self.crystal.clamp_parameters(rescale=False)
             self.conj_switch_probs.data = torch.clamp(
                 self.conj_switch_probs,
                 min=self.args.conj_switch_prob_min,
                 max=self.args.conj_switch_prob_max
             )
+            if self.distances_min is not None:
+                self.crystal.distances.data = self.crystal.distances.clamp(min=self.distances_min)
 
             # Actually switch the distances where the switch prob is high enough
             if self.args.use_conj_switching:
@@ -1251,7 +1278,17 @@ class Refiner:
         return loss, stats
 
     @dr.wrap_ad(source='torch', target='drjit')
-    def _render_image(self, vertices, faces, eta, roughness, radiance, seed=1):
+    def _render_image(
+            self,
+            vertices: mi.TensorXf,
+            faces: mi.TensorXi64,
+            eta: mi.TensorXf,
+            roughness: mi.TensorXf,
+            radiance: mi.TensorXf,
+            seed: int = 1
+    ):
+        if seed < 0:
+            seed = 0
         self.scene_params[Scene.VERTEX_KEY] = dr.ravel(vertices)
         self.scene_params[Scene.FACES_KEY] = dr.ravel(faces)
         self.scene_params[Scene.ETA_KEY] = dr.ravel(eta)
@@ -1285,49 +1322,57 @@ class Refiner:
             latent_loss, latent_stats = torch.tensor(0.), {}
             rcf_loss, rcf_stats = torch.tensor(0.), {}
 
-        # Regularisations
-        overshoot_loss, overshoot_stats = self._overshoot_loss(distances=distances)
-        symmetry_loss, symmetry_stats = self._symmetry_loss()
-        z_pos_loss, z_pos_stats = self._z_pos_loss()
-        rxy_loss, rxy_stats = self._rotation_xy_loss()
-        switch_loss, switch_stats = self._switch_loss()
-        temporal_loss, temporal_stats = self._temporal_loss()
+        # Combine image losses
+        image_loss = l1_loss.cpu() * self.args.w_img_l1 \
+                     + l2_loss.cpu() * self.args.w_img_l2 \
+                     + percept_loss.cpu() * self.args.w_perceptual \
+                     + latent_loss.cpu() * self.args.w_latent \
+                     + rcf_loss.cpu() * self.args.w_rcf
 
-        # Keypoints and anchors
-        keypoints_loss, keypoints_stats = self._keypoints_loss()
-        anchors_loss, anchors_stats = self._anchors_loss()
-        
-        # Edge matching
-        edge_matching_loss, edge_matching_stats = self._edge_matching_loss()
-
-        # Combine losses
-        loss = l1_loss.cpu() * self.args.w_img_l1 \
-               + l2_loss.cpu() * self.args.w_img_l2 \
-               + percept_loss.cpu() * self.args.w_perceptual \
-               + latent_loss.cpu() * self.args.w_latent \
-               + rcf_loss.cpu() * self.args.w_rcf \
-               + overshoot_loss * self.args.w_overshoot \
-               + symmetry_loss * self.args.w_symmetry \
-               + z_pos_loss * self.args.w_z_pos \
-               + rxy_loss * self.args.w_rotation_xy \
-               + switch_loss * self.args.w_switch_probs \
-               + temporal_loss * self.args.w_temporal \
-               + keypoints_loss * self.args.w_keypoints \
-               + anchors_loss * self.args.w_anchors \
-               + edge_matching_loss *self.args.w_edge_matching
-
-        # Combine stats
-        stats = {
-            'losses/total': loss.item(),
-            **l1_stats, **l2_stats, **percept_stats, **latent_stats, **rcf_stats, **overshoot_stats, **symmetry_stats,
-            **z_pos_stats, **rxy_stats, **switch_stats, **temporal_stats, **keypoints_stats, **anchors_stats, **edge_matching_stats
-        }
-
-        # Patches - recalculate all the losses for each patch
         if not is_patch:
+            # Regularisations
+            overshoot_loss, overshoot_stats = self._overshoot_loss(distances=distances)
+            symmetry_loss, symmetry_stats = self._symmetry_loss()
+            z_pos_loss, z_pos_stats = self._z_pos_loss()
+            rxy_loss, rxy_stats = self._rotation_xy_loss()
+            switch_loss, switch_stats = self._switch_loss()
+            temporal_loss, temporal_stats = self._temporal_loss()
+
+            # Keypoints and anchors
+            keypoints_loss, keypoints_stats = self._keypoints_loss()
+            anchors_loss, anchors_stats = self._anchors_loss()
+
+            # Edge matching
+            edge_matching_loss, edge_matching_stats = self._edge_matching_loss()
+
+            # Combine losses
+            loss = image_loss \
+                   + overshoot_loss * self.args.w_overshoot \
+                   + symmetry_loss * self.args.w_symmetry \
+                   + z_pos_loss * self.args.w_z_pos \
+                   + rxy_loss * self.args.w_rotation_xy \
+                   + switch_loss * self.args.w_switch_probs \
+                   + temporal_loss * self.args.w_temporal \
+                   + keypoints_loss * self.args.w_keypoints \
+                   + anchors_loss * self.args.w_anchors \
+                   + edge_matching_loss * self.args.w_edge_matching
+
+            # Patches - recalculate the image losses for each patch
             patch_loss, patch_stats = self._patches_loss()
             loss = loss * self.args.w_fullsize + patch_loss * self.args.w_patches
-            stats.update(patch_stats)
+
+            # Combine stats
+            stats = {
+                'losses/total': loss.item(),
+                **l1_stats, **l2_stats, **percept_stats, **latent_stats, **rcf_stats, **overshoot_stats,
+                **symmetry_stats,
+                **z_pos_stats, **rxy_stats, **switch_stats, **temporal_stats, **keypoints_stats, **anchors_stats,
+                **patch_stats
+            }
+
+        else:
+            loss = image_loss
+            stats = {**l1_stats, **l2_stats, **percept_stats, **latent_stats, **rcf_stats}
 
         assert not is_bad(loss), 'Bad loss!'
 
@@ -1570,12 +1615,13 @@ class Refiner:
         """
         loss = torch.tensor(0., device=self.device)
         stats = {}
-        if self.args.n_patches is None or self.args.n_patches <= 0:
+        if not self.args.use_inverse_rendering or self.args.n_patches is None or self.args.n_patches <= 0 or self.scene_params is None:
             return loss, stats
 
         ps = self.args.patch_size
         ps2 = ps // 2
         wis = self.args.rendering_size
+        device = self.scene.device
 
         # If multiscale, just use the first (largest) image
         X_target_og = self.X_target_aug
@@ -1588,47 +1634,56 @@ class Refiner:
             X_target = X_target_og.clone()
             X_pred = X_pred_og.clone()
 
-        # Use the L1 error map to select the best patches
-        l1 = (X_pred - X_target).abs().mean(dim=-1).detach()
-        patch_centres = []
+        # Use the L2 error map to select the best patches
+        with torch.no_grad():
+            l2 = ((X_pred - X_target)**2).mean(dim=-1).detach()
+            error_map = F.interpolate(
+                l2[None, None, ...], size=self.X_target.shape[0],
+                mode='bilinear', align_corners=False
+            )[0, 0]
+            X_target_patches, patch_centres = generate_attention_patches(
+                X=self.X_target_denoised.permute(2, 0, 1),
+                X_kp=error_map,
+                patch_search_res=256,
+                n_patches=self.args.n_patches,
+                patch_size=ps,
+                attenuation_sigma=0.5,
+                max_attenuation_factor=1.5,
+            )
+            X_target_patches = F.interpolate(
+                X_target_patches[0],
+                size=(wis, wis),
+                mode='bilinear', align_corners=False
+            ).permute(0, 2, 3, 1)
+
+        # Update the film size parameters
+        sf = wis / ps
+        self.scene_params[Scene.FILM_SIZE_KEY] = round(self.X_target.shape[0] * sf)
+        self.scene_params[Scene.FILM_CROP_SIZE_KEY] = self.args.rendering_size
+
+        # Render the patches
         X_pred_patches = []
-        X_target_patches = []
-        for i in range(self.args.n_patches):
-            with torch.no_grad():
-                # Calculate the sum of errors for each possible patch position
-                l1_patch_sums = F.conv2d(l1[None, ...], torch.ones(1, 1, ps, ps).to(self.device), padding=ps2)[0]
-                if l1_patch_sums.shape[0] != wis:
-                    l1_patch_sums = F.interpolate(
-                        l1_patch_sums[None, None, ...],
-                        size=wis,
-                        mode='bilinear',
-                        align_corners=False
-                    )[0, 0]
+        for i, patch_centre in enumerate(patch_centres):
+            vertices = self.crystal.mesh_vertices.to(device)
+            faces = self.crystal.mesh_faces.to(device)
+            eta = self.crystal.material_ior.to(device) / self.scene.crystal_material_bsdf['ext_ior']
+            roughness = self.crystal.material_roughness.to(device).clone()
+            radiance = self.scene.light_radiance.to(device).clone()
+            self.scene_params[Scene.FILM_CROP_OFFSET_KEY] = (patch_centre * sf - wis / 2).round().int().tolist()
+            X_pred_patch = self._render_image(
+                vertices, faces, eta, roughness, radiance,
+                seed=self.step + i
+            )
+            X_pred_patches.append(X_pred_patch)
+        X_pred_patches = torch.stack(X_pred_patches)
 
-                # Find the index of the maximum error sum
-                max_idx = torch.argmax(l1_patch_sums).item()
-                y = max_idx // wis
-                x = max_idx % wis
-                y = min(max(ps2, y), wis - ps2)
-                x = min(max(ps2, x), wis - ps2)
-                patch_centres.append((x, y))
-
-            # Crop patches
-            X_pred_patch = X_pred[y - ps2:y + ps2, x - ps2:x + ps2]
-            X_target_patch = X_target[y - ps2:y + ps2, x - ps2:x + ps2]
-            X_pred_patches.append(X_pred_patch.detach())
-            X_target_patches.append(X_target_patch.detach())
-
-            # Reduce the error map around the selected patch
-            l1[y - ps2:y + ps2, x - ps2:x + ps2] /= 1.5
-
-        # Upscale the patches to the working image size
-        patches = torch.stack(X_pred_patches + X_target_patches).permute(0, 3, 1, 2)
-        upscaled_patches = F.interpolate(patches, size=wis, mode='bilinear', align_corners=False)
+        # Restore full-size rendering parameters
+        self.scene_params[Scene.FILM_SIZE_KEY] = self.args.rendering_size
+        self.scene_params[Scene.FILM_CROP_OFFSET_KEY] = [0, 0]
 
         # Calculate losses for each pair of patches
-        self.X_pred = upscaled_patches[:self.args.n_patches].permute(0, 2, 3, 1)
-        self.X_target_aug = upscaled_patches[self.args.n_patches:].permute(0, 2, 3, 1)
+        self.X_pred = X_pred_patches
+        self.X_target_aug = X_target_patches
         patch_loss, patch_stats = self._calculate_losses(is_patch=True)
         patch_stats = {f'patches/{k.replace("losses/", "")}/{i}': v for k, v in patch_stats.items() if 'losses/' in k}
         stats.update(patch_stats)
@@ -1642,8 +1697,8 @@ class Refiner:
 
         # Save the patches
         self.patch_centres = patch_centres
-        self.X_pred_patches = torch.stack(X_pred_patches)
-        self.X_target_patches = torch.stack(X_target_patches)
+        self.X_pred_patches = X_pred_patches
+        self.X_target_patches = X_target_patches
 
         return loss, stats
 
@@ -1672,11 +1727,11 @@ class Refiner:
         """
         loss = torch.tensor(0., device=self.crystal.distances.device)
         stats = {}
-        if self.prev_distances is None:
+        if self.distances_est is None:
             return loss, stats
 
-        # L2 loss between the current and previous distances
-        loss = torch.mean((self.crystal.distances - self.prev_distances)**2)
+        # L2 loss between the current distances and estimated from the sequence history
+        loss = torch.mean((self.crystal.distances - self.distances_est)**2)
         stats['losses/temporal_dists'] = loss.item()
 
         return loss, stats
@@ -1795,9 +1850,9 @@ class Refiner:
             with torch.no_grad():
                 fig = self._plot_comparison()
                 self._save_plot(fig, 'optimisation')
-            # if self.patch_centres is not None:
-            #     fig = self._plot_patches()
-            #     self._save_plot(fig, 'patches')
+            if self.patch_centres is not None:
+                fig = self._plot_patches()
+                self._save_plot(fig, 'patches')
 
     @torch.no_grad()
     def _plot_comparison(self) -> Figure:
@@ -1805,7 +1860,8 @@ class Refiner:
         Plot the target and optimised images side by side.
         """
         X_target_og = self.X_target if isinstance(self.X_target, Tensor) else self.X_target[0]
-        X_target_dn = self.X_target_denoised if isinstance(self.X_target_denoised, Tensor) else self.X_target_denoised[0]
+        X_target_dn = self.X_target_denoised if isinstance(self.X_target_denoised, Tensor) \
+            else self.X_target_denoised[0]
         Xs = [X_target_og, X_target_dn]
         if self.args.use_inverse_rendering:
             X_pred = [self.X_pred] if isinstance(self.X_pred, Tensor) else self.X_pred
@@ -1836,13 +1892,14 @@ class Refiner:
             ax.axis('off')
 
             # Show the patches
-            if i == 2 and self.patch_centres is not None:
-                ps = self.args.patch_size
-                ax.scatter(*np.array(self.patch_centres).T, c='r', s=25, marker='x')
-                for x, y in self.patch_centres:
-                    ax.scatter(x, y, c='r', s=25, marker='x')
-                    rect = Rectangle((x - ps // 2, y - ps // 2), ps, ps, linewidth=1, edgecolor='r', facecolor='none',
-                                     linestyle='--')
+            if i == 2 and self.args.use_inverse_rendering and self.patch_centres is not None:
+                sf = X_target_og.shape[0] / img.shape[0]
+                patch_centres = to_numpy(self.patch_centres) / sf
+                ps = self.args.patch_size / X_target_og.shape[0] * img.shape[0]
+                for x, y in patch_centres:
+                    ax.scatter(x, y, c='darkblue', s=20, marker='x', alpha=0.7)
+                    rect = Rectangle((x - ps // 2, y - ps // 2), ps, ps, linewidth=0.7, edgecolor='darkblue',
+                                     facecolor='none', linestyle='--', alpha=0.7)
                     ax.add_patch(rect)
 
             # Show the target and predicted keypoints
@@ -1967,13 +2024,12 @@ class Refiner:
         """
         Plot the target and optimised patches side by side.
         """
-        X_target = self.X_target_aug if isinstance(self.X_target_aug, Tensor) else self.X_target_aug[0]
+        X_target = self.X_target if isinstance(self.X_target, Tensor) else self.X_target[0]
         X_target = np.clip(to_numpy(X_target), 0, 1)
         X_pred = self.X_pred if isinstance(self.X_pred, Tensor) else self.X_pred[0]
         X_pred = np.clip(to_numpy(X_pred), 0, 1)
-        ps = self.args.patch_size
 
-        n_cols = 4
+        n_cols = 5
         if self.args.n_patches > 0 and self.args.plot_n_patches == -1:
             n_rows = self.args.n_patches
         else:
@@ -1982,22 +2038,26 @@ class Refiner:
         fig, axes = plt.subplots(n_rows, n_cols, figsize=(n_cols * 2.3, n_rows * 2.4), squeeze=False)
         for i in range(n_rows):
             x, y = self.patch_centres[i]
+            ps = self.args.patch_size
 
-            # Show the augmented target image with a patch overlay
+            # Show the original target image with a patch overlay
             ax = axes[i, 0]
             ax.imshow(X_target)
-            ax.scatter(x, y, c='r', s=25, marker='x')
-            rect = Rectangle((x - ps // 2, y - ps // 2), ps, ps, linewidth=1, edgecolor='r', facecolor='none',
-                             linestyle='--')
+            ax.scatter(x, y, c='darkblue', s=20, marker='x', alpha=0.7)
+            rect = Rectangle((x - ps // 2, y - ps // 2), ps, ps, linewidth=0.7, edgecolor='darkblue',
+                             facecolor='none', linestyle='--', alpha=0.7)
             ax.add_patch(rect)
             ax.axis('off')
 
-            # Show the optimised image with a patch overlay
+            # Show the rendered image with a patch overlay
+            sf = X_target.shape[0] / X_pred.shape[0]
+            x, y = x / sf, y / sf
+            ps = ps / sf
             ax = axes[i, 1]
             ax.imshow(X_pred)
-            ax.scatter(x, y, c='r', s=25, marker='x')
-            rect = Rectangle((x - ps // 2, y - ps // 2), ps, ps, linewidth=1, edgecolor='r', facecolor='none',
-                             linestyle='--')
+            ax.scatter(x, y, c='darkblue', s=20, marker='x', alpha=0.7)
+            rect = Rectangle((x - ps // 2, y - ps // 2), ps, ps, linewidth=0.7, edgecolor='darkblue',
+                             facecolor='none', linestyle='--', alpha=0.7)
             ax.add_patch(rect)
             ax.axis('off')
 
@@ -2011,6 +2071,12 @@ class Refiner:
             ax = axes[i, 3]
             X_pred_patch = np.clip(to_numpy(self.X_pred_patches[i]), 0, 1)
             ax.imshow(X_pred_patch)
+            ax.axis('off')
+
+            # Show an L2 error map
+            ax = axes[i, 4]
+            error_map = ((X_pred_patch - X_target_patch)**2).sum(axis=-1)
+            ax.imshow(error_map)
             ax.axis('off')
 
         fig.suptitle(f'Step {self.step + 1} Loss: {self.loss:.4E}')

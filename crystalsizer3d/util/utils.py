@@ -5,10 +5,11 @@ import os
 import random
 import threading
 from argparse import Namespace
+from collections import OrderedDict
 from json import JSONEncoder
 from math import log2
 from pathlib import Path
-from typing import List, Optional, Tuple, Union
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 import matplotlib.colors as mcolors
 import numpy as np
@@ -42,7 +43,7 @@ def get_seed() -> int:
 
 def to_numpy(t: Tensor) -> np.ndarray:
     """Converts a torch tensor to a numpy array."""
-    return t.detach().cpu().numpy()
+    return t.detach().cpu().numpy().copy()
 
 
 def str2bool(v: str) -> bool:
@@ -118,7 +119,8 @@ def init_tensor(
     """
     if isinstance(tensor, np.ndarray):
         tensor = torch.from_numpy(tensor)
-    if isinstance(tensor, list) or isinstance(tensor, tuple) or isinstance(tensor, float) or isinstance(tensor, int):
+    if (isinstance(tensor, list) or isinstance(tensor, tuple) or isinstance(tensor, float)
+            or isinstance(tensor, int) or isinstance(tensor, np.floating)):
         tensor = torch.tensor(tensor)
     tensor = tensor.to(dtype).detach().clone()
     if device is not None:
@@ -141,6 +143,23 @@ class ArgsCompatibleJSONEncoder(JSONEncoder):
         if isinstance(obj, BaseArgs):
             return obj.to_dict()
         return JSONEncoder.default(self, obj)
+
+
+def json_to_numpy(data: Any) -> Any:
+    """
+    Convert json data to numpy arrays where possible.
+    """
+    if isinstance(data, dict):
+        return {k: json_to_numpy(v) for k, v in data.items()}
+    if isinstance(data, list):
+        types = [type(v) for v in data]
+        if all([t in [int, float] for t in types]):
+            return np.array(data)
+        if all([t in [list, dict] for t in types]):
+            n_entries = [len(v) for v in data]
+            if len(set(n_entries)) == 1:
+                return np.array(data)
+        return [json_to_numpy(v) for v in data]
 
 
 def hash_data(data) -> str:
@@ -233,3 +252,17 @@ def smooth_signal(x: np.ndarray, window_size: int = 11) -> np.ndarray:
     pad_width = (window_size - 1) // 2
     x = np.pad(x, (pad_width, window_size - pad_width - 1), mode='edge')
     return np.convolve(x, kernel, mode='valid')
+
+
+def get_crystal_face_groups(manager: 'Manager') -> Dict[Tuple[int, int, int], Dict[Tuple[int, int, int], int]]:
+    """
+    Get the crystal face groups.
+    """
+    groups = {}
+    for i, group_hkl in enumerate(manager.ds.dataset_args.miller_indices):
+        group_idxs = (manager.crystal.symmetry_idx == i).nonzero().squeeze()
+        groups[group_hkl] = OrderedDict([
+            (tuple(manager.crystal.all_miller_indices[j].tolist()), int(j))
+            for j in group_idxs
+        ])
+    return groups

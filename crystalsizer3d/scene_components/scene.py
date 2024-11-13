@@ -40,6 +40,9 @@ class Scene:
     ETA_KEY = BSDF_KEY + '.eta'
     ROUGHNESS_KEY = BSDF_KEY + '.alpha.value'
     RADIANCE_KEY = 'light.emitter.radiance.value'
+    FILM_SIZE_KEY = 'sensor.film.size'
+    FILM_CROP_SIZE_KEY = 'sensor.film.crop_size'
+    FILM_CROP_OFFSET_KEY = 'sensor.film.crop_offset'
     mi_scene_dict: dict
     mi_scene: mi.Scene
     hash_id: str

@@ -12,10 +12,10 @@ from crystalsizer3d.util.utils import to_numpy
 
 
 class ControlPanel(AppPanel):
-    STEP_ROTATION = 0.1
-    STEP_TRANSLATION = 0.1
-    STEP_DISTANCE = 0.02
-    STEP_SCALE = 0.05
+    STEP_ROTATION = 0.005
+    STEP_TRANSLATION = 0.01
+    STEP_DISTANCE = 0.01
+    STEP_SCALE = 0.02
     STEP_IOR = 0.1
 
     def _init_components(self):
@@ -36,31 +36,49 @@ class ControlPanel(AppPanel):
         fc_sizer.Add(self.btn_load_crystal, 0, wx.EXPAND | wx.ALL, 3)
         fc_sizer.Add(self.btn_save_crystal, 0, wx.EXPAND | wx.ALL, 3)
 
-        # Face list
+        # Face list - with single selection only
         self.face_list = wx.ListCtrl(self, style=wx.LC_REPORT | wx.LC_SINGLE_SEL)
-        self.face_list.SetMinSize(wx.Size(256, 256))
         self.face_list.InsertColumn(0, 'Miller Index')
-        self.face_list.SetColumnWidth(col=0, width=100)
+        self.face_list.SetColumnWidth(col=0, width=int(self.face_list.GetSize()[0] / 2))
         self.face_list.InsertColumn(1, 'Distance')
-        self.face_list.SetColumnWidth(col=1, width=100)
+        self.face_list.SetColumnWidth(col=1, width=int(self.face_list.GetSize()[0] / 2))
+        self.face_list.SetMinSize((0, 400))
+        self.face_list.Bind(wx.EVT_LIST_ITEM_SELECTED, self.on_face_list_select)
 
         # Panel for adjusting face normal distances
+        self.txtctrl_dis = wx.TextCtrl(self, value='-')
+        self.btn_distance_update = wx.Button(self, label='Update')
+        self.btn_distance_update.Bind(wx.EVT_BUTTON, self.on_distance_change)
+        txt_sizer = wx.BoxSizer(wx.HORIZONTAL)
+        txt_sizer.Add(self.txtctrl_dis, 1, wx.EXPAND)
+        txt_sizer.Add(self.btn_distance_update, 1, wx.EXPAND)
+
         self.btn_distance_up = wx.Button(self, label='Dis. +')
         self.btn_distance_up.Bind(wx.EVT_BUTTON, self.on_distance_change)
         self.btn_distance_down = wx.Button(self, label='Dis. -')
         self.btn_distance_down.Bind(wx.EVT_BUTTON, self.on_distance_change)
+
         d_sizer = wx.BoxSizer(wx.HORIZONTAL)
         d_sizer.Add(self.btn_distance_up, 1, wx.EXPAND)
         d_sizer.Add(self.btn_distance_down, 1, wx.EXPAND)
 
         # Panel for adjusting scale (normal distances * scale param)
+        self.lbl_scale = wx.StaticText(self, label='Scale: ')
         self.btn_scale_up = wx.Button(self, label='Scl. +')
         self.btn_scale_up.Bind(wx.EVT_BUTTON, self.on_scale_change)
         self.btn_scale_down = wx.Button(self, label='Scl. -')
         self.btn_scale_down.Bind(wx.EVT_BUTTON, self.on_scale_change)
-        s_sizer = wx.BoxSizer(wx.HORIZONTAL)
-        s_sizer.Add(self.btn_scale_up, 1, wx.EXPAND)
-        s_sizer.Add(self.btn_scale_down, 1, wx.EXPAND)
+        self.btn_normalise = wx.Button(self, label='Normalise Dis & Scl')
+        self.btn_normalise.Bind(wx.EVT_BUTTON, self.on_scale_change)
+
+        s_sizer_btn = wx.BoxSizer(wx.HORIZONTAL)
+        s_sizer_btn.Add(self.btn_scale_up, 1, wx.EXPAND)
+        s_sizer_btn.Add(self.btn_scale_down, 1, wx.EXPAND)
+
+        s_sizer = wx.BoxSizer(wx.VERTICAL)
+        s_sizer.Add(self.lbl_scale, 1, wx.EXPAND | wx.ALL, 1)
+        s_sizer.Add(s_sizer_btn, 1, wx.EXPAND | wx.ALL, 1)
+        s_sizer.Add(self.btn_normalise, 1, wx.EXPAND | wx.ALL, 1)
 
         # Panel for controlling crystal rotation and position (transformation)
         self.btn_rotate_cw = wx.Button(self, label='↻')
@@ -84,13 +102,16 @@ class ControlPanel(AppPanel):
         t_sizer_top.Add(self.btn_rotate_cw, 1, wx.EXPAND)
         t_sizer_top.Add(self.btn_translate_up, 1, wx.EXPAND)
         t_sizer_top.Add(self.btn_rotate_ccw, 1, wx.EXPAND)
+
         t_sizer_bottom = wx.BoxSizer(wx.HORIZONTAL)
         t_sizer_bottom.Add(self.btn_translate_left, 1, wx.EXPAND)
         t_sizer_bottom.Add(self.btn_translate_down, 1, wx.EXPAND)
         t_sizer_bottom.Add(self.btn_translate_right, 1, wx.EXPAND)
+
         l_sizer = wx.BoxSizer(wx.HORIZONTAL)
         l_sizer.Add(self.lbl_rotation, 1, wx.EXPAND)
         l_sizer.Add(self.lbl_position, 1, wx.EXPAND)
+
         t_sizer = wx.StaticBoxSizer(wx.VERTICAL, parent=self, label='Transformation')
         t_sizer.Add(t_sizer_top, 0, wx.EXPAND | wx.TOP | wx.LEFT | wx.RIGHT, 5)
         t_sizer.Add(t_sizer_bottom, 0, wx.EXPAND | wx.BOTTOM | wx.LEFT | wx.RIGHT, 5)
@@ -112,6 +133,7 @@ class ControlPanel(AppPanel):
         main_sizer.Add(self.title, 0, wx.ALIGN_CENTER_HORIZONTAL | wx.ALL, 5)
         main_sizer.Add(fc_sizer, 0, wx.EXPAND | wx.ALL, 5)
         main_sizer.Add(self.face_list, 0, wx.EXPAND | wx.ALL, 5)
+        main_sizer.Add(txt_sizer, 0, wx.EXPAND | wx.LEFT | wx.RIGHT, 10)
         main_sizer.Add(d_sizer, 0, wx.EXPAND | wx.LEFT | wx.RIGHT, 10)
         main_sizer.Add(s_sizer, 0, wx.EXPAND | wx.LEFT | wx.RIGHT, 10)
         main_sizer.Add(t_sizer, 0, wx.EXPAND | wx.ALL, 5)
@@ -161,15 +183,23 @@ class ControlPanel(AppPanel):
         wx.PostEvent(self.app_frame, CrystalChangedEvent(build_mesh=False))
         self._log('Crystal loaded.')
 
+    def on_face_list_select(self, event):
+        idx = self.face_list.GetFirstSelected()
+        dis = self.face_list.GetItem(idx, 1).GetText()
+        self.txtctrl_dis.SetValue(dis)
+
     def update_face_list(self, event):
         """
         Update the list of faces.
         """
         event.Skip()
+        idx = self.face_list.GetFirstSelected()
         self.face_list.DeleteAllItems()
         for i, (hkl, d) in enumerate(zip(self.crystal.miller_indices, self.crystal.distances)):
             self.face_list.InsertItem(i, f'[{hkl[0]}, {hkl[1]}, {hkl[2]}]')
             self.face_list.SetItem(i, 1, f'{d:.4f}')
+        if idx != -1:
+            self.face_list.Select(idx)
 
     def update_control_labels(self, event):
         """
@@ -179,6 +209,7 @@ class ControlPanel(AppPanel):
         self.lbl_rotation.SetLabel(label=f'Rotation: {np.rad2deg(to_numpy(self.crystal.rotation[2])):.1f}°')
         self.lbl_position.SetLabel(label=f'Origin: ({self.crystal.origin[0]:.2f}, {self.crystal.origin[1]:.2f})')
         self.lbl_ior.SetLabel(label=f'IOR: {self.crystal.material_ior.item():.2f}')
+        self.lbl_scale.SetLabel(label=f'Scale: {self.crystal.scale.item():.2f}')
 
     def on_save_crystal(self, event: wx.CommandEvent):
         """
@@ -199,7 +230,7 @@ class ControlPanel(AppPanel):
             if dlg.ShowModal() != wx.ID_YES:
                 return
         self._log(f'Saving crystal data to {filepath}')
-        self.crystal.to_json(filepath, overwrite=True)
+        self.crystal.to_json(Path(filepath), overwrite=True)
         self._log(f'Crystal saved to {filepath}.')
 
     def on_rotate(self, event):
@@ -249,14 +280,23 @@ class ControlPanel(AppPanel):
             wx.MessageBox(message='You must load a crystal first.', caption='CrystalSizer3D',
                           style=wx.OK | wx.ICON_ERROR)
             return
-        idx = self.face_list.GetFocusedItem()
+        idx = self.face_list.GetFirstSelected()
         if idx == -1:
             wx.MessageBox(message='You must select a face.', caption='CrystalSizer3D', style=wx.OK | wx.ICON_ERROR)
             return
+        dis = self.face_list.GetItem(idx, 1).GetText()
         button = event.GetEventObject()
         label = button.GetLabel()
-        assert label in ['Dis. +', 'Dis. -']
-        increment = self.STEP_DISTANCE if label == 'Dis. +' else -self.STEP_DISTANCE
+        assert label in ['Dis. +', 'Dis. -', 'Update']
+        if label == 'Dis. +':
+            increment = self.STEP_DISTANCE
+        elif label == 'Dis. -':
+            increment = -self.STEP_DISTANCE
+        else:
+            entry = self.txtctrl_dis.GetValue()
+            increment = float(entry) - float(dis)
+            # TODO: entry sanitization to avoid crashing.
+            # How to determine whether the entry is a valid distance or not?
         with torch.no_grad():
             self.crystal.distances.data[idx] += increment
         wx.PostEvent(self.app_frame, CrystalChangedEvent())
@@ -271,10 +311,21 @@ class ControlPanel(AppPanel):
             return
         button = event.GetEventObject()
         label = button.GetLabel()
-        assert label in ['Scl. +', 'Scl. -']
-        sf = (1 + self.STEP_SCALE) if label == 'Scl. +' else (1 - self.STEP_SCALE)
+        assert label in ['Scl. +', 'Scl. -', 'Normalise Dis & Scl']
+        # TODO: replace strings with constants at top of class (all btn labels & their evt)
+        if label == 'Scl. +':
+            sf = self.STEP_SCALE
+        elif label == 'Scl. -':
+            sf = - self.STEP_SCALE
+        else:
+            # Update distance here and adjusting scale
+            sd = 1 / np.max(self.crystal.distances.data.tolist())
         with torch.no_grad():
-            self.crystal.distances.data *= sf
+            if label == 'Normalise Dis & Scl':
+                self.crystal.distances.data *= sd
+                self.crystal.scale /= sd
+            else:
+                self.crystal.scale += sf
         wx.PostEvent(self.app_frame, CrystalChangedEvent())
 
     def on_ior_change(self, event):
