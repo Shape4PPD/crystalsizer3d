@@ -10,8 +10,6 @@ from torch import Tensor
 from app.components.utils import AnchorsChangedEvent, EVT_REFINING_ENDED, EVT_REFINING_STARTED
 from crystalsizer3d.projector import ProjectedVertexKey
 
-from crystalsizer3d import logger
-
 if TYPE_CHECKING:
     from app.components.image_panel import ImagePanel
 
@@ -214,7 +212,7 @@ class AnchorManager:
 
     def on_mouse_click(self, event: wx.MouseEvent):
         """
-        Select the currently-highlighted vertex.
+        Select the currently-highlighted vertex or fix the anchor point in the image.
         """
 
         # Select the currently-highlighted vertex.

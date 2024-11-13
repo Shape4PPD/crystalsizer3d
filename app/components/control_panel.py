@@ -12,10 +12,10 @@ from crystalsizer3d.util.utils import to_numpy
 
 
 class ControlPanel(AppPanel):
-    STEP_ROTATION = 0.02
-    STEP_TRANSLATION = 0.02
-    STEP_DISTANCE = 0.02
-    STEP_SCALE = 0.05
+    STEP_ROTATION = 0.005
+    STEP_TRANSLATION = 0.01
+    STEP_DISTANCE = 0.01
+    STEP_SCALE = 0.02
     STEP_IOR = 0.1
 
     def _init_components(self):
@@ -42,6 +42,7 @@ class ControlPanel(AppPanel):
         self.face_list.SetColumnWidth(col=0, width=int(self.face_list.GetSize()[0] / 2))
         self.face_list.InsertColumn(1, 'Distance')
         self.face_list.SetColumnWidth(col=1, width=int(self.face_list.GetSize()[0] / 2))
+        self.face_list.SetMinSize((0, 400))
         self.face_list.Bind(wx.EVT_LIST_ITEM_SELECTED, self.on_face_list_select)
 
         # Panel for adjusting face normal distances
@@ -222,7 +223,7 @@ class ControlPanel(AppPanel):
         filepath = dialog.GetPath()
         dialog.Destroy()
         self._log(f'Saving crystal data to {filepath}')
-        self.crystal.to_json(filepath)
+        self.crystal.to_json(Path(filepath), overwrite=True)
         self._log(f'Crystal saved to {filepath}.')
 
     def on_rotate(self, event):

@@ -378,7 +378,7 @@ class AppFrame(wx.Frame):
             self.init_scene()
             return self.init_projector()
         self._log('Initialising projector...')
-        working_image_size = self.config.Read('working_image_size', '300,300')
+        working_image_size = self.config.Read('working_image_size', '800,800')
         image_size = tuple(map(int, working_image_size.split(',')))
         self.projector = Projector(
             crystal=self.crystal,
