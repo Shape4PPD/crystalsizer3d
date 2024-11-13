@@ -31,6 +31,7 @@ from crystalsizer3d.refiner.denoising import denoise_image
 from crystalsizer3d.refiner.refiner import Refiner
 from crystalsizer3d.scene_components.scene import Scene
 from crystalsizer3d.scene_components.utils import orthographic_scale_factor
+from crystalsizer3d.sequence.utils import get_image_paths
 from crystalsizer3d.util.kalman_filter import KalmanFilter
 from crystalsizer3d.util.utils import FlexibleJSONEncoder, hash_data, init_tensor, json_to_numpy, print_args, \
     smooth_signal, str2bool, to_dict, to_numpy, to_rgb
@@ -147,21 +148,6 @@ def get_args(printout: bool = True) -> Tuple[Namespace, RefinerArgs]:
     delattr(args, 'args_path')
 
     return args, refiner_args
-
-
-def _get_image_paths(args: Namespace, load_all: bool = False) -> List[Tuple[int, Path]]:
-    """
-    Load the images into an image sequence.
-    """
-    pathspec = str(args.images_dir.absolute()) + '/*.' + args.image_ext
-    all_image_paths = sorted(glob.glob(pathspec))
-    image_paths = [(idx, Path(all_image_paths[idx])) for idx in range(
-        args.start_image,
-        len(all_image_paths) if args.end_image == -1 else args.end_image,
-        args.every_n_images if not load_all else 1
-    )]
-    logger.info(f'Found {len(all_image_paths)} images in {args.images_dir}. Using {len(image_paths)} images.')
-    return image_paths
 
 
 def _calculate_crystals(
@@ -500,13 +486,17 @@ def _get_face_group_colours(n_groups: int, cmap: str = 'turbo') -> np.ndarray:
 def _get_colour_variations(
         base_colour: str,
         n_shades: int,
-        hue_range: float = 0.1,
-        sat_range: float = 0.2,
-        val_range: float = 0.2
+        hue_range: float = 0.15,
+        sat_range: float = 0.25,
+        val_range: float = 0.25,
+        max_luminance: float = 0.6
 ):
     """
     Generate a set of colour variations.
     """
+
+    def calculate_luminance(rgb):
+        return 0.299 * rgb[0] + 0.587 * rgb[1] + 0.114 * rgb[2]
 
     # Convert base color from string to RGB to HSV
     base_hsv = rgb_to_hsv(to_rgb(base_colour)[:3])
@@ -529,7 +519,20 @@ def _get_colour_variations(
         variation_hsv[0] = hue_vals[i]
         variation_hsv[1] = sat_vals[i]
         variation_hsv[2] = val_vals[i]
-        variations.append(hsv_to_rgb(variation_hsv))
+
+        # Convert to RGB and calculate luminance
+        rgb_colour = hsv_to_rgb(variation_hsv)
+        luminance = calculate_luminance(rgb_colour)
+
+        # Adjust if luminance is below threshold
+        while luminance > max_luminance:
+            # Gradually reduce value and boost saturation to improve contrast
+            variation_hsv[2] = max(0, variation_hsv[2] - 0.05)  # reduce brightness
+            variation_hsv[1] = min(1, variation_hsv[1] + 0.05)  # increase saturation slightly
+            rgb_colour = hsv_to_rgb(variation_hsv)
+            luminance = calculate_luminance(rgb_colour)
+
+        variations.append(rgb_colour)
 
     return variations
 
@@ -591,7 +594,9 @@ def _plot_face_property_values(
         image_paths: List[Tuple[int, Path]],
         save_dir: Path,
         measurement_idxs: np.ndarray = None,
-        measurement_values: np.ndarray = None
+        measurement_values: np.ndarray = None,
+        show_mean: bool = False,
+        show_std: bool = False
 ):
     """
     Plot face distances or areas.
@@ -630,8 +635,10 @@ def _plot_face_property_values(
         ax.set_title(_get_hkl_label(group_hkl, is_group=True))
 
         # Plot the mean +/- std
-        ax.plot(x_vals, y_mean, c=colour, label='Mean', zorder=1000)
-        ax.fill_between(x_vals, y_mean - y_std, y_mean + y_std, color=colour, alpha=0.1)
+        if show_mean:
+            ax.plot(x_vals, y_mean, c=colour, label='Mean', zorder=1000)
+        if show_std:
+            ax.fill_between(x_vals, y_mean - y_std, y_mean + y_std, color=colour, alpha=0.1)
 
         # Plot the individual faces
         for j, (y_j, lbl, colour_j) in enumerate(zip(y.T, lbls, colour_variants)):
@@ -681,8 +688,8 @@ def _plot_distances(
         image_paths=image_paths,
         save_dir=save_dir,
         measurement_idxs=measurements['idx'] if measurements is not None else None,
-        measurement_values=measurements['distances'] * measurements['scale'][:,
-                                                       None] if measurements is not None else None
+        measurement_values=measurements['distances'] * measurements['scale'][:, None]
+        if measurements is not None else None
     )
 
 
@@ -860,7 +867,7 @@ def _generate_images(
     refiner.manager.load_network(refiner.args.denoiser_model_path, 'denoiser')
 
     # Load all the image paths including ones which weren't optimised
-    image_paths_all = _get_image_paths(args, load_all=True)
+    image_paths_all = get_image_paths(args, load_all=True)
 
     # Prepare the parameters - interpolating the missing data
     data = {}
@@ -1061,7 +1068,7 @@ def _generate_videos(
     """
     Make videos of the growth sequences.
     """
-    image_paths_all = _get_image_paths(args, load_all=True)
+    image_paths_all = get_image_paths(args, load_all=True)
     video_paths = []
     videos_dir = save_dir_run / 'videos'
     videos_dir.mkdir(exist_ok=True)
@@ -1161,7 +1168,7 @@ def track_sequence():
         yaml.dump(spec, f)
 
     # Generate or load the crystals
-    image_paths = _get_image_paths(args)
+    image_paths = get_image_paths(args)
     data = _generate_or_load_crystals(args, refiner_args, save_dir_seq, image_paths, cache_only=False)
 
     # Instantiate a refiner if it isn't there already
@@ -1209,7 +1216,7 @@ def plot_run():
     args.images_dir = Path(args.images_dir)
     save_dir_seq = Path(args.save_dir_seq)
     assert save_dir_seq.exists(), f'Sequence save directory {save_dir_seq} does not exist.'
-    image_paths = _get_image_paths(args)
+    image_paths = get_image_paths(args)
 
     # Load the data
     refiner_dir = save_dir_seq / 'refiner' / args.refiner_dir
@@ -1246,6 +1253,10 @@ def plot_run():
                     mi = crystal.all_miller_indices
                     mi_idxs = ((mi[None, ...] == mi_ref[:, None]).all(dim=2)).nonzero(as_tuple=True)[1]
                     measurements[k].append(to_numpy(crystal.distances[mi_idxs]))
+                elif k == 'origin':
+                    # Adjust the origin so that the crystal's smallest z-coordinate is at z=0
+                    z_offset = crystal.vertices.amin(dim=0)[2]
+                    measurements[k].append(to_numpy(crystal.origin - torch.tensor([0, 0, z_offset])))
                 else:
                     measurements[k].append(to_numpy(getattr(crystal, k)))
         for k in keys:
@@ -1274,6 +1285,7 @@ def plot_run():
         origin0 = init_tensor(measurements['origin'][0])
         params = data['parameters_final']
         params['distances'] = adjust_distances(params['distances'], params['origin'])
+        params['origin'] = np.repeat(origin0[None, ...], len(params['origin']), axis=0)
 
         # Ensure the measurements also all have the same origin
         if len(np.unique(measurements['origin'], axis=0)) != 1:
