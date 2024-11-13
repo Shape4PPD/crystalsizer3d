@@ -7,7 +7,6 @@ import shutil
 import sys
 import time
 from argparse import ArgumentParser, Namespace
-from collections import OrderedDict
 from pathlib import Path
 from typing import Any, Dict, List, Tuple
 
@@ -15,49 +14,23 @@ import numpy as np
 import torch
 import yaml
 from PIL import Image, ImageDraw
-from matplotlib import pyplot as plt
-from matplotlib.colors import hsv_to_rgb, rgb_to_hsv
-from matplotlib.gridspec import GridSpec
 from scipy.interpolate import interp1d
 from torch import Tensor
 from torchvision.transforms.functional import center_crop
 
 from crystalsizer3d import LOGS_PATH, START_TIMESTAMP, logger
-from crystalsizer3d.args.refiner_args import RefinerArgs
+from crystalsizer3d.args.refiner_args import DENOISER_ARG_NAMES, KEYPOINTS_ARG_NAMES, PREDICTOR_ARG_NAMES, RefinerArgs
 from crystalsizer3d.crystal import Crystal
-from crystalsizer3d.nn.manager import Manager
 from crystalsizer3d.projector import Projector
 from crystalsizer3d.refiner.denoising import denoise_image
 from crystalsizer3d.refiner.refiner import Refiner
 from crystalsizer3d.scene_components.scene import Scene
 from crystalsizer3d.scene_components.utils import orthographic_scale_factor
+from crystalsizer3d.sequence.plots import plot_areas, plot_distances, plot_losses, plot_origin, plot_rotation
 from crystalsizer3d.sequence.utils import get_image_paths
 from crystalsizer3d.util.kalman_filter import KalmanFilter
 from crystalsizer3d.util.utils import FlexibleJSONEncoder, hash_data, init_tensor, json_to_numpy, print_args, \
-    smooth_signal, str2bool, to_dict, to_numpy, to_rgb
-
-plot_extension = 'png'  # or svg
-
-DENOISER_ARG_NAMES = [
-    'denoiser_model_path', 'denoiser_n_tiles', 'denoiser_tile_overlap',
-    'denoiser_oversize_input', 'denoiser_max_img_size', 'denoiser_batch_size',
-]
-
-KEYPOINTS_ARG_NAMES = [
-    'keypoints_model_path', 'keypoints_oversize_input', 'keypoints_max_img_size', 'keypoints_batch_size',
-    'keypoints_min_distance', 'keypoints_threshold', 'keypoints_exclude_border', 'keypoints_blur_kernel_relative_size',
-    'keypoints_n_patches', 'keypoints_patch_size', 'keypoints_patch_search_res', 'keypoints_attenuation_sigma',
-    'keypoints_max_attenuation_factor', 'keypoints_low_res_catchment_distance', 'keypoints_loss_type'
-]
-
-PREDICTOR_ARG_NAMES = [
-    'predictor_model_path', 'initial_pred_noise_min', 'initial_pred_noise_max', 'initial_pred_oversize_input',
-    'initial_pred_max_img_size', 'multiscale', 'use_keypoints', 'n_patches', 'w_img_l1', 'w_img_l2', 'w_perceptual',
-    'w_latent', 'w_rcf', 'w_overshoot', 'w_symmetry', 'w_z_pos', 'w_rotation_xy', 'w_patches', 'w_fullsize',
-    'w_switch_probs', 'w_keypoints', 'w_anchors', 'l_decay_l1', 'l_decay_l2', 'l_decay_perceptual', 'l_decay_latent',
-    'l_decay_rcf', 'perceptual_model', 'latents_model', 'mv2_config_path', 'mv2_checkpoint_path', 'rcf_model_path',
-    'rcf_loss_type', 'keypoints_loss_type'
-]
+    str2bool, to_dict, to_numpy
 
 ARG_NAMES = {
     'denoiser': DENOISER_ARG_NAMES,
@@ -66,9 +39,6 @@ ARG_NAMES = {
 }
 
 PARAMETER_KEYS = ['scale', 'distances', 'origin', 'rotation', 'material_roughness', 'material_ior', 'light_radiance']
-
-line_styles = ['--', '-.', ':']
-marker_styles = ['o', 'x', 's', '+', 'v', '^', '<', '>', 'd', 'p', 'P', '*', 'h', 'H', '|', '_']
 
 refiner: Refiner = None
 
@@ -449,359 +419,6 @@ def _generate_or_load_crystals(
     return data
 
 
-def _make_video(images_or_masks: str, save_dir: Path):
-    """
-    Make a video of the annotated images or masks.
-    """
-    assert images_or_masks in ['images', 'masks'], f'Invalid images_or_masks: {images_or_masks}'
-    imgs_dir = save_dir / f'annotated_{images_or_masks}'
-    save_path = save_dir / f'annotated_{images_or_masks}.mp4'
-    logger.info(f'Making video of {images_or_masks} in {imgs_dir} to {save_path}.')
-    cmd = f'ffmpeg -y -framerate 25 -pattern_type glob -i "{str(imgs_dir.absolute())}/*.png" -c:v libx264 -pix_fmt yuv420p "{save_path}"'
-    logger.info(f'Running command: {cmd}')
-    os.system(cmd)
-
-
-def _get_crystal_groups(manager: Manager) -> Dict[Tuple[int, int, int], Dict[Tuple[int, int, int], int]]:
-    """
-    Get the crystal groups.
-    """
-    groups = {}
-    for i, group_hkl in enumerate(manager.ds.dataset_args.miller_indices):
-        group_idxs = (manager.crystal.symmetry_idx == i).nonzero().squeeze()
-        groups[group_hkl] = OrderedDict([
-            (tuple(manager.crystal.all_miller_indices[j].tolist()), int(j))
-            for j in group_idxs
-        ])
-    return groups
-
-
-def _get_face_group_colours(n_groups: int, cmap: str = 'turbo') -> np.ndarray:
-    """
-    Get a set of colours for the face groups.
-    """
-    return plt.get_cmap(cmap)(np.linspace(0, 1, n_groups))
-
-
-def _get_colour_variations(
-        base_colour: str,
-        n_shades: int,
-        hue_range: float = 0.15,
-        sat_range: float = 0.25,
-        val_range: float = 0.25,
-        max_luminance: float = 0.6
-):
-    """
-    Generate a set of colour variations.
-    """
-
-    def calculate_luminance(rgb):
-        return 0.299 * rgb[0] + 0.587 * rgb[1] + 0.114 * rgb[2]
-
-    # Convert base color from string to RGB to HSV
-    base_hsv = rgb_to_hsv(to_rgb(base_colour)[:3])
-
-    # Create the value ranges
-    hue_min = max(0, base_hsv[0] - hue_range / 2)
-    hue_max = min(1, hue_min + hue_range)
-    sat_min = max(0, base_hsv[1] - sat_range / 2)
-    sat_max = min(1, sat_min + sat_range)
-    val_min = max(0, base_hsv[2] - val_range / 2)
-    val_max = min(1, val_min + val_range)
-    hue_vals = np.linspace(hue_min, hue_max, n_shades)
-    sat_vals = np.linspace(sat_min, sat_max, n_shades)
-    val_vals = np.linspace(val_min, val_max, n_shades)
-
-    # Adjust hue and saturation to create distinct shades
-    variations = []
-    for i in range(n_shades):
-        variation_hsv = base_hsv.copy()
-        variation_hsv[0] = hue_vals[i]
-        variation_hsv[1] = sat_vals[i]
-        variation_hsv[2] = val_vals[i]
-
-        # Convert to RGB and calculate luminance
-        rgb_colour = hsv_to_rgb(variation_hsv)
-        luminance = calculate_luminance(rgb_colour)
-
-        # Adjust if luminance is below threshold
-        while luminance > max_luminance:
-            # Gradually reduce value and boost saturation to improve contrast
-            variation_hsv[2] = max(0, variation_hsv[2] - 0.05)  # reduce brightness
-            variation_hsv[1] = min(1, variation_hsv[1] + 0.05)  # increase saturation slightly
-            rgb_colour = hsv_to_rgb(variation_hsv)
-            luminance = calculate_luminance(rgb_colour)
-
-        variations.append(rgb_colour)
-
-    return variations
-
-
-def _get_hkl_label(hkl: np.ndarray, is_group: bool = False) -> str:
-    """
-    Get a LaTeX label for the hkl indices, replacing negative indices with overlines.
-    """
-    brackets = ['\{', '\}'] if is_group else ['(', ')']
-    return f'${brackets[0]}' + ''.join([f'{mi}' if mi > -1 else f'\\bar{mi * -1}' for mi in hkl]) + f'{brackets[1]}$'
-
-
-def _plot_losses(
-        losses_final: List[float],
-        losses_all: List[List[float]],
-        image_paths: List[Tuple[int, Path]],
-        save_dir: Path,
-        smoothing_window: int = 11
-):
-    """
-    Plot the losses.
-    """
-    x_vals = [idx for idx, _ in image_paths]
-
-    # Normalize the indices for the colormap
-    norm = plt.Normalize(x_vals[0], x_vals[-1])
-    cmap = plt.get_cmap('plasma')
-    sm = plt.cm.ScalarMappable(cmap=cmap, norm=norm)
-    sm.set_array([])  # ScalarMappable needs an array, even if not used here
-
-    fig, axes = plt.subplots(2, figsize=(12, 8))
-
-    # Final losses for each image in the sequence
-    ax = axes[0]
-    ax.set_title('Final losses')
-    ax.grid()
-    ax.plot(x_vals, losses_final)
-    ax.set_xlabel('Image index')
-    ax.set_ylabel('Loss')
-
-    # Loss convergence per image
-    ax = axes[1]
-    ax.set_title('Loss convergence')
-    ax.grid()
-    for i, v in enumerate(losses_all):
-        ax.plot(smooth_signal(v, window_size=smoothing_window), color=cmap(norm(x_vals[i])), alpha=0.8)
-    ax.set_xlabel('Iteration')
-    ax.set_ylabel('Loss')
-    cbar = fig.colorbar(sm, ax=ax)
-    cbar.set_label('Image index', rotation=270, labelpad=15)
-
-    fig.tight_layout()
-    plt.savefig(save_dir / f'losses.{plot_extension}')
-
-
-def _plot_face_property_values(
-        property_name: str,
-        property_values: np.ndarray,
-        image_paths: List[Tuple[int, Path]],
-        save_dir: Path,
-        measurement_idxs: np.ndarray = None,
-        measurement_values: np.ndarray = None,
-        show_mean: bool = False,
-        show_std: bool = False
-):
-    """
-    Plot face distances or areas.
-    """
-    x_vals = [idx for idx, _ in image_paths]
-    groups = _get_crystal_groups(refiner.manager)
-    n_groups = len(groups)
-    group_colours = _get_face_group_colours(n_groups)
-
-    if property_name == 'areas':
-        y_label = 'Face area'
-    elif property_name == 'distances':
-        y_label = 'Distance'
-    else:
-        raise ValueError(f'Invalid property name: {property_name}')
-
-    # Make a grid of plots showing the values for each face group
-    n_cols = int(np.ceil(np.sqrt(n_groups)))
-    n_rows = int(np.ceil(n_groups / n_cols))
-    fig = plt.figure(figsize=(n_cols * 6, n_rows * 4))
-    gs = GridSpec(
-        n_rows, n_cols,
-        top=0.95, bottom=0.08, right=0.99, left=0.05,
-        hspace=0.3, wspace=0.2
-    )
-    for i, (group_hkl, group_idxs) in enumerate(groups.items()):
-        colour = group_colours[i]
-        colour_variants = _get_colour_variations(colour, len(group_idxs))
-        y = property_values[:, list(group_idxs.values())]
-        y_measured = measurement_values[:, list(group_idxs.values())] if measurement_values is not None else None
-        y_mean = y.mean(axis=1)
-        y_std = y.std(axis=1)
-        lbls = [_get_hkl_label(hkl) for hkl in list(group_idxs.keys())]
-
-        ax = fig.add_subplot(gs[i])
-        ax.set_title(_get_hkl_label(group_hkl, is_group=True))
-
-        # Plot the mean +/- std
-        if show_mean:
-            ax.plot(x_vals, y_mean, c=colour, label='Mean', zorder=1000)
-        if show_std:
-            ax.fill_between(x_vals, y_mean - y_std, y_mean + y_std, color=colour, alpha=0.1)
-
-        # Plot the individual faces
-        for j, (y_j, lbl, colour_j) in enumerate(zip(y.T, lbls, colour_variants)):
-            ax.plot(x_vals, y_j, label=lbl, c=colour_j,
-                    linestyle=line_styles[j % len(line_styles)], linewidth=0.8, alpha=0.8)
-            if y_measured is not None:
-                ax.plot(measurement_idxs, y_measured[:, j], label=lbl + ' (manual)', c=colour_j,
-                        marker=marker_styles[j % len(marker_styles)], linestyle='none', markersize=5, alpha=0.7)
-
-        ax.set_xlabel('Image index')
-        ax.set_ylabel(y_label)
-        ax.legend(loc='lower right')
-    plt.savefig(save_dir / f'{property_name}_grouped.{plot_extension}')
-
-    # Make a plot showing the mean values all together
-    fig, ax = plt.subplots(1, figsize=(12, 8))
-    ax.set_title(f'Mean {property_name}')
-    ax.grid()
-    for i, (group_hkl, group_idxs) in enumerate(groups.items()):
-        colour = group_colours[i]
-        y = property_values[:, list(group_idxs.values())]
-        y_mean = y.mean(axis=1)
-        y_std = y.std(axis=1)
-        ax.fill_between(x_vals, y_mean - y_std, y_mean + y_std, color=colour, alpha=0.1)
-        ax.plot(x_vals, y_mean, c=colour, label=_get_hkl_label(group_hkl, is_group=True))
-    ax.set_xlabel('Image index')
-    ax.set_ylabel(y_label)
-    ax.legend()
-    fig.tight_layout()
-    plt.savefig(save_dir / f'{property_name}_mean.{plot_extension}')
-
-
-def _plot_distances(
-        parameters: Dict[str, np.ndarray],
-        image_paths: List[Tuple[int, Path]],
-        save_dir: Path,
-        measurements: Dict[str, np.ndarray] = None
-):
-    """
-    Plot face distances.
-    """
-    distances = parameters['distances']
-    scales = parameters['scale']
-    _plot_face_property_values(
-        property_name='distances',
-        property_values=distances * scales[:, None],
-        image_paths=image_paths,
-        save_dir=save_dir,
-        measurement_idxs=measurements['idx'] if measurements is not None else None,
-        measurement_values=measurements['distances'] * measurements['scale'][:, None]
-        if measurements is not None else None
-    )
-
-
-def _plot_areas(
-        parameters: Dict[str, np.ndarray],
-        image_paths: List[Tuple[int, Path]],
-        save_dir: Path,
-        measurements: Dict[str, np.ndarray] = None
-):
-    """
-    Plot face areas.
-    """
-    distances = parameters['distances']
-    scales = parameters['scale']
-
-    # Get a crystal object
-    ds = refiner.manager.ds
-    cs = ds.csd_proxy.load(ds.dataset_args.crystal_id)
-    crystal = Crystal(
-        lattice_unit_cell=cs.lattice_unit_cell,
-        lattice_angles=cs.lattice_angles,
-        miller_indices=ds.miller_indices,
-        point_group_symbol=cs.point_group_symbol,
-        dtype=torch.float64
-    )
-
-    # Calculate the face areas
-    areas = np.zeros_like(distances)
-    for i in range(len(distances)):
-        crystal.build_mesh(distances=init_tensor(distances[i], dtype=torch.float64))
-        unscaled_areas = np.array([crystal.areas[tuple(hkl.tolist())] for hkl in crystal.all_miller_indices])
-        areas[i] = unscaled_areas * scales[i]**2
-
-    # Calculate the face areas for the manual measurements
-    areas_m = None
-    if measurements is not None:
-        distances_m = measurements['distances']
-        scales_m = measurements['scale']
-        areas_m = np.zeros_like(distances_m)
-        for i in range(len(distances_m)):
-            crystal.build_mesh(distances=init_tensor(distances_m[i], dtype=torch.float64))
-            unscaled_areas_m = np.array([crystal.areas[tuple(hkl.tolist())] for hkl in crystal.all_miller_indices])
-            areas_m[i] = unscaled_areas_m * scales_m[i]**2
-
-    _plot_face_property_values(
-        property_name='areas',
-        property_values=areas,
-        image_paths=image_paths,
-        save_dir=save_dir,
-        measurement_idxs=measurements['idx'] if measurements is not None else None,
-        measurement_values=areas_m
-    )
-
-
-def _plot_origin(
-        parameters: Dict[str, np.ndarray],
-        image_paths: List[Tuple[int, Path]],
-        save_dir: Path,
-        measurements: Dict[str, np.ndarray] = None
-):
-    """
-    Plot origin position.
-    """
-    origins = parameters['origin']
-    x_vals = [idx for idx, _ in image_paths]
-    fig, ax = plt.subplots(1, figsize=(12, 8))
-    ax.set_title('Origin position')
-    ax.grid()
-    for i in range(3):
-        ax.plot(x_vals, origins[:, i], label='xyz'[i])
-    if measurements is not None:
-        origins = measurements['origin']
-        x_vals = measurements['idx']
-        for i in range(3):
-            ax.plot(x_vals, origins[:, i], label='xyz'[i] + ' (manual)', linestyle='none',
-                    marker=marker_styles[i], markersize=5, alpha=0.7)
-    ax.set_xlabel('Image index')
-    ax.set_ylabel('Position')
-    ax.legend()
-    fig.tight_layout()
-    plt.savefig(save_dir / f'origin.{plot_extension}')
-
-
-def _plot_rotation(
-        parameters: Dict[str, np.ndarray],
-        image_paths: List[Tuple[int, Path]],
-        save_dir: Path,
-        measurements: Dict[str, np.ndarray] = None
-):
-    """
-    Plot rotation.
-    """
-    rotations = parameters['rotation']
-    x_vals = [idx for idx, _ in image_paths]
-    fig, ax = plt.subplots(1, figsize=(12, 8))
-    ax.set_title('Axis-angle rotation vector components')
-    ax.grid()
-    for i in range(3):
-        ax.plot(x_vals, rotations[:, i], label='$R_' + 'xyz'[i] + '$')
-    if measurements is not None:
-        rotations = measurements['rotation']
-        x_vals = measurements['idx']
-        for i in range(3):
-            ax.plot(x_vals, rotations[:, i], label='$R_' + 'xyz'[i] + '$ (manual)', linestyle='none',
-                    marker=marker_styles[i], markersize=5, alpha=0.7)
-    ax.set_xlabel('Image index')
-    ax.set_ylabel('Component value')
-    ax.legend()
-    fig.tight_layout()
-    plt.savefig(save_dir / f'rotation.{plot_extension}')
-
-
 def _generate_images(
         args: Namespace,
         parameters: Dict[str, np.ndarray],
@@ -1176,11 +793,11 @@ def track_sequence():
         refiner = Refiner(args=refiner_args, do_init=False)
 
     # Make some plots
-    _plot_losses(data['losses_final'], data['losses_all'], image_paths, save_dir_run)
-    _plot_distances(data['parameters_final'], image_paths, save_dir_run)
-    _plot_areas(data['parameters_final'], image_paths, save_dir_run)
-    _plot_origin(data['parameters_final'], image_paths, save_dir_run)
-    _plot_rotation(data['parameters_final'], image_paths, save_dir_run)
+    plot_losses(data['losses_final'], data['losses_all'], image_paths, save_dir_run)
+    plot_distances(refiner.manager, data['parameters_final'], image_paths, save_dir_run)
+    plot_areas(refiner.manager, data['parameters_final'], image_paths, save_dir_run)
+    plot_origin(data['parameters_final'], image_paths, save_dir_run)
+    plot_rotation(data['parameters_final'], image_paths, save_dir_run)
 
     # Generate images and videos
     if args.save_annotated_images:
@@ -1292,17 +909,17 @@ def plot_run():
             measurements['distances'] = adjust_distances(measurements['distances'], measurements['origin'])
 
     # Make plots
-    _plot_losses(data['losses_final'], data['losses_all'], image_paths, run_dir)
+    plot_losses(data['losses_final'], data['losses_all'], image_paths, run_dir)
     plot_args = dict(
         parameters=data['parameters_final'],
         measurements=measurements,
         image_paths=image_paths,
         save_dir=run_dir,
     )
-    _plot_distances(**plot_args)
-    _plot_areas(**plot_args)
-    _plot_origin(**plot_args)
-    _plot_rotation(**plot_args)
+    plot_distances(manager=refiner.manager, **plot_args)
+    plot_areas(manager=refiner.manager, **plot_args)
+    plot_origin(**plot_args)
+    plot_rotation(**plot_args)
 
     # Generate images and videos
     _generate_images(args, parameters=data['parameters_final'],

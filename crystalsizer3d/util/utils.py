@@ -5,10 +5,11 @@ import os
 import random
 import threading
 from argparse import Namespace
+from collections import OrderedDict
 from json import JSONEncoder
 from math import log2
 from pathlib import Path
-from typing import Any, List, Optional, Tuple, Union
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 import matplotlib.colors as mcolors
 import numpy as np
@@ -229,3 +230,17 @@ def smooth_signal(x: np.ndarray, window_size: int = 11) -> np.ndarray:
     pad_width = (window_size - 1) // 2
     x = np.pad(x, (pad_width, window_size - pad_width - 1), mode='edge')
     return np.convolve(x, kernel, mode='valid')
+
+
+def get_crystal_face_groups(manager: 'Manager') -> Dict[Tuple[int, int, int], Dict[Tuple[int, int, int], int]]:
+    """
+    Get the crystal face groups.
+    """
+    groups = {}
+    for i, group_hkl in enumerate(manager.ds.dataset_args.miller_indices):
+        group_idxs = (manager.crystal.symmetry_idx == i).nonzero().squeeze()
+        groups[group_hkl] = OrderedDict([
+            (tuple(manager.crystal.all_miller_indices[j].tolist()), int(j))
+            for j in group_idxs
+        ])
+    return groups
