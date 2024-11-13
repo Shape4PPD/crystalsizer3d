@@ -1,4 +1,5 @@
 import math
+import sys
 from collections import OrderedDict
 from typing import Dict, Optional, TYPE_CHECKING, Tuple
 
@@ -107,6 +108,16 @@ class AnchorManager:
         rel_y = -rel_y  # Flip y-axis to make it -1 at bottom and +1 at top
         pos = torch.tensor([rel_x, rel_y])
 
+        # Adjust DPI scaling based on system scaling
+        if sys.platform == 'win32':
+            sf = self.GetDPIScaleFactor()
+            if sf in [1, 1.25, 1.5]:
+                sf = 1
+            elif sf in [1.75, 2.0, 2.25]:
+                sf = 2
+            elif sf in [2.5]:
+                sf = 3
+            pos /= sf
         return pos
 
     def _relative_to_image_coords(self, rel_coords: Tensor) -> Tuple[float, float]:
@@ -352,11 +363,13 @@ class AnchorManager:
         if self.bitmaps['wireframe'] is None:
             return
         canvas = self._new_canvas()
-        mem_dc = wx.MemoryDC()
-        mem_dc.SelectObject(canvas)
-        anchors_drawn = []
+
+        # Create a graphics context from the bitmap
+        mem_dc = wx.MemoryDC(canvas)
+        gc = wx.GraphicsContext.Create(mem_dc)
 
         # Draw the active (saved) anchors
+        anchors_drawn = []
         for vertex_key, anchor_pos in self.anchors.items():
             if vertex_key not in self.anchor_visibility:
                 self.anchor_visibility[vertex_key] = True
@@ -386,20 +399,21 @@ class AnchorManager:
             ax, ay = self._relative_to_image_coords(anchor_pos)
 
             # Draw a line from the vertex to the anchor point
-            mem_dc.SetPen(wx.Pen((*self.ACTIVE_LINE_COLOUR, 150), 2, wx.PENSTYLE_SHORT_DASH))
-            mem_dc.DrawLine(wx.Point((vx, vy)), wx.Point((ax, ay)))
+            gc.SetPen(wx.Pen((*self.ACTIVE_LINE_COLOUR, 150), 2, wx.PENSTYLE_SHORT_DASH))
+            gc.StrokeLine(round(vx), round(vy), round(ax), round(ay))
 
             # Draw a circle at the location of the vertex
             colour = self.ACTIVE_COLOUR_FACING if vertex_key[1] == 'facing' else self.ACTIVE_COLOUR_BACK
-            mem_dc.SetPen(wx.Pen((*colour, self.ACTIVE_OUTLINE_ALPHA), 1))
-            mem_dc.SetBrush(wx.Brush((*colour, self.ACTIVE_FILL_ALPHA)))
-            mem_dc.DrawCircle(wx.Point((vx, vy)), self.ACTIVE_CIRCLE_RADIUS)
+            radius = self.ACTIVE_CIRCLE_RADIUS
+            gc.SetPen(wx.Pen((*colour, self.ACTIVE_OUTLINE_ALPHA), 1))
+            gc.SetBrush(wx.Brush((*colour, self.ACTIVE_FILL_ALPHA)))
+            gc.DrawEllipse(vx - radius, vy - radius, 2 * radius, 2 * radius)
 
             # Draw a cross at the location of the anchor point
-            mem_dc.SetPen(wx.Pen((*self.ACTIVE_CROSS_COLOUR, 150), 1))
             d = self.ANCHOR_CROSS_SIZE / math.sqrt(2)
-            mem_dc.DrawLine(wx.Point((ax - d, ay - d)), wx.Point((ax + d, ay + d)))
-            mem_dc.DrawLine(wx.Point((ax + d, ay - d)), wx.Point((ax - d, ay + d)))
+            gc.SetPen(wx.Pen((*self.ACTIVE_CROSS_COLOUR, 150), 1))
+            gc.StrokeLine(round(ax - d), round(ay - d), round(ax + d), round(ay + d))
+            gc.StrokeLine(round(ax + d), round(ay - d), round(ax - d), round(ay + d))
 
             # Only draw each cluster once
             anchors_drawn.append(cluster_key)
@@ -424,14 +438,14 @@ class AnchorManager:
 
                 if draw_line:
                     # Connecting line
-                    mem_dc.SetPen(wx.Pen((*self.ANCHOR_LINE_COLOUR, 255), 2, wx.PENSTYLE_SHORT_DASH))
-                    mem_dc.DrawLine(wx.Point((vx, vy)), wx.Point((ax, ay)))
+                    gc.SetPen(wx.Pen((*self.ANCHOR_LINE_COLOUR, 255), 2, wx.PENSTYLE_SHORT_DASH))
+                    gc.StrokeLine(round(vx), round(vy), round(ax), round(ay))
 
                     # Cross at the anchor point
-                    mem_dc.SetPen(wx.Pen((*self.ANCHOR_CROSS_COLOUR, 255), 2))
                     d = self.ANCHOR_CROSS_SIZE / math.sqrt(2)
-                    mem_dc.DrawLine(wx.Point((ax - d, ay - d)), wx.Point((ax + d, ay + d)))
-                    mem_dc.DrawLine(wx.Point((ax + d, ay - d)), wx.Point((ax - d, ay + d)))
+                    gc.SetPen(wx.Pen((*self.ANCHOR_CROSS_COLOUR, 255), 2))
+                    gc.StrokeLine(round(ax - d), round(ay - d), round(ax + d), round(ay + d))
+                    gc.StrokeLine(round(ax + d), round(ay - d), round(ax - d), round(ay + d))
 
             # If the vertex is not found, reset to highlight mode unless we were trying to show a saved anchor
             except VertexNotFoundInImageError:
@@ -462,9 +476,9 @@ class AnchorManager:
                     radius = self.SELECTION_CIRCLE_RADIUS
 
                 vx, vy = self._get_vertex_image_coords((cluster_idx, face_idx))
-                mem_dc.SetPen(wx.Pen(outline_colour, 1))
-                mem_dc.SetBrush(wx.Brush(fill_colour))
-                mem_dc.DrawCircle(wx.Point((vx, vy)), radius)
+                gc.SetPen(wx.Pen(outline_colour, 1))
+                gc.SetBrush(wx.Brush(fill_colour))
+                gc.DrawEllipse(vx - radius, vy - radius, 2 * radius, 2 * radius)
 
             # If the vertex is not found, reset to highlight mode unless we were trying to show a saved anchor
             except VertexNotFoundInImageError:

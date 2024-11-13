@@ -35,9 +35,9 @@ class AppFrame(wx.Frame):
     projector: Optional[Projector] = None
 
     def __init__(self, config: wx.Config):
-        super().__init__(parent=None, title='Crystal Sizer 3D', size=(1280, 720))
+        super().__init__(parent=None, title='Crystal Sizer 3D')
         self.config = config
-        self.SetWindowStyle(style=wx.DEFAULT_DIALOG_STYLE | wx.MINIMIZE_BOX)
+        self.SetMinSize((1200, 600))
 
         # Initialise panels
         self.control_panel = ControlPanel(self)
@@ -377,7 +377,7 @@ class AppFrame(wx.Frame):
             self.init_scene()
             return self.init_projector()
         self._log('Initialising projector...')
-        working_image_size = self.config.Read('working_image_size', '300,300')
+        working_image_size = self.config.Read('working_image_size', '800,800')
         image_size = tuple(map(int, working_image_size.split(',')))
         self.projector = Projector(
             crystal=self.crystal,

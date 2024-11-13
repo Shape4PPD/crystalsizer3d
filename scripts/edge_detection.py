@@ -23,7 +23,7 @@ class RuntimeArgs(BaseArgs):
     def __init__(
             self,
             image_path: Path,
-            model_path: Path = ROOT_PATH / 'tmp' / 'bsds500_pascal_model.pth',
+            model_path: Path = ROOT_PATH / 'data' / 'bsds500_pascal_model.pth',
             **kwargs
     ):
         assert image_path.exists(), f'Image path does not exist: {image_path}'
@@ -39,7 +39,7 @@ class RuntimeArgs(BaseArgs):
         group = parser.add_argument_group('Runtime Args')
         group.add_argument('--image-path', type=Path,
                            help='Path to the image to process.')
-        group.add_argument('--model-path', type=Path, default=ROOT_PATH / 'tmp' / 'bsds500_pascal_model.pth',
+        group.add_argument('--model-path', type=Path, default=ROOT_PATH / 'data' / 'bsds500_pascal_model.pth',
                            help='Path to the edge detection model.')
         return group
 
