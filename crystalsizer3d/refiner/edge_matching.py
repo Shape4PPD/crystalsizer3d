@@ -8,12 +8,7 @@ class ContourDistanceNormalLoss(nn.Module):
     def __init__(self):
         super(ContourDistanceNormalLoss, self).__init__()
 
-    def forward(self, points, normals, distance_image):
-        N = len(points)  # Number of points
-
-        # Extract all points and normal vectors at once
-        ref_points = points #torch.stack([points.get_point(i).point for i in range(N)])
-        
+    def forward(self, ref_points, normals, distance_image):        
         # Sample points along lines for all reference points
         line_points = self.sample_points_along_line_full_image(ref_points, normals, 1000, distance_image.shape[-2:])
         
@@ -98,7 +93,6 @@ class ContourDistanceNormalLoss(nn.Module):
         return torch.stack([intersection_1, intersection_2])
 
     def points_in_image(self, points, distance_image):
-        N = len(points)  # Number of points
         H, W = distance_image.shape[-2], distance_image.shape[-1]  # Height and Width of the distance image
         try:
             grid = points.get_grid_sample_points(H, W)
@@ -107,12 +101,23 @@ class ContourDistanceNormalLoss(nn.Module):
             grid[:, 0] = 2.0 * grid[:, 0] / (W - 1) - 1.0  # x (width)
             grid[:, 1] = 2.0 * grid[:, 1] / (H - 1) - 1.0  # y (height)
             grid = grid.view(1, -1, 1, 2)
-        interpolated_values = F.grid_sample(distance_image, grid, mode='bilinear', align_corners=True)
+        interpolated_values = F.grid_sample(
+            distance_image,
+            grid,
+            mode='bilinear',
+            align_corners=True
+            )
         return interpolated_values
 
-    def find_closest_minima(self, image, sampled_points, reference_points, window_size=3):
+    def find_closest_minima(self, image, sampled_points, reference_points):
         # Sample the image along the line to get the intensity values
-        image_values = self.points_in_image(sampled_points.view(-1, 2), image).view(sampled_points.size(0), sampled_points.size(1))
+        image_values = self.points_in_image(
+            sampled_points.view(-1, 2),
+            image
+        ).view(
+            sampled_points.size(0),
+            sampled_points.size(1)
+        )
 
         # Calculate distances from reference points to all sampled points
         dist = torch.norm(sampled_points - reference_points.unsqueeze(1), dim=2)
