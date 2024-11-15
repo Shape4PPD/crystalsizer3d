@@ -16,7 +16,7 @@ class ContourDistanceNormalLoss(nn.Module):
         reference_values = self.points_in_image(ref_points, distance_image)
         
         # Find nearest local minima for all line points
-        nearest_minima_positions, nearest_minima_values = self.find_closest_minima(distance_image, line_points, ref_points, window_size=5)
+        nearest_minima_positions, nearest_minima_values = self.find_closest_minima(distance_image, line_points, ref_points)
         
         
         # Filter out None values

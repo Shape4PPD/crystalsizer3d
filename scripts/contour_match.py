@@ -5,10 +5,12 @@ from pathlib import Path
 from crystalsizer3d.crystal import Crystal
 from crystalsizer3d import LOGS_PATH, ROOT_PATH, START_TIMESTAMP, USE_CUDA, logger
 from crystalsizer3d.util.utils import print_args, to_numpy, init_tensor
+from crystalsizer3d.refiner.contour_distance_normal_loss import ContourDistanceNormalLoss
 import torch.nn.functional as F
 import torchvision.transforms as transforms
-from crystal_points import ProjectorPoints
-from plot_mesh import multiplot, overlay_plot, plot_sampled_points_with_intensity
+import matplotlib.pyplot as plt
+from crystalsizer3d.util.plots import plot_coutour_loss
+#from plot_mesh import multiplot, overlay_plot, plot_sampled_points_with_intensity
 import torch.optim as optim
 from crystalsizer3d.scene_components.scene import Scene
 import cv2
@@ -326,8 +328,11 @@ def run():
 
     #inital 
     img_int = img_tensor.squeeze(0).squeeze(0).detach().cpu().numpy()
-    multiplot(img_int,points_opt,save_dir,'inital')
-
+    fig, ax = plt.subplots()
+    title = 'Inital conditions'
+    plot_coutour_loss(ax,title,img_int,points_opt.squeeze().detach().cpu().numpy(),np.zeros(1),False)
+    plt.savefig(save_dir / f'{title}.png')
+    
     optimizer = optim.Adam(params['distances'], lr=1e-2)
     target_dist = crystal_tar.distances
     # prev_dist = crystal_opt.distances
@@ -371,19 +376,15 @@ def run():
             print(group)
             
         if step % 1 == 0:
-            print("plotting")
-            # projector = Projector(
-            #     crystal=crystal_opt,
-            #     external_ior=1.333,
-            #     image_size=f_map.shape[-2:],
-            #     zoom=zoom,
-            #     transparent_background=True,
-            #     multi_line=True,
-            # )
-            # img_overlay = to_numpy(projector.image * 255).astype(np.uint8).squeeze().transpose(1, 2, 0)
-            # img_overlay[:, :, 3] = (img_overlay[:, :, 3] * 0.5).astype(np.uint8)
-            # overlay_plot(img,points_opt,save_dir,'progress_' + str(step))
-            multiplot(img_overlay,points_opt,save_dir,'progress_' + str(step).zfill(3),distances= distances, plot_loss_dist=True, writer=writer,global_step=step)
+            fig, ax = plt.subplots()
+            title = f'Step {str(step).zfill(3)}'
+            plot_coutour_loss(ax,
+                              title,
+                              img_overlay,
+                              points_opt.squeeze().detach().cpu().numpy(),
+                              distances.squeeze().detach().cpu().numpy(),
+                              False)
+            plt.savefig(save_dir / f'{title}.png')
             crystal_opt.to_json(crystal_dir / f"crystal_{str(step).zfill(3)}.json")
             
         optimizer.step()
