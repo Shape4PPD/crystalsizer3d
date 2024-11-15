@@ -155,7 +155,7 @@ class Refiner:
         elif name == 'latents_model':
             self._init_latents_model()
             return self.latents_model
-        elif name == "edge_matching":
+        elif name == 'edge_matching':
             self._init_edge_matching()
             return self.edge_matching_model
         elif name in ['optimiser', 'lr_scheduler']:
