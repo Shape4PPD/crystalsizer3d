@@ -44,7 +44,7 @@ from crystalsizer3d.projector import ProjectedVertexKey, Projector
 from crystalsizer3d.refiner.denoising import denoise_image
 from crystalsizer3d.refiner.keypoint_detection import find_keypoints, generate_attention_patches, \
     to_absolute_coordinates
-from crystalsizer3d.refiner.edge_matching import ContourDistanceNormalLoss
+from crystalsizer3d.refiner.contour_distance_normal_loss import ContourDistanceNormalLoss
 from crystalsizer3d.scene_components.scene import Scene
 from crystalsizer3d.scene_components.utils import orthographic_scale_factor
 from crystalsizer3d.util.convergence_detector import ConvergenceDetector

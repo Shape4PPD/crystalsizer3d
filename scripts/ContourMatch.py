@@ -3,7 +3,7 @@ from torch import nn
 import numpy as np
 from pathlib import Path
 from crystalsizer3d.crystal import Crystal
-from crystalsizer3d.refiner.edge_matching import ContourDistanceNormalLoss
+from crystalsizer3d.refiner.contour_distance_normal_loss import ContourDistanceNormalLoss
 from crystalsizer3d import LOGS_PATH, ROOT_PATH, START_TIMESTAMP, USE_CUDA, logger
 from crystalsizer3d.util.utils import print_args, to_numpy, init_tensor
 import torch.nn.functional as F
