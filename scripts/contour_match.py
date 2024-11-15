@@ -3,44 +3,6 @@ from torch import nn
 import numpy as np
 from pathlib import Path
 from crystalsizer3d.crystal import Crystal
-from crystalsizer3d.refiner.contour_distance_normal_loss import ContourDistanceNormalLoss
-from crystalsizer3d import LOGS_PATH, ROOT_PATH, START_TIMESTAMP, USE_CUDA, logger
-from crystalsizer3d.util.utils import print_args, to_numpy, init_tensor
-import torch.nn.functional as F
-import torchvision.transforms as transforms
-# from crystal_points import ProjectorPoints
-from plot_mesh import multiplot, overlay_plot, plot_sampled_points_with_intensity
-import torch.optim as optim
-from crystalsizer3d.scene_components.scene import Scene
-import cv2
-from crystalsizer3d.scene_components.utils import project_to_image
-from crystalsizer3d.projector import Projector
-from edge_detection import load_rcf
-from scipy.ndimage import distance_transform_edt
-from torchvision.transforms.functional import to_tensor
-from scipy.ndimage import gaussian_filter
-import json
-from torch.utils.tensorboard import SummaryWriter
-import io
-
-
-
-# import matplotlib.pyplot as plt
-from PIL import Image
-
-if USE_CUDA:
-    device = torch.device('cuda')
-else:
-    device = torch.device('cpu')
-    
-from PIL import Image
-
-
-import torch
-from torch import nn 
-import numpy as np
-from pathlib import Path
-from crystalsizer3d.crystal import Crystal
 from crystalsizer3d import LOGS_PATH, ROOT_PATH, START_TIMESTAMP, USE_CUDA, logger
 from crystalsizer3d.util.utils import print_args, to_numpy, init_tensor
 import torch.nn.functional as F
@@ -179,7 +141,6 @@ def generate_synthetic_crystal(
         cell_surface_scale=3,
     )
     img = scene.render()
-    img = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)  # todo: do we need this?
     img = Image.fromarray((img * 255).astype(np.uint8))
     img.save(save_dir / 'rcf_featuremaps' / f'rendered_crystal.png')
     # Get the unit scale factor
