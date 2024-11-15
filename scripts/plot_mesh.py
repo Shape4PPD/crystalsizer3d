@@ -1,8 +1,7 @@
-
+### delete this file
 import matplotlib
 matplotlib.use('TkAgg')
 from crystalsizer3d import LOGS_PATH, ROOT_PATH, START_TIMESTAMP, USE_CUDA, logger
-from crystal_points import PointCollection
 import matplotlib.pyplot as plt
 import torch
 import numpy as np
@@ -11,41 +10,41 @@ import io
 from PIL import Image
 import torchvision.transforms as transforms
 
-def multiplot(distance_image,points,save_dir, tag,plot_loss_dist=False, writer=None, global_step=0):
-    fig, ax = plt.subplots()
-    if isinstance(distance_image, torch.Tensor):
-        plt.imshow(distance_image.squeeze(0).squeeze(0).detach().cpu().numpy())
-    else:
-        plt.imshow(distance_image)
+# def multiplot(distance_image,points,save_dir, tag, distances=None, plot_loss_dist=False, writer=None, global_step=0):
+#     fig, ax = plt.subplots()
+#     if isinstance(distance_image, torch.Tensor):
+#         plt.imshow(distance_image.squeeze(0).squeeze(0).detach().cpu().numpy())
+#     else:
+#         plt.imshow(distance_image)
     
-    if plot_loss_dist:
-        points_array, distances_array = points.get_points_and_distances_array()
-        for point, distance in zip(points_array, distances_array):
-            x, y = point
-            dx, dy = distance
+#     if plot_loss_dist:
+#         points_array, distances_array = points.cpu().detach(), distances.cpu().detach()
+#         for point, distance in zip(points_array, distances_array):
+#             x, y = point
+#             dx, dy = distance
 
-            if np.array_equal(distance, [0, 0]):
-                # If the distance is [0, 0], plot a point with a different color
-                ax.plot(x, y, 'go',markersize=2)  # 'ro' is red circle for stationary points
-            else:
-                # Otherwise, draw a line from the point to the point + distance
-                ax.arrow(x, y, dx, dy, head_width=0.1, head_length=0.1, fc='blue', ec='blue')
-                ax.plot(x, y, 'ro',markersize=2)  # 'ro' is red circle for stationary points
-    else:
-        try:
-            points_array = points.get_points_array()
-        except:
-            points_array = points.cpu().detach().numpy()
+#             if np.array_equal(distance, [0, 0]):
+#                 # If the distance is [0, 0], plot a point with a different color
+#                 ax.plot(x, y, 'go',markersize=2)  # 'ro' is red circle for stationary points
+#             else:
+#                 # Otherwise, draw a line from the point to the point + distance
+#                 ax.arrow(x, y, dx, dy, head_width=0.1, head_length=0.1, fc='blue', ec='blue')
+#                 ax.plot(x, y, 'ro',markersize=2)  # 'ro' is red circle for stationary points
+#     else:
+#         try:
+#             points_array = points.get_points_array()
+#         except:
+#             points_array = points.cpu().detach().numpy()
 
             
-        # plt.colorbar()
+#         # plt.colorbar()
 
-        plt.scatter(points_array[:, 0], points_array[:, 1], c='blue',s=3)
-    plt.title(f'Step {global_step}')
-    plt.savefig(save_dir / f'{tag}.png')
-    if writer is not None:
-        log_plot_to_tensorboard(writer, tag, fig, global_step)
-    plt.close()
+#         plt.scatter(points_array[:, 0], points_array[:, 1], c='blue',s=3)
+#     plt.title(f'Step {global_step}')
+#     plt.savefig(save_dir / f'{tag}.png')
+#     if writer is not None:
+#         log_plot_to_tensorboard(writer, tag, fig, global_step)
+#     plt.close()
     
 def overlay_plot(image1,image2,save_dir,name):
     fig, ax = plt.subplots(figsize=(8, 8))
@@ -63,56 +62,56 @@ def log_plot_to_tensorboard(writer, tag, figure, global_step):
     writer.add_image(tag, image, global_step)
     buf.close()
 
-def plot_2d_projection(point_collections: PointCollection, plot_normals=False,ax=None):
-    """
-    Plots 2D points from a PyTorch tensor or a list of tensors.
+# def plot_2d_projection(point_collections: PointCollection, plot_normals=False,ax=None):
+#     """
+#     Plots 2D points from a PyTorch tensor or a list of tensors.
     
-    Args:
-    points (torch.Tensor or list of torch.Tensor): A tensor of 2D points or a list of tensors of 2D points.
-    """
-    try:
-        plot_2d_projection.counter += 1
-    except:
-         plot_2d_projection.counter = 0
-    if isinstance(point_collections, PointCollection):
-        point_collections = [point_collections]  # Convert to list for uniform processing
+#     Args:
+#     points (torch.Tensor or list of torch.Tensor): A tensor of 2D points or a list of tensors of 2D points.
+#     """
+#     try:
+#         plot_2d_projection.counter += 1
+#     except:
+#          plot_2d_projection.counter = 0
+#     if isinstance(point_collections, PointCollection):
+#         point_collections = [point_collections]  # Convert to list for uniform processing
     
-    # Define a color map
-    colours = plt.get_cmap('Set1')
-    # colours = plt.get_cmap('tab20')
+#     # Define a color map
+#     colours = plt.get_cmap('Set1')
+#     # colours = plt.get_cmap('tab20')
     
-    for i, point_collection in enumerate(point_collections):
-        if len(point_collection) == 0:
-            continue
-        tensor = point_collection.get_points_and_normals_tensor()
-        if tensor.dim() != 3 or tensor.size(1) != 2:
-            raise ValueError("Each tensor must be of shape (N, 2, 2) where N is the number of points.")
+#     for i, point_collection in enumerate(point_collections):
+#         if len(point_collection) == 0:
+#             continue
+#         tensor = point_collection.get_points_and_normals_tensor()
+#         if tensor.dim() != 3 or tensor.size(1) != 2:
+#             raise ValueError("Each tensor must be of shape (N, 2, 2) where N is the number of points.")
         
-        pointx = tensor[:, 0, 0].detach().cpu().numpy()
-        pointy = tensor[:,0, 1].detach().cpu().numpy()
-        normalx = tensor[:, 1, 0].detach().cpu().numpy()
-        normaly = tensor[:, 1, 1].detach().cpu().numpy()
-        # Plot the points # plot_2d_projection.counter % 20
-        if ax == None:
-            plt.scatter(pointx, pointy, color=colours(i), label=f'Tensor {i+1}',s=2)
-        else:
-            ax.scatter(pointx, pointy, color=colours(i), label=f'Tensor {i+1}',s=2)
+#         pointx = tensor[:, 0, 0].detach().cpu().numpy()
+#         pointy = tensor[:,0, 1].detach().cpu().numpy()
+#         normalx = tensor[:, 1, 0].detach().cpu().numpy()
+#         normaly = tensor[:, 1, 1].detach().cpu().numpy()
+#         # Plot the points # plot_2d_projection.counter % 20
+#         if ax == None:
+#             plt.scatter(pointx, pointy, color=colours(i), label=f'Tensor {i+1}',s=2)
+#         else:
+#             ax.scatter(pointx, pointy, color=colours(i), label=f'Tensor {i+1}',s=2)
             
-        if plot_normals:
-            scale = 0.2
-            for px,py,nx,ny in zip(pointx,pointy,normalx,normaly):
-                if ax == None:
-                    plt.arrow(px, py, nx*scale, ny*scale, head_width=0.1, head_length=0.1, fc=colours(i), ec=colours(i))
-                else:
-                    ax.arrow(px, py, nx*scale, ny*scale, head_width=0.1, head_length=0.1, fc=colours(i), ec=colours(i))
+#         if plot_normals:
+#             scale = 0.2
+#             for px,py,nx,ny in zip(pointx,pointy,normalx,normaly):
+#                 if ax == None:
+#                     plt.arrow(px, py, nx*scale, ny*scale, head_width=0.1, head_length=0.1, fc=colours(i), ec=colours(i))
+#                 else:
+#                     ax.arrow(px, py, nx*scale, ny*scale, head_width=0.1, head_length=0.1, fc=colours(i), ec=colours(i))
     
-    if ax == None:
-        plt.xlim((-1.5,1.5))
-        plt.ylim((2.0,-2.0))
-        plt.xlabel('X')
-        plt.ylabel('Y')
-        plt.legend()
-        plt.show()
+#     if ax == None:
+#         plt.xlim((-1.5,1.5))
+#         plt.ylim((2.0,-2.0))
+#         plt.xlabel('X')
+#         plt.ylabel('Y')
+#         plt.legend()
+#         plt.show()
         
         
 
