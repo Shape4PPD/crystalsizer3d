@@ -351,7 +351,8 @@ class RefinerArgs(BaseArgs):
         self.w_temporal = w_temporal
         self.w_keypoints = w_keypoints
         self.w_anchors = w_anchors
-
+        self.w_edge_matching = w_edge_matching
+        
         # Loss decay factors
         self.l_decay_l1 = l_decay_l1
         self.l_decay_l2 = l_decay_l2
@@ -634,6 +635,8 @@ class RefinerArgs(BaseArgs):
                            help='Weight of the keypoints loss. Only used when using keypoints model.')
         group.add_argument('--w-anchors', type=float, default=1.,
                            help='Weight of the manually-defined anchors loss.')
+        group.add_argument('--w-edge-matching', type=float, default=1.,
+                           help='Weight of the manually-defined edge matching loss.')
 
         # Loss decay factors
         group.add_argument('--l-decay-l1', type=float, default=0.5,
