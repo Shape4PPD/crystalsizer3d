@@ -6,14 +6,16 @@ import torch
 from PIL import Image, ImageDraw
 from matplotlib import pyplot as plt
 from matplotlib.colors import hsv_to_rgb, rgb_to_hsv
+from matplotlib.figure import Figure
 from matplotlib.gridspec import GridSpec
+from torch import Tensor
 
 from crystalsizer3d.crystal import Crystal
 from crystalsizer3d.nn.manager import Manager
 from crystalsizer3d.projector import Projector
 from crystalsizer3d.scene_components.scene import Scene
 from crystalsizer3d.scene_components.utils import orthographic_scale_factor
-from crystalsizer3d.util.utils import get_crystal_face_groups, init_tensor, smooth_signal, to_rgb
+from crystalsizer3d.util.utils import get_crystal_face_groups, init_tensor, smooth_signal, to_numpy, to_rgb
 
 plot_extension = 'png'  # or svg
 line_styles = ['--', '-.', ':']
@@ -136,12 +138,12 @@ def plot_face_property_values(
         property_name: str,
         property_values: np.ndarray,
         image_paths: List[Tuple[int, Path]],
-        save_dir: Path,
+        save_dir: Path = None,
         measurement_idxs: np.ndarray = None,
         measurement_values: np.ndarray = None,
         show_mean: bool = False,
         show_std: bool = False
-):
+) -> Tuple[Figure, Figure]:
     """
     Plot face distances or areas.
     """
@@ -160,7 +162,7 @@ def plot_face_property_values(
     # Make a grid of plots showing the values for each face group
     n_cols = int(np.ceil(np.sqrt(n_groups)))
     n_rows = int(np.ceil(n_groups / n_cols))
-    fig = plt.figure(figsize=(n_cols * 6, n_rows * 4))
+    fig_grouped = plt.figure(figsize=(n_cols * 6, n_rows * 4))
     gs = GridSpec(
         n_rows, n_cols,
         top=0.95, bottom=0.08, right=0.99, left=0.05,
@@ -175,7 +177,7 @@ def plot_face_property_values(
         y_std = y.std(axis=1)
         lbls = [get_hkl_label(hkl) for hkl in list(group_idxs.keys())]
 
-        ax = fig.add_subplot(gs[i])
+        ax = fig_grouped.add_subplot(gs[i])
         ax.set_title(get_hkl_label(group_hkl, is_group=True))
 
         # Plot the mean +/- std
@@ -195,10 +197,11 @@ def plot_face_property_values(
         ax.set_xlabel('Image index')
         ax.set_ylabel(y_label)
         ax.legend(loc='lower right')
-    plt.savefig(save_dir / f'{property_name}_grouped.{plot_extension}')
+    if save_dir is not None:
+        plt.savefig(save_dir / f'{property_name}_grouped.{plot_extension}')
 
     # Make a plot showing the mean values all together
-    fig, ax = plt.subplots(1, figsize=(12, 8))
+    fig_mean, ax = plt.subplots(1, figsize=(12, 8))
     ax.set_title(f'Mean {property_name}')
     ax.grid()
     for i, (group_hkl, group_idxs) in enumerate(groups.items()):
@@ -211,23 +214,26 @@ def plot_face_property_values(
     ax.set_xlabel('Image index')
     ax.set_ylabel(y_label)
     ax.legend()
-    fig.tight_layout()
-    plt.savefig(save_dir / f'{property_name}_mean.{plot_extension}')
+    fig_mean.tight_layout()
+    if save_dir is not None:
+        plt.savefig(save_dir / f'{property_name}_mean.{plot_extension}')
+
+    return fig_grouped, fig_mean
 
 
 def plot_distances(
         manager: Manager,
         parameters: Dict[str, np.ndarray],
         image_paths: List[Tuple[int, Path]],
-        save_dir: Path,
+        save_dir: Path = None,
         measurements: Dict[str, np.ndarray] = None
-):
+) -> Tuple[Figure, Figure]:
     """
     Plot face distances.
     """
     distances = parameters['distances']
     scales = parameters['scale']
-    plot_face_property_values(
+    return plot_face_property_values(
         manager=manager,
         property_name='distances',
         property_values=distances * scales[:, None],
@@ -243,14 +249,18 @@ def plot_areas(
         manager: Manager,
         parameters: Dict[str, np.ndarray],
         image_paths: List[Tuple[int, Path]],
-        save_dir: Path,
+        save_dir: Path = None,
         measurements: Dict[str, np.ndarray] = None
-):
+) -> Tuple[Figure, Figure]:
     """
     Plot face areas.
     """
     distances = parameters['distances']
     scales = parameters['scale']
+    if isinstance(distances, Tensor):
+        distances = to_numpy(distances)
+    if isinstance(scales, Tensor):
+        scales = to_numpy(scales)
 
     # Get a crystal object
     ds = manager.ds
@@ -281,7 +291,7 @@ def plot_areas(
             unscaled_areas_m = np.array([crystal.areas[tuple(hkl.tolist())] for hkl in crystal.all_miller_indices])
             areas_m[i] = unscaled_areas_m * scales_m[i]**2
 
-    plot_face_property_values(
+    return plot_face_property_values(
         manager=manager,
         property_name='areas',
         property_values=areas,

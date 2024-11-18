@@ -89,7 +89,7 @@ class RefinerArgs(BaseArgs):
             # Optimisation settings
             seed: Optional[int] = None,
             max_steps: int = 1000,
-            multiscale: bool = True,
+            multiscale: bool = False,
             acc_grad_steps: int = 1,
             clip_grad_norm: float = 0.0,
             opt_algorithm: str = 'sgd',

@@ -23,10 +23,10 @@ def get_args(printout: bool = True) -> Tuple[Namespace, SequenceFitterArgs, Refi
     # Runtime args
     rt_parser.add_argument('--args-path', type=Path,
                            help='Load refiner arguments from this path, any arguments set on the command-line will take preference.')
+    rt_parser.add_argument('--resume', type=str2bool, default=True,
+                           help='Resume training from a previous checkpoint.')
     rt_parser.add_argument('--initial-scene', type=Path,
-                           help='Path to the initial scene file. Will be used in place of the initial prediction.')
-    rt_parser.add_argument('--save-annotated-images', type=str2bool, default=True,
-                           help='Save annotated images.')
+                           help='Path to an initial scene file. Will be used in place of the initial prediction.')
     rt_parser.add_argument('--make-videos', type=str2bool, default=True,
                            help='Make video of the annotated masks/images (whatever was generated).')
     rt_parser.add_argument('--log-freq-pretrain', type=int, default=10,
@@ -35,6 +35,16 @@ def get_args(printout: bool = True) -> Tuple[Namespace, SequenceFitterArgs, Refi
                            help='Log every n steps during training.')
     rt_parser.add_argument('--checkpoint-freq', type=int, default=5,
                            help='Checkpoint every n steps during training.')
+    rt_parser.add_argument('--plot-freq', type=int, default=20,
+                           help='Make plots every n steps during training.')
+    rt_parser.add_argument('--eval-freq', type=int, default=10,
+                           help='Evaluate every n steps during training.')
+    rt_parser.add_argument('--eval-annotate-freq', type=int, default=10,
+                           help='Generate annotated images every n steps during training. (Must be a multiple of eval-freq).')
+    rt_parser.add_argument('--eval-render-freq', type=int, default=10,
+                           help='Render the evaluated parameters every n steps during training. (Must be a multiple of eval-freq).')
+    rt_parser.add_argument('--eval-video-freq', type=int, default=10,
+                           help='Make a video of the evaluated parameters every n steps during training. (Must be a multiple of eval-freq).')
 
     # Sequence fitter and refiner args
     SequenceFitterArgs.add_args(sf_parser)

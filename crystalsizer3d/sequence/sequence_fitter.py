@@ -1,8 +1,11 @@
 import gc
 import json
 import math
+import os
 import shutil
+import time
 from argparse import Namespace
+from datetime import timedelta
 from typing import Dict
 
 import mitsuba as mi
@@ -11,6 +14,8 @@ import torch
 import torch.nn.functional as F
 import yaml
 from PIL import Image
+from matplotlib import pyplot as plt
+from matplotlib.figure import Figure
 from timm.optim import create_optimizer_v2
 from timm.scheduler import create_scheduler_v2
 from torch import Tensor, nn
@@ -25,7 +30,7 @@ from crystalsizer3d.refiner.keypoint_detection import find_keypoints
 from crystalsizer3d.refiner.refiner import Refiner
 from crystalsizer3d.scene_components.scene import Scene
 from crystalsizer3d.sequence.adaptive_sampler import AdaptiveSampler
-from crystalsizer3d.sequence.plots import annotate_image
+from crystalsizer3d.sequence.plots import annotate_image, plot_areas, plot_distances
 from crystalsizer3d.sequence.sequence_encoder import SequenceEncoder
 from crystalsizer3d.sequence.utils import get_image_paths
 from crystalsizer3d.util.utils import FlexibleJSONEncoder, calculate_model_norm, hash_data, init_tensor, is_bad, \
@@ -106,6 +111,11 @@ class SequenceFitter:
         self.cache_dirs['refiner'] = refiner_cache_dir
         with open(refiner_cache_dir / 'args.yml', 'w') as f:
             yaml.dump(to_dict(self.refiner_args), f)
+
+        # Clear the sequence directory if it already exists and we're not resuming
+        if not self.runtime_args.resume and self.path.exists():
+            shutil.rmtree(self.path)
+            self.path.mkdir(parents=True, exist_ok=True)
 
         # Save the args into the sequence directory
         with open(self.path / 'args_runtime.yml', 'w') as f:
@@ -427,7 +437,7 @@ class SequenceFitter:
             scene.to_yml(scenes_initial_dir / f'{idx:04d}.yml')
             X_pred_initial_path = X_preds_initial_dir / f'{idx:04d}.png'
             Image.fromarray(X_pred_initial).save(X_pred_initial_path)
-            annotate_image(X_pred_initial_path, scene).save(X_annotated_initial_dir / f'{idx:04d}.png')
+            annotate_image(X_path, scene).save(X_annotated_initial_dir / f'{idx:04d}.png')
 
         # Restore the settings
         del self.refiner.projector
@@ -452,15 +462,17 @@ class SequenceFitter:
         scenes_dir = self.path / 'scenes'
         if scenes_dir.exists():
             try:
-                self.scenes = []
+                self.scenes = {'train': [], 'eval': []}
                 for i, (idx, _) in enumerate(self.image_paths):
-                    scene_path = scenes_dir / f'{idx:04d}.yml'
-                    with open(scene_path) as f:
-                        scene_dict = yaml.load(f, Loader=yaml.FullLoader)
-                    self.scenes.append({
-                        'path': scene_path,
-                        'scene_dict': scene_dict,
-                    })
+                    for train_or_eval in ['train', 'eval']:
+                        scene_path = scenes_dir / train_or_eval / f'{idx:04d}.yml'
+                        assert scene_path.exists()
+                        with open(scene_path) as f:
+                            scene_dict = yaml.load(f, Loader=yaml.FullLoader)
+                        self.scenes[train_or_eval].append({
+                            'path': scene_path,
+                            'scene_dict': scene_dict,
+                        })
                 logger.info(f'Loaded scenes from {scenes_dir}.')
                 return
             except Exception:
@@ -468,9 +480,10 @@ class SequenceFitter:
 
         # Initialise the scene parameters with the initial predictions
         logger.info(f'Initialising scenes at {scenes_dir}.')
-        scenes_dir.mkdir(parents=True, exist_ok=True)
-        for scene_initial_path in self.scenes_initial:
-            shutil.copy(scene_initial_path, scenes_dir)
+        for train_or_eval in ['train', 'eval']:
+            (scenes_dir / train_or_eval).mkdir(parents=True, exist_ok=True)
+            for scene_initial_path in self.scenes_initial:
+                shutil.copy(scene_initial_path, scenes_dir / train_or_eval)
 
         return self._init_scenes()
 
@@ -482,25 +495,26 @@ class SequenceFitter:
         if parameters_path.exists():
             with open(parameters_path, 'r') as f:
                 self.parameters = json_to_torch(json.load(f))
-            self.n_parameters = sum([v.shape[1] if v.ndim > 1 else 1 for v in self.parameters.values()])
+            self.n_parameters = sum([v.shape[1] if v.ndim > 1 else 1 for v in self.parameters['train'].values()])
             logger.info(f'Loaded parameters from {parameters_path}.')
             return
 
         # Initialise the parameters from the scenes
         logger.info(f'Initialising parameters at {parameters_path}.')
-        parameters = {}
-        for scene in self.scenes:
-            scene_dict = scene['scene_dict']
-            for k in PARAMETER_KEYS:
-                if k not in parameters:
-                    parameters[k] = []
-                if k in scene_dict:
-                    v = scene_dict[k]
-                elif k in scene_dict['crystal']:
-                    v = scene_dict['crystal'][k]
-                else:
-                    raise RuntimeError(f'Parameter {k} not found in scene or crystal.')
-                parameters[k].append(v)
+        parameters = {'train': {}, 'eval': {}}
+        for train_or_eval in ['train', 'eval']:
+            for scene in self.scenes[train_or_eval]:
+                scene_dict = scene['scene_dict']
+                for k in PARAMETER_KEYS:
+                    if k not in parameters[train_or_eval]:
+                        parameters[train_or_eval][k] = []
+                    if k in scene_dict:
+                        v = scene_dict[k]
+                    elif k in scene_dict['crystal']:
+                        v = scene_dict['crystal'][k]
+                    else:
+                        raise RuntimeError(f'Parameter {k} not found in scene or crystal.')
+                    parameters[train_or_eval][k].append(v)
         with open(parameters_path, 'w') as f:
             json.dump(parameters, f, cls=FlexibleJSONEncoder)
 
@@ -519,7 +533,8 @@ class SequenceFitter:
 
         logger.info(f'Initialising losses at {losses_path}.')
         losses = {
-            'total': np.zeros(len(self), dtype=np.float32),
+            'total/train': np.zeros(len(self), dtype=np.float32),
+            'total/eval': np.zeros(len(self), dtype=np.float32),
             'training': []
         }
         with open(losses_path, 'w') as f:
@@ -551,11 +566,12 @@ class SequenceFitter:
         X_preds_dir = self.path / 'X_preds'
         if X_preds_dir.exists():
             try:
-                self.X_preds = []
+                self.X_preds = {'train': [], 'eval': []}
                 for (idx, _) in self.image_paths:
-                    X_pred_path = X_preds_dir / f'{idx:04d}.png'
-                    assert X_pred_path.exists()
-                    self.X_preds.append(X_pred_path)
+                    for train_or_eval in ['train', 'eval']:
+                        X_pred_path = X_preds_dir / train_or_eval / f'{idx:04d}.png'
+                        assert X_pred_path.exists()
+                        self.X_preds[train_or_eval].append(X_pred_path)
                 logger.info(f'Loaded predicted images from {X_preds_dir}.')
                 return
             except Exception:
@@ -563,9 +579,10 @@ class SequenceFitter:
 
         # Initialise the predicted images with the initial predictions
         logger.info(f'Initialising predicted images at {X_preds_dir}.')
-        X_preds_dir.mkdir(parents=True, exist_ok=True)
-        for X_pred_path in self.X_preds_initial:
-            shutil.copy(X_pred_path, X_preds_dir)
+        for train_or_eval in ['train', 'eval']:
+            (X_preds_dir / train_or_eval).mkdir(parents=True, exist_ok=True)
+            for X_pred_path in self.X_preds_initial:
+                shutil.copy(X_pred_path, X_preds_dir / train_or_eval)
 
         return self._init_X_preds()
 
@@ -576,11 +593,12 @@ class SequenceFitter:
         X_annotated_dir = self.path / 'X_targets_annotated'
         if X_annotated_dir.exists():
             try:
-                self.X_targets_annotated = []
+                self.X_targets_annotated = {'train': [], 'eval': []}
                 for (idx, _) in self.image_paths:
-                    X_annotated_path = X_annotated_dir / f'{idx:04d}.png'
-                    assert X_annotated_path.exists()
-                    self.X_targets_annotated.append(X_annotated_path)
+                    for train_or_eval in ['train', 'eval']:
+                        X_annotated_path = X_annotated_dir / train_or_eval / f'{idx:04d}.png'
+                        assert X_annotated_path.exists()
+                        self.X_targets_annotated[train_or_eval].append(X_annotated_path)
                 logger.info(f'Loaded annotated images from {X_annotated_dir}.')
                 return
             except Exception:
@@ -588,9 +606,10 @@ class SequenceFitter:
 
         # Initialise the annotated images with the initial predictions
         logger.info(f'Initialising annotated images at {X_annotated_dir}.')
-        X_annotated_dir.mkdir(parents=True, exist_ok=True)
-        for X_annotated_path in self.X_targets_annotated_initial:
-            shutil.copy(X_annotated_path, X_annotated_dir)
+        for train_or_eval in ['train', 'eval']:
+            (X_annotated_dir / train_or_eval).mkdir(parents=True, exist_ok=True)
+            for X_annotated_path in self.X_targets_annotated_initial:
+                shutil.copy(X_annotated_path, X_annotated_dir / train_or_eval)
 
         return self._init_X_targets_annotated()
 
@@ -700,60 +719,6 @@ class SequenceFitter:
         self.update_parameters_from_encoder()
         self.update_X_preds_from_parameters()
 
-    def _save_encoder_state(self):
-        """
-        Save the sequence encoder state.
-        """
-        state_path = self.path / 'sequence_encoder.pt'
-        logger.info(f'Saving sequence encoder state to {state_path}.')
-        torch.save({
-            'model': self.sequence_encoder.state_dict(),
-            'optimiser': self.optimiser.state_dict(),
-        }, state_path)
-
-    @torch.no_grad()
-    def update_parameters_from_encoder(self):
-        """
-        Generate the parameters for the sequence using the encoder.
-        """
-        logger.info('Generating parameters from the sequence encoder.')
-        self.sequence_encoder.eval()
-        ts = ((self.image_idxs - self.image_idxs[0]) / (len(self) - 1)).to(self.device)
-        bs = min(len(self), self.sf_args.eval_batch_size)
-        n_batches = math.ceil(len(self) / bs)
-        for i in range(n_batches):
-            if (i + 1) % 10 == 0:
-                logger.info(f'Generating parameters for frame batch {i + 1}/{n_batches}.')
-            ts_i = ts[i * bs:(i + 1) * bs]
-            p_vec_i = self.sequence_encoder(ts_i)
-            parameters_i = self._parameter_vectors_to_dict(p_vec_i)
-            for k, v in parameters_i.items():
-                self.parameters[k][i:i + bs] = v.detach().cpu().clone().squeeze()
-        self.save()
-
-    @torch.no_grad()
-    def update_X_preds_from_parameters(self):
-        """
-        Render predicted images from the parameters.
-        """
-        logger.info('Rendering predicted images from the parameters.')
-        scene = Scene.from_yml(self.scenes[0]['path'])
-        crystal = scene.crystal
-        crystal.to('cpu')
-        for i in range(len(self)):
-            if (i + 1) % 10 == 0:
-                logger.info(f'Rendering image {i + 1}/{len(self)}.')
-            for k in PARAMETER_KEYS:
-                v = init_tensor(self.parameters[k][i])
-                if k == 'light_radiance':
-                    scene.light_radiance.data = v.to(scene.device)
-                else:
-                    getattr(crystal, k).data = v
-            scene.build_mi_scene()
-            X_pred = scene.render()
-            Image.fromarray(X_pred).save(self.X_preds[i])
-            annotate_image(self.X_targets[i], scene).save(self.X_targets_annotated[i])
-
     def fit(self):
         """
         Train the sequence encoder to fit the sequence.
@@ -770,10 +735,10 @@ class SequenceFitter:
         )
         for i in range(N):
             if self.frame_counts[i] > 0:
-                sampler.emas[i].val = self.losses['total'][i].item()
+                sampler.emas[i].val = self.losses['total/train'][i].item()
 
         # Load the first scene and adapt the crystal to use buffers instead of parameters
-        scene = Scene.from_yml(self.scenes[0]['path'])
+        scene = Scene.from_yml(self.scenes['train'][0]['path'])
         crystal = scene.crystal
         for k in list(crystal._parameters.keys()):
             val = crystal.get_parameter(k).data
@@ -785,40 +750,48 @@ class SequenceFitter:
         self.refiner.scene_params = mi.traverse(scene.mi_scene)
         self.refiner.crystal = crystal
         self.refiner._init_projector()
+        use_inverse_rendering = self.refiner_args.use_inverse_rendering  # Save the inverse rendering setting
 
         # Determine how many steps have been completed from the frame counts
         start_step = int(self.frame_counts.sum() / bs)
         assert start_step == len(self.losses['training']), 'Frame counts and training losses do not match.'
         if start_step > 0:
             logger.info(f'Resuming training from step {start_step}.')
+        max_steps = self.sf_args.max_steps
 
         # Train the sequence encoder
-        self.sequence_encoder.train()
         running_loss = 0.
-        for step in range(start_step, self.sf_args.max_steps):
+        running_tps = 0
+        for step in range(start_step, max_steps):
+            start_time = time.time()
+            self.sequence_encoder.train()
+            self.refiner.step = step
+
             # Sample frame indices and normalise
             idxs = sampler.sample_frames(bs)
             ts = (idxs / (N - 1)).to(self.device)
 
-            # Get the target images batch
-            X_target_batch = []
-            X_target_denoised_batch = []
-            for idx in idxs:
-                X_target_path = self.X_targets[idx]
-                X_target_denoised_path = self.X_targets_denoised[idx]
-                X_target = to_tensor(Image.open(X_target_path))
-                X_target_denoised = to_tensor(Image.open(X_target_denoised_path))
-                X_target = self.refiner._resize(X_target)
-                X_target_denoised = self.refiner._resize(X_target_denoised)
-                X_target_batch.append(X_target)
-                X_target_denoised_batch.append(X_target_denoised)
-            X_target_batch = torch.stack(X_target_batch).permute(0, 2, 3, 1).to(self.device)
-            X_target_denoised_batch = torch.stack(X_target_denoised_batch).permute(0, 2, 3, 1).to(self.device)
+            # Generate the target images batches
+            X_targets = {'og': [], 'dn': [], 'og_wis': [], 'dn_wis': []}
+            for k, batch in X_targets.items():
+                for idx in idxs:
+                    if k[:2] == 'dn':
+                        X_path = self.X_targets_denoised[idx]
+                    else:
+                        X_path = self.X_targets[idx]
+                    X = to_tensor(Image.open(X_path))
+                    if k[-3:] == 'wis':
+                        X = self.refiner._resize(X)
+                    batch.append(X)
+                X_targets[k] = torch.stack(batch).permute(0, 2, 3, 1).to(self.device)
 
             # Generate the parameters from the encoder
             parameters_pred = self._parameter_vectors_to_dict(
                 self.sequence_encoder(ts)
             )
+
+            # Conditionally enable the inverse rendering
+            self.refiner_args.use_inverse_rendering = use_inverse_rendering and step >= self.refiner_args.ir_wait_n_steps
 
             # Loop over the batch and use the refiner to calculate the loss for each frame
             losses_batch = []
@@ -826,9 +799,10 @@ class SequenceFitter:
                 idx = idxs[i]
 
                 # Update targets
-                self.refiner.X_target_wis = X_target_batch[i]
-                self.refiner.X_target_denoised = X_target_denoised_batch[i]
-                self.refiner.X_target_denoised_wis = X_target_denoised_batch[i]
+                self.refiner.X_target = X_targets['og'][i]
+                self.refiner.X_target_wis = X_targets['og_wis'][i]
+                self.refiner.X_target_denoised = X_targets['dn'][i]
+                self.refiner.X_target_denoised_wis = X_targets['dn_wis'][i]
                 if self.refiner_args.use_keypoints:
                     self.refiner.keypoint_targets = self.keypoints[idx]['keypoints']
 
@@ -838,7 +812,7 @@ class SequenceFitter:
                         scene.light_radiance = v[i].to(self.device)
                     else:
                         setattr(crystal, k, v[i].to('cpu'))
-                    self.parameters[k][idx] = v[i].clone().detach().cpu()
+                    self.parameters['train'][k][idx] = v[i].clone().detach().cpu()
 
                 # Calculate losses
                 loss_j, stats_j = self.refiner._process_step(add_noise=False)
@@ -846,12 +820,12 @@ class SequenceFitter:
                 losses_batch.append(loss_j)
 
                 # Update sequence state
-                self.losses['total'][idx] = loss_j.item()
+                self.losses['total/train'][idx] = loss_j.item()
                 self.frame_counts[idx] += 1
                 if self.refiner_args.use_inverse_rendering:
                     X_pred = (to_numpy(self.refiner.X_pred) * 255).astype(np.uint8)
-                    Image.fromarray(X_pred).save(self.X_preds[idx])
-                annotate_image(self.X_targets[idx], scene).save(self.X_targets_annotated[idx])
+                    Image.fromarray(X_pred).save(self.X_preds['train'][idx])
+                annotate_image(self.X_targets[idx], scene).save(self.X_targets_annotated['train'][idx])
 
             # Calculate the mean loss and gradients
             losses_batch = torch.tensor(losses_batch)
@@ -877,12 +851,13 @@ class SequenceFitter:
             sampler.update_errors(idxs, losses_batch)
             seq_loss = sampler.errors.sum().item()
             self.losses['training'] = torch.concatenate([self.losses['training'], torch.tensor(seq_loss)[None, ...]])
-            self.tb_logger.add_scalar('losses/seq', seq_loss, step)
+            self.tb_logger.add_scalar('losses/seq_train', self.losses['total/train'].sum().item(), step)
+            self.tb_logger.add_scalar('losses/seq_train_ema', seq_loss, step)
             self.tb_logger.add_scalar('losses/step', loss.item(), step)
 
             # Log learning rate and update
             self.tb_logger.add_scalar('lr', self.optimiser.param_groups[0]['lr'], step)
-            self.lr_scheduler.step(step, seq_loss)
+            self.lr_scheduler.step(step + 1, seq_loss)
 
             # Log network norm
             weights_cumulative_norm = calculate_model_norm(self.sequence_encoder, device=self.device)
@@ -890,25 +865,153 @@ class SequenceFitter:
             self.tb_logger.add_scalar('w_norm', weights_cumulative_norm.item(), step)
 
             # Log statistics every X steps
+            time_per_step = time.time() - start_time
+            running_tps += time_per_step
             running_loss += loss.item()
             if (step + 1) % self.runtime_args.log_freq_train == 0:
                 loss_avg = running_loss / self.runtime_args.log_freq_train
-                logger.info(f'[{step + 1}/{self.sf_args.max_steps}]\tLoss: {loss_avg:.4E}')
+                average_tps = running_tps / self.runtime_args.log_freq_train
+                seconds_left = float((max_steps - step) * average_tps)
+                logger.info(f'[{step + 1}/{max_steps}]\tLoss: {loss_avg:.4E}'
+                            + 'Time per step: {}, Est. complete in: {}'.format(
+                    str(timedelta(seconds=average_tps)),
+                    str(timedelta(seconds=seconds_left))))
                 running_loss = 0.
+                running_tps = 0
 
             # Checkpoint every X steps
             if (step + 1) % self.runtime_args.checkpoint_freq == 0:
                 self.save()
                 self._save_encoder_state()
 
+            # Plot every X steps
+            if (step + 1) % self.runtime_args.plot_freq == 0:
+                logger.info('Making training plots.')
+                image_idx = self.image_idxs[idx].item()
+                fig = self.refiner._plot_comparison()
+                self._save_plot(fig, 'train', 'comparison', image_idx)
+                plt.close(fig)
+                if self.refiner.patch_centres is not None:
+                    fig = self.refiner._plot_patches()
+                    self._save_plot(fig, 'train', 'patches', image_idx)
+                    plt.close(fig)
+                self._plot_parameters('train')
+
+            # Evaluate the sequence every X steps
+            if (step + 1) % self.runtime_args.eval_freq == 0:
+                logger.info('Evaluating the sequence.')
+                self.update_parameters_from_encoder()
+                self._plot_parameters('eval')
+                generate_annotations = (step + 1) % self.runtime_args.eval_annotate_freq == 0
+                generate_renders = (step + 1) % self.runtime_args.eval_render_freq == 0
+                if generate_annotations or generate_renders:
+                    self.update_X_preds_from_parameters(
+                        train_or_eval='eval',
+                        generate_renders=generate_renders,
+                        generate_annotations=generate_annotations
+                    )
+                if (step + 1) % self.runtime_args.eval_video_freq == 0:
+                    logger.info('Generating evaluation video.')
+                    self._generate_video(train_or_eval='eval')
+
         logger.info('Training complete.')
 
-    def get_parameter_vector(self, idx: int) -> Tensor:
+    @torch.no_grad()
+    def update_parameters_from_encoder(self, train_or_eval: str = 'eval'):
+        """
+        Generate the parameters for the sequence using the encoder.
+        """
+        logger.info('Generating parameters from the sequence encoder.')
+        if train_or_eval == 'train':
+            self.sequence_encoder.train()
+        else:
+            self.sequence_encoder.eval()
+        ts = ((self.image_idxs - self.image_idxs[0]) / (len(self) - 1)).to(self.device)
+        bs = min(len(self), self.sf_args.eval_batch_size)
+        n_batches = math.ceil(len(self) / bs)
+        for i in range(n_batches):
+            if (i + 1) % 10 == 0:
+                logger.info(f'Generating {train_or_eval} parameters for frame batch {i + 1}/{n_batches}.')
+            ts_i = ts[i * bs:(i + 1) * bs]
+            p_vec_i = self.sequence_encoder(ts_i)
+            parameters_i = self._parameter_vectors_to_dict(p_vec_i)
+            for k, v in parameters_i.items():
+                self.parameters[train_or_eval][k][i:i + bs] = v.detach().cpu().clone().squeeze()
+        self.sequence_encoder.eval()  # Ensure the encoder is returned to eval mode
+        self.save()
+
+    @torch.no_grad()
+    def update_X_preds_from_parameters(
+            self,
+            train_or_eval: str = 'eval',
+            generate_renders: bool = True,
+            generate_annotations: bool = True
+    ):
+        """
+        Render predicted images from the parameters.
+        """
+        logger.info('Generating predicted images from the parameters.')
+        scene = Scene.from_yml(self.scenes[train_or_eval][0]['path'])
+        crystal = scene.crystal
+        crystal.to('cpu')
+        for i in range(len(self)):
+            if (i + 1) % 10 == 0:
+                logger.info(f'Generating image {i + 1}/{len(self)}.')
+            for k in PARAMETER_KEYS:
+                v = init_tensor(self.parameters[train_or_eval][k][i])
+                if k == 'light_radiance':
+                    scene.light_radiance.data = v.to(scene.device)
+                else:
+                    getattr(crystal, k).data = v
+            if generate_renders:
+                scene.build_mi_scene()
+                X_pred = scene.render()
+                Image.fromarray(X_pred).save(self.X_preds[train_or_eval][i])
+            if generate_annotations:
+                annotate_image(self.X_targets[i], scene).save(self.X_targets_annotated[train_or_eval][i])
+
+    def _plot_parameters(self, train_or_eval: str):
+        """
+        Plot the parameters.
+        """
+        plot_args = dict(
+            parameters=self.parameters[train_or_eval],
+            # measurements=measurements,
+            image_paths=self.image_paths,
+        )
+        plot_dir = self.path / 'plots' / train_or_eval
+        for plot_type in ['distances', 'areas']:
+            figs = {}
+            if plot_type == 'distances':
+                figs['grouped'], figs['mean'] = plot_distances(manager=self.refiner.manager, **plot_args)
+            else:
+                figs['grouped'], figs['mean'] = plot_areas(manager=self.refiner.manager, **plot_args)
+            for group_type in ['grouped', 'mean']:
+                save_dir = plot_dir / f'{plot_type}_{group_type}'
+                save_dir.mkdir(parents=True, exist_ok=True)
+                figs[group_type].savefig(save_dir / f'{self.refiner.step + 1:06d}.png')
+                plt.close(figs[group_type])
+
+    def _generate_video(self, train_or_eval: str = 'eval'):
+        """
+        Generate a video from the images.
+        """
+        imgs_dir = self.X_targets_annotated[train_or_eval][0].parent
+        out_dir = self.path / 'videos' / train_or_eval / 'annotations'
+        out_dir.mkdir(parents=True, exist_ok=True)
+        save_path = out_dir / f'{self.refiner.step:05d}.mp4'
+        logger.info(f'Making growth video from {imgs_dir} to {save_path}.')
+        escaped_images_dir = str(imgs_dir.absolute()).replace('[', '\\[').replace(']', '\\]')
+        cmd = f'ffmpeg -y -framerate 25 -pattern_type glob -i "{escaped_images_dir}/*.png" -c:v libx264 -pix_fmt yuv420p "{save_path}"'
+        logger.info(f'Running command: {cmd}')
+        os.system(cmd)
+
+    def get_parameter_vector(self, idx: int, train_or_eval: str = 'eval') -> Tensor:
         """
         Return a vector of the parameters for the frame at the given index.
         """
         i = self.image_idxs.tolist().index(idx)
-        scene_dict = self.scenes[i]['scene_dict']
+        scene_dict = self.scenes[train_or_eval][i]['scene_dict']
 
         params = torch.concatenate([
             torch.tensor(v) for v in [
@@ -930,7 +1033,7 @@ class SequenceFitter:
         """
         parameters = {}
         idx = 0
-        for k, v in self.parameters.items():
+        for k, v in self.parameters['eval'].items():
             n = v.shape[1] if v.ndim > 1 else 1
             val = parameter_vectors[:, idx:idx + n].squeeze(1)
             if k == 'scale':
@@ -962,18 +1065,40 @@ class SequenceFitter:
                 json.dump(data, f, cls=FlexibleJSONEncoder)
 
         # Update the scene files with the parameters
-        for i, scene in enumerate(self.scenes):
-            scene_dict = scene['scene_dict']
-            for k in PARAMETER_KEYS:
-                v = self.parameters[k][i].tolist()
-                if k in scene_dict:
-                    scene_dict[k] = v
-                elif k in scene_dict['crystal']:
-                    scene_dict['crystal'][k] = v
-                else:
-                    raise RuntimeError(f'Parameter {k} not found in scene or crystal.')
-            with open(scene['path'], 'w') as f:
-                yaml.dump(scene_dict, f)
+        for train_or_eval in ['train', 'eval']:
+            for i, scene in enumerate(self.scenes[train_or_eval]):
+                scene_dict = scene['scene_dict']
+                for k in PARAMETER_KEYS:
+                    v = self.parameters[train_or_eval][k][i].tolist()
+                    if k in scene_dict:
+                        scene_dict[k] = v
+                    elif k in scene_dict['crystal']:
+                        scene_dict['crystal'][k] = v
+                    else:
+                        raise RuntimeError(f'Parameter {k} not found in scene or crystal.')
+                with open(scene['path'], 'w') as f:
+                    yaml.dump(scene_dict, f)
+
+    def _save_encoder_state(self):
+        """
+        Save the sequence encoder state.
+        """
+        state_path = self.path / 'sequence_encoder.pt'
+        logger.info(f'Saving sequence encoder state to {state_path}.')
+        torch.save({
+            'model': self.sequence_encoder.state_dict(),
+            'optimiser': self.optimiser.state_dict(),
+        }, state_path)
+
+    def _save_plot(self, fig: Figure, train_or_eval: str, plot_type: str, idx: int):
+        """
+        Save the current plot.
+        """
+        fig.suptitle(f'Frame #{idx} Step {self.refiner.step + 1} Loss: {self.refiner.loss:.4E}')
+        save_dir = self.path / 'plots' / train_or_eval / plot_type
+        save_dir.mkdir(parents=True, exist_ok=True)
+        path = save_dir / f'{idx:04d}_{self.refiner.step + 1:06d}.png'
+        plt.savefig(path, bbox_inches='tight')
 
     def __len__(self) -> int:
         return len(self.image_paths)
