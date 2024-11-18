@@ -98,7 +98,6 @@ class Projector:
             colour_facing_towards: List[float] = [1, 0, 0],
             colour_facing_away: List[float] = [0, 0, 1],
             multi_line: bool = True,
-            points_per_unit: int = 0.05,
             rtol: float = 1e-3
     ):
         """
@@ -123,7 +122,6 @@ class Projector:
 
         # Drawing mode
         self.multi_line = multi_line
-        self.points_per_unit = points_per_unit
 
         # Sensitivity (tolerance), scaled by spread of points in 3D and 2D
         self.rtol = rtol
@@ -243,7 +241,6 @@ class Projector:
         if self.multi_line:
             self._extract_edges()
             self._calculate_edge_segments()
-            self._calculate_edge_points()
             self._collate_keypoints()
 
         # Generate the refracted wireframe image
@@ -403,7 +400,7 @@ class Projector:
         self.front_edges = torch.tensor(list(front_edges))
         self.rear_edges = torch.tensor(list(rear_edges))
 
-    def _calculate_edge_segments(self):
+    def _calculate_edge_segments(self): ####
         """
         Calculate the edge segments for each face.
         """
@@ -438,50 +435,7 @@ class Projector:
 
         self.edge_segments = segments
         self.edge_segments_rel = {k: self._to_relative_coords(v) for k, v in segments.items()}
-
-    def _num_points(self,start_point,end_point):
-        distance = torch.norm(end_point - start_point)
-        num_points = self.points_per_unit * distance
-        return int(torch.ceil(num_points).item())
     
-    def _edge_points(self, segment):
-        """
-        Generates points between two given points
-        """
-        start_point, end_point = segment
-        num_points = self._num_points(start_point,end_point)
-        # Generate a linear space between 0 and 1
-        # generate two more points for vertices and remove
-        t = torch.linspace(0, 1, steps=num_points+2,device=self.device)
-        # Interpolate between start_point and end_point
-        points = (1 - t).unsqueeze(1) * start_point + t.unsqueeze(1) * end_point
-        # Compute the direction vector
-        direction = end_point - start_point
-        # Find a normal vector to the direction vector
-        normal_vector = torch.tensor([-direction[1], direction[0]], dtype=torch.float32, device=self.device)
-        # remove first and last point (cornors)
-        normal_vector = torch.tile(normal_vector, (points.size(0), 1))
-        return points[1:-1], normal_vector[1:-1]
-
-    def _calculate_edge_points(self):
-        """
-        Calculate edge points, with normals for each edge segment
-        """
-        edge_points = []
-        edge_normals = []
-        for refracted_face_idx, edge_segments in self.edge_segments.items():
-            if len(edge_segments) == 0:
-                continue
-            for segment in edge_segments:
-                # get points between two end point
-                points, normals = self._edge_points(segment)
-                edge_points.append(points)
-                edge_normals.append(normals)
-        edge_points = torch.cat(edge_points,dim=0)
-        edge_normals = torch.cat(edge_normals,dim=0)
-        self.edge_points = edge_points
-        self.edge_normals = edge_normals
-
     def _collate_keypoints(self):
         """
         Collate the vertices and intersections into a single keypoints tensor.

@@ -1,22 +1,38 @@
-
 import torch
 from torch import nn 
 import torch.nn.functional as F
-
+from crystalsizer3d.crystal import Crystal
+from crystalsizer3d.util.geometry import is_point_in_bounds, line_equation_coefficients, line_intersection, \
+    line_segments_in_polygon, merge_vertices, normalise, point_in_polygon, polygon_area, sort_face_vertices
 
 class EdgeMatcher(nn.Module):
-    def __init__(self):
+    def __init__(self,points_per_unit = 0.05):
         super(EdgeMatcher, self).__init__()
+        self.points_per_unit = points_per_unit
 
-    def forward(self, ref_points, normals, distance_image):        
+    def forward(self, edge_segments, distance_image):
+        """
+
+        Args:
+            edge_segments (tensor): edge segments from projector
+            normals (tensor): normal vector at each point
+            distance_image (tensor): image used from RCF 
+
+        Returns:
+            _type_: _description_
+        """
+        self.edge_segments = edge_segments
+        
+        self._calculate_edge_points()
+
         # Sample points along lines for all reference points
-        line_points = self.sample_points_along_line_full_image(ref_points, normals, 1000, distance_image.shape[-2:])
+        line_points = self.sample_points_along_line_full_image(self.edge_points, self.edge_normals, 1000, distance_image.shape[-2:])
         
         # Get reference values for all points 
-        reference_values = self.points_in_image(ref_points, distance_image)
+        reference_values = self.points_in_image(self.edge_points, distance_image)
         
         # Find nearest local minima for all line points
-        nearest_minima_positions, nearest_minima_values = self.find_closest_minima(distance_image, line_points, ref_points)
+        nearest_minima_positions, nearest_minima_values = self.find_closest_minima(distance_image, line_points, self.edge_points)
         
         
         # Filter out None values
@@ -25,7 +41,7 @@ class EdgeMatcher(nn.Module):
             return torch.tensor(0.0)  # Return zero if no valid minima found
         
         valid_indices = torch.tensor(valid_indices, device=distance_image.device)
-        valid_ref_points = ref_points[valid_indices]
+        valid_ref_points = self.edge_points[valid_indices]
         valid_reference_values = reference_values[:,:, valid_indices]
         valid_nearest_minima_positions = torch.stack([nearest_minima_positions[i] for i in valid_indices])
         valid_nearest_minima_values = torch.stack([nearest_minima_values[i] for i in valid_indices])
@@ -39,6 +55,259 @@ class EdgeMatcher(nn.Module):
         
         # Return the mean loss across all valid points
         return torch.mean(losses), distances
+
+    def _num_points(self,start_point,end_point):
+        distance = torch.norm(end_point - start_point)
+        num_points = self.points_per_unit * distance
+        return int(torch.ceil(num_points).item())
+    
+    def _edge_points(self, segment):
+        """
+        Generates points between two given points
+        """
+        start_point, end_point = segment
+        num_points = self._num_points(start_point,end_point)
+        # Generate a linear space between 0 and 1
+        # generate two more points for vertices and remove
+        t = torch.linspace(0, 1, steps=num_points+2,device=self.device)
+        # Interpolate between start_point and end_point
+        points = (1 - t).unsqueeze(1) * start_point + t.unsqueeze(1) * end_point
+        # Compute the direction vector
+        direction = end_point - start_point
+        # Find a normal vector to the direction vector
+        normal_vector = torch.tensor([-direction[1], direction[0]], dtype=torch.float32, device=self.device)
+        # remove first and last point (cornors)
+        normal_vector = torch.tile(normal_vector, (points.size(0), 1))
+        return points[1:-1], normal_vector[1:-1]
+
+    def _calculate_edge_points(self):
+        """
+        Calculate edge points, with normals for each edge segment
+        """
+        edge_points = []
+        edge_normals = []
+        for refracted_face_idx, edge_segments in self.edge_segments.items():
+            if len(edge_segments) == 0:
+                continue
+            for segment in edge_segments:
+                # get points between two end point
+                points, normals = self._edge_points(segment)
+                edge_points.append(points)
+                edge_normals.append(normals)
+        edge_points = torch.cat(edge_points,dim=0)
+        edge_normals = torch.cat(edge_normals,dim=0)
+        self.edge_points = edge_points
+        self.edge_normals = edge_normals
+    def _num_points(self,start_point,end_point):
+        distance = torch.norm(end_point - start_point)
+        num_points = self.points_per_unit * distance
+        return int(torch.ceil(num_points).item())
+    
+    def _edge_points(self, segment):
+        """
+        Generates points between two given points
+        """
+        start_point, end_point = segment
+        num_points = self._num_points(start_point,end_point)
+        # Generate a linear space between 0 and 1
+        # generate two more points for vertices and remove
+        t = torch.linspace(0, 1, steps=num_points+2,device=self.device)
+        # Interpolate between start_point and end_point
+        points = (1 - t).unsqueeze(1) * start_point + t.unsqueeze(1) * end_point
+        # Compute the direction vector
+        direction = end_point - start_point
+        # Find a normal vector to the direction vector
+        normal_vector = torch.tensor([-direction[1], direction[0]], dtype=torch.float32, device=self.device)
+        # remove first and last point (cornors)
+        normal_vector = torch.tile(normal_vector, (points.size(0), 1))
+        return points[1:-1], normal_vector[1:-1]
+
+    def _calculate_edge_points(self):
+        """
+        Calculate edge points, with normals for each edge segment
+        """
+        edge_points = []
+        edge_normals = []
+        for refracted_face_idx, edge_segments in self.edge_segments.items():
+            if len(edge_segments) == 0:
+                continue
+            for segment in edge_segments:
+                # get points between two end point
+                points, normals = self._edge_points(segment)
+                edge_points.append(points)
+                edge_normals.append(normals)
+        edge_points = torch.cat(edge_points,dim=0)
+        edge_normals = torch.cat(edge_normals,dim=0)
+        self.edge_points = edge_points
+        self.edge_normals = edge_normals
+    def _num_points(self,start_point,end_point):
+        distance = torch.norm(end_point - start_point)
+        num_points = self.points_per_unit * distance
+        return int(torch.ceil(num_points).item())
+    
+    def _edge_points(self, segment):
+        """
+        Generates points between two given points
+        """
+        start_point, end_point = segment
+        num_points = self._num_points(start_point,end_point)
+        # Generate a linear space between 0 and 1
+        # generate two more points for vertices and remove
+        t = torch.linspace(0, 1, steps=num_points+2,device=self.device)
+        # Interpolate between start_point and end_point
+        points = (1 - t).unsqueeze(1) * start_point + t.unsqueeze(1) * end_point
+        # Compute the direction vector
+        direction = end_point - start_point
+        # Find a normal vector to the direction vector
+        normal_vector = torch.tensor([-direction[1], direction[0]], dtype=torch.float32, device=self.device)
+        # remove first and last point (cornors)
+        normal_vector = torch.tile(normal_vector, (points.size(0), 1))
+        return points[1:-1], normal_vector[1:-1]
+
+    def _calculate_edge_points(self):
+        """
+        Calculate edge points, with normals for each edge segment
+        """
+        edge_points = []
+        edge_normals = []
+        for refracted_face_idx, edge_segments in self.edge_segments.items():
+            if len(edge_segments) == 0:
+                continue
+            for segment in edge_segments:
+                # get points between two end point
+                points, normals = self._edge_points(segment)
+                edge_points.append(points)
+                edge_normals.append(normals)
+        edge_points = torch.cat(edge_points,dim=0)
+        edge_normals = torch.cat(edge_normals,dim=0)
+        self.edge_points = edge_points
+        self.edge_normals = edge_normals
+    def _num_points(self,start_point,end_point):
+        distance = torch.norm(end_point - start_point)
+        num_points = self.points_per_unit * distance
+        return int(torch.ceil(num_points).item())
+    
+    def _edge_points(self, segment):
+        """
+        Generates points between two given points
+        """
+        start_point, end_point = segment
+        num_points = self._num_points(start_point,end_point)
+        # Generate a linear space between 0 and 1
+        # generate two more points for vertices and remove
+        t = torch.linspace(0, 1, steps=num_points+2,device=self.device)
+        # Interpolate between start_point and end_point
+        points = (1 - t).unsqueeze(1) * start_point + t.unsqueeze(1) * end_point
+        # Compute the direction vector
+        direction = end_point - start_point
+        # Find a normal vector to the direction vector
+        normal_vector = torch.tensor([-direction[1], direction[0]], dtype=torch.float32, device=self.device)
+        # remove first and last point (cornors)
+        normal_vector = torch.tile(normal_vector, (points.size(0), 1))
+        return points[1:-1], normal_vector[1:-1]
+
+    def _calculate_edge_points(self):
+        """
+        Calculate edge points, with normals for each edge segment
+        """
+        edge_points = []
+        edge_normals = []
+        for refracted_face_idx, edge_segments in self.edge_segments.items():
+            if len(edge_segments) == 0:
+                continue
+            for segment in edge_segments:
+                # get points between two end point
+                points, normals = self._edge_points(segment)
+                edge_points.append(points)
+                edge_normals.append(normals)
+        edge_points = torch.cat(edge_points,dim=0)
+        edge_normals = torch.cat(edge_normals,dim=0)
+        self.edge_points = edge_points
+        self.edge_normals = edge_normals
+    def _num_points(self,start_point,end_point):
+        distance = torch.norm(end_point - start_point)
+        num_points = self.points_per_unit * distance
+        return int(torch.ceil(num_points).item())
+    
+    def _edge_points(self, segment):
+        """
+        Generates points between two given points
+        """
+        start_point, end_point = segment
+        num_points = self._num_points(start_point,end_point)
+        # Generate a linear space between 0 and 1
+        # generate two more points for vertices and remove
+        t = torch.linspace(0, 1, steps=num_points+2,device=self.device)
+        # Interpolate between start_point and end_point
+        points = (1 - t).unsqueeze(1) * start_point + t.unsqueeze(1) * end_point
+        # Compute the direction vector
+        direction = end_point - start_point
+        # Find a normal vector to the direction vector
+        normal_vector = torch.tensor([-direction[1], direction[0]], dtype=torch.float32, device=self.device)
+        # remove first and last point (cornors)
+        normal_vector = torch.tile(normal_vector, (points.size(0), 1))
+        return points[1:-1], normal_vector[1:-1]
+
+    def _calculate_edge_points(self):
+        """
+        Calculate edge points, with normals for each edge segment
+        """
+        edge_points = []
+        edge_normals = []
+        for refracted_face_idx, edge_segments in self.edge_segments.items():
+            if len(edge_segments) == 0:
+                continue
+            for segment in edge_segments:
+                # get points between two end point
+                points, normals = self._edge_points(segment)
+                edge_points.append(points)
+                edge_normals.append(normals)
+        edge_points = torch.cat(edge_points,dim=0)
+        edge_normals = torch.cat(edge_normals,dim=0)
+        self.edge_points = edge_points
+        self.edge_normals = edge_normals
+    def _num_points(self,start_point,end_point):
+        distance = torch.norm(end_point - start_point)
+        num_points = self.points_per_unit * distance
+        return int(torch.ceil(num_points).item())
+    
+    def _edge_points(self, segment):
+        """
+        Generates points between two given points
+        """
+        start_point, end_point = segment
+        num_points = self._num_points(start_point,end_point)
+        # Generate a linear space between 0 and 1
+        # generate two more points for vertices and remove
+        t = torch.linspace(0, 1, steps=num_points+2,device=self.device)
+        # Interpolate between start_point and end_point
+        points = (1 - t).unsqueeze(1) * start_point + t.unsqueeze(1) * end_point
+        # Compute the direction vector
+        direction = end_point - start_point
+        # Find a normal vector to the direction vector
+        normal_vector = torch.tensor([-direction[1], direction[0]], dtype=torch.float32, device=self.device)
+        # remove first and last point (cornors)
+        normal_vector = torch.tile(normal_vector, (points.size(0), 1))
+        return points[1:-1], normal_vector[1:-1]
+
+    def _calculate_edge_points(self):
+        """
+        Calculate edge points, with normals for each edge segment
+        """
+        edge_points = []
+        edge_normals = []
+        for refracted_face_idx, edge_segments in self.edge_segments.items():
+            if len(edge_segments) == 0:
+                continue
+            for segment in edge_segments:
+                # get points between two end point
+                points, normals = self._edge_points(segment)
+                edge_points.append(points)
+                edge_normals.append(normals)
+        edge_points = torch.cat(edge_points,dim=0)
+        edge_normals = torch.cat(edge_normals,dim=0)
+        self.edge_points = edge_points
+        self.edge_normals = edge_normals
 
     def sample_points_along_line_full_image(self, ref_points, normals, num_samples, image_shape):
         # Normalize the direction vectors
@@ -172,3 +441,48 @@ class EdgeMatcher(nn.Module):
         minima_indices = [torch.nonzero(minima_mask[i]).squeeze() for i in range(minima_mask.size(0))]
         minima_indices = [indices if indices.dim() > 0 else indices.unsqueeze(0) for indices in minima_indices]
         return minima_indices
+
+    #Edge Matching points
+    
+    def _num_points(self,start_point,end_point):
+        distance = torch.norm(end_point - start_point)
+        num_points = self.points_per_unit * distance
+        return int(torch.ceil(num_points).item())
+    
+    def _edge_points(self, segment):
+        """
+        Generates points between two given points
+        """
+        start_point, end_point = segment
+        num_points = self._num_points(start_point,end_point)
+        # Generate a linear space between 0 and 1
+        # generate two more points for vertices and remove
+        t = torch.linspace(0, 1, steps=num_points+2,device=segment.device)
+        # Interpolate between start_point and end_point
+        points = (1 - t).unsqueeze(1) * start_point + t.unsqueeze(1) * end_point
+        # Compute the direction vector
+        direction = end_point - start_point
+        # Find a normal vector to the direction vector
+        normal_vector = torch.tensor([-direction[1], direction[0]], dtype=torch.float32, device=segment.device)
+        # remove first and last point (cornors)
+        normal_vector = torch.tile(normal_vector, (points.size(0), 1))
+        return points[1:-1], normal_vector[1:-1]
+
+    def _calculate_edge_points(self):
+        """
+        Calculate edge points, with normals for each edge segment
+        """
+        edge_points = []
+        edge_normals = []
+        for refracted_face_idx, edge_segments in self.edge_segments.items():
+            if len(edge_segments) == 0:
+                continue
+            for segment in edge_segments:
+                # get points between two end point
+                points, normals = self._edge_points(segment)
+                edge_points.append(points)
+                edge_normals.append(normals)
+        edge_points = torch.cat(edge_points,dim=0)
+        edge_normals = torch.cat(edge_normals,dim=0)
+        self.edge_points = edge_points
+        self.edge_normals = edge_normals

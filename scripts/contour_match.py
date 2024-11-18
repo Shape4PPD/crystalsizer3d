@@ -9,17 +9,19 @@ from crystalsizer3d.refiner.edge_matcher import EdgeMatcher
 import torch.nn.functional as F
 import torchvision.transforms as transforms
 import matplotlib.pyplot as plt
-from crystalsizer3d.util.plots import plot_coutour_loss
+from crystalsizer3d.util.plots import plot_image, plot_3d, plot_coutour_loss
 #from plot_mesh import multiplot, overlay_plot, plot_sampled_points_with_intensity
 import torch.optim as optim
 from crystalsizer3d.scene_components.scene import Scene
 import cv2
 from crystalsizer3d.scene_components.utils import project_to_image
 from crystalsizer3d.projector import Projector
-from edge_detection import load_rcf
+from crystalsizer3d.nn.models.rcf import RCF
+# from edge_detection import load_rcf
 from scipy.ndimage import distance_transform_edt
 from torchvision.transforms.functional import to_tensor
 from scipy.ndimage import gaussian_filter
+from kornia.utils import tensor_to_image
 import json
 from torch.utils.tensorboard import SummaryWriter
 import io
@@ -171,10 +173,18 @@ def generate_synthetic_crystal(
     # axs[0].imshow(img_overlay)
     # fig.show()
     # get contour image
-    model_path = Path(ROOT_PATH / 'tmp' / 'bsds500_pascal_model.pth')
+    rcf_path = Path(ROOT_PATH / 'tmp' / 'bsds500_pascal_model.pth')
     
-    rcf = load_rcf(model_path)
+    """
+    Initialise the Richer Convolutional Features model for edge detection.
+    """
+    rcf = RCF()
+    checkpoint = torch.load(rcf_path, weights_only=True)
+    rcf.load_state_dict(checkpoint, strict=False)
+    rcf.eval()
     rcf.to(device)
+
+
     img = to_tensor(img).to(device)[None, ...]
     feature_maps = rcf(img, apply_sigmoid=False)
     #third one seems best for now
@@ -282,17 +292,17 @@ def run():
     # from synthetic crystal
     f_map_inv = 1 - f_map
     img_tensor = f_map.to(device)
-    dist_inv = 1 - dist_map
-    img_tensor = dist_inv.to(device)
+    # dist_inv = 1 - dist_map
+    # img_tensor = dist_inv.to(device)
     # # dist_map = dist_map.to(device)
     
     projector_tar = Projector(crystal_tar,
                                 external_ior=1.333,
                                 zoom =zoom,
-                                image_size=f_map.shape[-2:],)
+                                image_size=f_map.shape[-2:],
+                                transparent_background=True)
     # projector_tar.to(device)
     projector_tar.project()
-    points_tar = projector_tar.edge_points
 
     # crystal_opt = Crystal(**TEST_CRYSTALS['cube_test'])
     # crystal_opt = Crystal(**TEST_CRYSTALS['alpha_test'])
@@ -315,10 +325,11 @@ def run():
     projector_opt = Projector(crystal_opt,
                                 external_ior=1.333,
                                 zoom = zoom,
-                                image_size=f_map.shape[-2:])
+                                image_size=f_map.shape[-2:],
+                                transparent_background=True)
     # projector_opt.to(device)
     projector_opt.project()
-    points_opt = projector_opt.edge_points
+    # points_opt = projector_opt.edge_points
     params = {
             'distances': [crystal_opt.distances],
         }
@@ -330,9 +341,12 @@ def run():
     img_int = img_tensor.squeeze(0).squeeze(0).detach().cpu().numpy()
     fig, ax = plt.subplots()
     title = 'Inital conditions'
-    plot_coutour_loss(ax,title,img_int,points_opt.squeeze().detach().cpu().numpy(),np.zeros(1),False)
+    plot_image(ax, title, img_int)
+    img_ten = projector_opt.generate_image()
+    plot_image(ax, title, tensor_to_image(img_ten))
+    # plot_coutour_loss(ax,title,img_int,points_opt.squeeze().detach().cpu().numpy(),np.zeros(1),False)
     plt.savefig(save_dir / f'{title}.png')
-    
+    plt.close()
     optimizer = optim.Adam(params['distances'], lr=1e-2)
     target_dist = crystal_tar.distances
     # prev_dist = crystal_opt.distances
@@ -349,17 +363,18 @@ def run():
         projector_opt = Projector(crystal_opt,
                             zoom = zoom,
                             image_size=f_map.shape[-2:],
-                            external_ior=1.333,)
+                            external_ior=1.333,
+                            transparent_background=True)
         projector_opt.project()
-        points_opt = projector_opt.edge_points
-        normals_opt = projector_opt.edge_normals
+        # points_opt = projector_opt.edge_points
+        # normals_opt = projector_opt.edge_normals
 
         
         dist = crystal_opt.distances
         # a = points_opt.get_all_points_tensor()
         # print(f"points tensor {a}")
         # Forward pass: get the pixel value at the current point (x, y)
-        loss, distances = model(points_opt,normals_opt, img_tensor)  # Call model's forward method with Cartesian coordinates
+        loss, distances = model(projector_opt.edge_segments, img_tensor)  # Call model's forward method with Cartesian coordinates
         # Perform backpropagation (minimize the pixel value)
         
         loss.backward(retain_graph=True)
@@ -378,14 +393,13 @@ def run():
         if step % 1 == 0:
             fig, ax = plt.subplots()
             title = f'Step {str(step).zfill(3)}'
-            plot_coutour_loss(ax,
-                              title,
-                              img_overlay,
-                              points_opt.squeeze().detach().cpu().numpy(),
-                              distances.squeeze().detach().cpu().numpy(),
-                              False)
+            plot_image(ax, title, img_int)
+            img_ten = projector_opt.generate_image()
+            plot_image(ax, title, tensor_to_image(img_ten))
+            plt.savefig(save_dir / f'{title}.png')
             plt.savefig(save_dir / f'{title}.png')
             crystal_opt.to_json(crystal_dir / f"crystal_{str(step).zfill(3)}.json")
+            plt.close()
             
         optimizer.step()
 

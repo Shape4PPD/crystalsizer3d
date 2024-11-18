@@ -1295,6 +1295,7 @@ def plot_2d_points(points_list, plot_normals=False,ax=None):
                 else:
                     ax.arrow(px, py, nx*scale, ny*scale, head_width=0.1, head_length=0.1, fc=colours(i), ec=colours(i))
     
+    ### this is broken now that the points are generated in the projector
 def plot_coutour_loss(
     ax: Axes,
     title: str,
