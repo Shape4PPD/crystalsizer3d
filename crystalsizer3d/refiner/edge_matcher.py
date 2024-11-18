@@ -4,9 +4,9 @@ from torch import nn
 import torch.nn.functional as F
 
 
-class ContourDistanceNormalLoss(nn.Module):
+class EdgeMatcher(nn.Module):
     def __init__(self):
-        super(ContourDistanceNormalLoss, self).__init__()
+        super(EdgeMatcher, self).__init__()
 
     def forward(self, ref_points, normals, distance_image):        
         # Sample points along lines for all reference points

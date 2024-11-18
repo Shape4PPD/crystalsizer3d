@@ -5,7 +5,7 @@ from pathlib import Path
 from crystalsizer3d.crystal import Crystal
 from crystalsizer3d import LOGS_PATH, ROOT_PATH, START_TIMESTAMP, USE_CUDA, logger
 from crystalsizer3d.util.utils import print_args, to_numpy, init_tensor
-from crystalsizer3d.refiner.contour_distance_normal_loss import ContourDistanceNormalLoss
+from crystalsizer3d.refiner.edge_matcher import EdgeMatcher
 import torch.nn.functional as F
 import torchvision.transforms as transforms
 import matplotlib.pyplot as plt
@@ -323,7 +323,7 @@ def run():
             'distances': [crystal_opt.distances],
         }
     
-    model = ContourDistanceNormalLoss()
+    model = EdgeMatcher()
     model.to(device)
 
     #inital 
