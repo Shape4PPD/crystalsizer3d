@@ -282,10 +282,10 @@ def _calculate_crystals(
                 # Update the parameters from the initial scene
                 if scene_init is not None:
                     refiner.scene.crystal.copy_parameters_from(scene_init.crystal)
-                refiner.scene.light_radiance.data = init_tensor(scene_init.light_radiance)
+                    refiner.scene.light_radiance.data = init_tensor(scene_init.light_radiance)
 
                 # Update the Kalman filter with the initial distances
-                distances_actual = (scene_init.crystal.distances * scene_init.crystal.scale).detach()
+                distances_actual = (refiner.scene.crystal.distances * refiner.scene.crystal.scale).detach()
                 kalman_filter.update(distances_actual)
 
             # Otherwise, use the previous solution as the starting point
