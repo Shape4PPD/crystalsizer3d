@@ -117,9 +117,13 @@ class Refiner:
         self.destroy_keypoint_detector = destroy_keypoint_detector
         self.destroy_predictor = destroy_predictor
 
+        # Output directory
+        self.output_dir = output_dir
+        self.output_dir_base = output_dir_base
+
         if do_init:
             # Set up the log directory
-            self.init_save_dir(output_dir, output_dir_base)
+            self.init_save_dir()
 
             # Load the optimisation targets
             self.init_X_target()
@@ -199,6 +203,15 @@ class Refiner:
         logger.info('Initialising output directory.')
         assert not (output_dir is not None and output_dir_base is not None), \
             'Can\'t set both the output_dir and the output_dir_base.'
+        if output_dir is None and output_dir_base is None:
+            output_dir = self.output_dir
+            output_dir_base = self.output_dir_base
+        elif output_dir is not None:
+            self.output_dir = output_dir
+            self.output_dir_base = None
+        elif output_dir_base is not None:
+            self.output_dir = None
+            self.output_dir_base = output_dir_base
         copy_dirs = ['cache', 'initial_prediction', 'denoise_patches', 'keypoints']
 
         if output_dir is None:
@@ -1727,7 +1740,7 @@ class Refiner:
         """
         Calculate the keypoints loss.
         """
-        loss = torch.tensor(0., device=self.keypoint_targets.device)
+        loss = torch.tensor(0.)
         stats = {}
         if not self.args.use_keypoints or self.keypoint_targets is None or len(self.keypoint_targets) == 0:
             return loss, stats

@@ -319,7 +319,7 @@ def find_keypoints(
             'Y_candidates_final_rel': Y_candidates_final_rel,
         }
 
-    return Y_candidates_final
+    return Y_candidates_final_rel
 
 
 @torch.no_grad()

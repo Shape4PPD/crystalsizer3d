@@ -3,12 +3,16 @@ from typing import Dict, List, Tuple
 
 import numpy as np
 import torch
+from PIL import Image, ImageDraw
 from matplotlib import pyplot as plt
 from matplotlib.colors import hsv_to_rgb, rgb_to_hsv
 from matplotlib.gridspec import GridSpec
 
 from crystalsizer3d.crystal import Crystal
 from crystalsizer3d.nn.manager import Manager
+from crystalsizer3d.projector import Projector
+from crystalsizer3d.scene_components.scene import Scene
+from crystalsizer3d.scene_components.utils import orthographic_scale_factor
 from crystalsizer3d.util.utils import get_crystal_face_groups, init_tensor, smooth_signal, to_rgb
 
 plot_extension = 'png'  # or svg
@@ -344,3 +348,47 @@ def plot_rotation(
     ax.legend()
     fig.tight_layout()
     plt.savefig(save_dir / f'rotation.{plot_extension}')
+
+
+@torch.no_grad()
+def annotate_image(
+        image_path: Path,
+        scene: Scene,
+        wf_line_width: int = 3
+) -> Image:
+    """
+    Draw the projected wireframe onto an image.
+    """
+    img = Image.open(image_path)
+    image_size = min(img.size)
+    if img.size[0] != img.size[1]:
+        offset_l = (img.size[0] - image_size) // 2
+        offset_t = (img.size[1] - image_size) // 2
+    else:
+        offset_l = 0
+        offset_t = 0
+
+    # Set up the projector
+    projector = Projector(
+        crystal=scene.crystal,
+        image_size=(image_size, image_size),
+        zoom=orthographic_scale_factor(scene),
+        transparent_background=True,
+        multi_line=True,
+        rtol=1e-2
+    )
+
+    draw = ImageDraw.Draw(img, 'RGB')
+    for ref_face_idx, face_segments in projector.edge_segments.items():
+        if len(face_segments) == 0:
+            continue
+        colour = projector.colour_facing_towards if ref_face_idx == 'facing' else projector.colour_facing_away
+        colour = tuple((colour * 255).int().tolist())
+        for segment in face_segments:
+            l = segment.clone()
+            l[:, 0] = torch.clamp(l[:, 0], 1, projector.image_size[1] - 2) + offset_l
+            l[:, 1] = torch.clamp(l[:, 1], 1, projector.image_size[0] - 2) + offset_t
+            draw.line(xy=[tuple(l[0].int().tolist()), tuple(l[1].int().tolist())],
+                      fill=colour, width=wf_line_width)
+
+    return img
