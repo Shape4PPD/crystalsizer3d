@@ -374,7 +374,7 @@ def run():
         # a = points_opt.get_all_points_tensor()
         # print(f"points tensor {a}")
         # Forward pass: get the pixel value at the current point (x, y)
-        loss, distances = model(projector_opt.edge_segments, img_tensor)  # Call model's forward method with Cartesian coordinates
+        loss, distances = model(projector_opt.edge_segments_rel, img_tensor)  # Call model's forward method with Cartesian coordinates
         # Perform backpropagation (minimize the pixel value)
         
         loss.backward(retain_graph=True)

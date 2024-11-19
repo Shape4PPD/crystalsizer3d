@@ -155,9 +155,9 @@ class Refiner:
         elif name == 'latents_model':
             self._init_latents_model()
             return self.latents_model
-        elif name == 'edge_matching':
-            self._init_edge_matching()
-            return self.edge_matching_model
+        elif name == 'edge_matching_loss':
+            self._init_edge_matching_loss()
+            return self.edge_matching
         elif name in ['optimiser', 'lr_scheduler']:
             self._init_optimiser()
             return getattr(self, name)
@@ -402,10 +402,15 @@ class Refiner:
             model_input = self.X_target_wis[None, ...].permute(0, 3, 1, 2)
             self.rcf_feats_og = self.rcf(model_input, apply_sigmoid=False)
 
-    def _init_edge_matching(self):
-        edge_matching = EdgeMatcher()
-        edge_matching.to(self.device)
-        self.edge_matching_model = edge_matching
+    def _init_edge_matching_loss(self):
+        """
+        Initialise the Edge Matching loss for calcullating the distance
+        from points on an edge to the detected edge found by RCF
+        """
+        edge_matching_loss = EdgeMatcher(
+            points_per_unit = self.args.edge_matching_points_per_unit)
+        edge_matching_loss.to(self.device)
+        self.edge_matching_loss = edge_matching_loss
 
     def _init_convergence_detector(self):
         """
@@ -783,6 +788,8 @@ class Refiner:
                 metric_keys.append('losses/rcf')
         if self.args.use_keypoints:
             metric_keys.append('losses/keypoints')
+        if self.args.use_edge_matching:
+            metric_keys.append('losses/edge_matching')
 
         return metric_keys
 
@@ -955,7 +962,7 @@ class Refiner:
             self.crystal.to('cpu')
 
             # Project the crystal mesh - reinitialise the projector for the new scene
-            if self.args.use_keypoints and len(self.keypoint_targets) > 0:
+            if self.args.use_keypoints and len(self.keypoint_targets) and self.args.use_edge_matching> 0:
                 self._init_projector()
                 self.projector.project(generate_image=False)
 
@@ -1367,7 +1374,7 @@ class Refiner:
                 **l1_stats, **l2_stats, **percept_stats, **latent_stats, **rcf_stats, **overshoot_stats,
                 **symmetry_stats,
                 **z_pos_stats, **rxy_stats, **switch_stats, **temporal_stats, **keypoints_stats, **anchors_stats,
-                **patch_stats
+                **edge_matching_stats, **patch_stats
             }
 
         else:
@@ -1816,22 +1823,14 @@ class Refiner:
         """
         Calculate the edge matching loss.
         """
-        loss = torch.tensor(0., device=self.crystal.distances.device)
+        loss = torch.tensor(0., device=self.device)
         stats = {}
-        if not self.args.edge_matching:
+        if not self.args.use_edge_matching:
             return loss, stats
+
+        loss, distances = self.edge_matching_loss(self.projector.edge_segments_rel, self.rcf_feats[2])
         
-        # Calculate the distance between a point on the edge
-        # of the crystal and a found edge
-        edge_points = self.projector.edge_points
-        edge_normals = self.projector.edge_normals   
-        
-        # These need to be calulated first     
-        
-        
-        loss, distances = self.edge_matching_model(edge_points,edge_normals, self.rcf_feats[5])
-        
-        stats[f'losses/edgematching'] = loss.item()
+        stats[f'losses/edge_matching'] = loss.item()
         
         return loss, stats
 
