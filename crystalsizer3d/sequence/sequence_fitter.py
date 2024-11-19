@@ -873,7 +873,7 @@ class SequenceFitter:
                 average_tps = running_tps / self.runtime_args.log_freq_train
                 seconds_left = float((max_steps - step) * average_tps)
                 logger.info(f'[{step + 1}/{max_steps}]\tLoss: {loss_avg:.4E}'
-                            + 'Time per step: {}, Est. complete in: {}'.format(
+                            + '\tTime per step: {}\tEst. complete in: {}'.format(
                     str(timedelta(seconds=average_tps)),
                     str(timedelta(seconds=seconds_left))))
                 running_loss = 0.
@@ -936,7 +936,7 @@ class SequenceFitter:
             p_vec_i = self.sequence_encoder(ts_i)
             parameters_i = self._parameter_vectors_to_dict(p_vec_i)
             for k, v in parameters_i.items():
-                self.parameters[train_or_eval][k][i:i + bs] = v.detach().cpu().clone().squeeze()
+                self.parameters[train_or_eval][k][i * bs:(i + 1) * bs] = v.detach().cpu().clone().squeeze()
         self.sequence_encoder.eval()  # Ensure the encoder is returned to eval mode
         self.save()
 
