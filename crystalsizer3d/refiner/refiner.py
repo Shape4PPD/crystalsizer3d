@@ -1828,7 +1828,7 @@ class Refiner:
         if not self.args.use_edge_matching:
             return loss, stats
 
-        loss, distances = self.edge_matching_loss(self.projector.edge_segments_rel, self.rcf_feats[2])
+        loss, distances = self.edge_matching_loss(self.projector.edge_segments_rel, self.rcf_feats_og[2])
         
         stats[f'losses/edge_matching'] = loss.item()
         
