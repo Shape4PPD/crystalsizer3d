@@ -1,6 +1,6 @@
 from argparse import ArgumentParser, _ArgumentGroup
 from pathlib import Path
-from typing import Optional
+from typing import List, Optional
 
 from crystalsizer3d.args.base_args import BaseArgs
 
@@ -14,6 +14,8 @@ class SequenceFitterArgs(BaseArgs):
             image_ext: str = 'jpg',
             start_image: int = 0,
             end_image: int = -1,
+            initial_scene: Path | None = None,
+            fix_parameters: List[str] | None = None,
 
             # Sequence encoder model parameters
             hidden_dim: int = 256,
@@ -54,6 +56,14 @@ class SequenceFitterArgs(BaseArgs):
         self.image_ext = image_ext
         self.start_image = start_image
         self.end_image = end_image
+        if initial_scene is not None:
+            assert initial_scene.exists(), f'Initial scene file {initial_scene} does not exist.'
+        self.initial_scene = initial_scene
+        if fix_parameters is not None:
+            assert initial_scene is not None, 'Must provide an initial scene file if fixing parameters.'
+            from crystalsizer3d.sequence.sequence_fitter import PARAMETER_KEYS
+            assert all(param in PARAMETER_KEYS for param in fix_parameters), f'Invalid parameter key: {fix_parameters}.'
+        self.fix_parameters = fix_parameters
 
         # Sequence encoder model parameters
         self.hidden_dim = hidden_dim
@@ -103,6 +113,10 @@ class SequenceFitterArgs(BaseArgs):
                             help='Start processing from this image.')
         parser.add_argument('--end-image', type=int, default=-1,
                             help='End processing at this image.')
+        parser.add_argument('--initial-scene', type=Path,
+                            help='Path to the initial scene file. Will be used for any fixed parameters.')
+        parser.add_argument('--fix-parameters', type=lambda s: s.split(','), default=[],
+                            help='Fix these parameters to the values set in the initial scene file.')
 
         # Sequence encoder model parameters
         group.add_argument('--hidden-dim', type=int, default=256,
