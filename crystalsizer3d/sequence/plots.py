@@ -134,9 +134,9 @@ def plot_losses(
 
 
 def plot_face_property_values(
-        manager: Manager,
         property_name: str,
         property_values: np.ndarray,
+        face_groups: Dict[Tuple[int, int, int], Dict[Tuple[int, int, int], int]],
         image_paths: List[Tuple[int, Path]],
         save_dir: Path = None,
         measurement_idxs: np.ndarray = None,
@@ -148,8 +148,7 @@ def plot_face_property_values(
     Plot face distances or areas.
     """
     x_vals = [idx for idx, _ in image_paths]
-    groups = get_crystal_face_groups(manager)
-    n_groups = len(groups)
+    n_groups = len(face_groups)
     group_colours = get_face_group_colours(n_groups)
 
     if property_name == 'areas':
@@ -168,7 +167,7 @@ def plot_face_property_values(
         top=0.95, bottom=0.08, right=0.99, left=0.05,
         hspace=0.3, wspace=0.2
     )
-    for i, (group_hkl, group_idxs) in enumerate(groups.items()):
+    for i, (group_hkl, group_idxs) in enumerate(face_groups.items()):
         colour = group_colours[i]
         colour_variants = get_colour_variations(colour, len(group_idxs))
         y = property_values[:, list(group_idxs.values())]
@@ -204,7 +203,7 @@ def plot_face_property_values(
     fig_mean, ax = plt.subplots(1, figsize=(12, 8))
     ax.set_title(f'Mean {property_name}')
     ax.grid()
-    for i, (group_hkl, group_idxs) in enumerate(groups.items()):
+    for i, (group_hkl, group_idxs) in enumerate(face_groups.items()):
         colour = group_colours[i]
         y = property_values[:, list(group_idxs.values())]
         y_mean = y.mean(axis=1)
@@ -222,8 +221,8 @@ def plot_face_property_values(
 
 
 def plot_distances(
-        manager: Manager,
         parameters: Dict[str, np.ndarray],
+        face_groups: Dict[Tuple[int, int, int], Dict[Tuple[int, int, int], int]],
         image_paths: List[Tuple[int, Path]],
         save_dir: Path = None,
         measurements: Dict[str, np.ndarray] = None
@@ -234,9 +233,9 @@ def plot_distances(
     distances = parameters['distances']
     scales = parameters['scale']
     return plot_face_property_values(
-        manager=manager,
         property_name='distances',
         property_values=distances * scales[:, None],
+        face_groups=face_groups,
         image_paths=image_paths,
         save_dir=save_dir,
         measurement_idxs=measurements['idx'] if measurements is not None else None,
@@ -250,6 +249,7 @@ def plot_areas(
         parameters: Dict[str, np.ndarray],
         image_paths: List[Tuple[int, Path]],
         save_dir: Path = None,
+        face_groups: Dict[Tuple[int, int, int], Dict[Tuple[int, int, int], int]] = None,
         measurements: Dict[str, np.ndarray] = None
 ) -> Tuple[Figure, Figure]:
     """
@@ -291,10 +291,13 @@ def plot_areas(
             unscaled_areas_m = np.array([crystal.areas[tuple(hkl.tolist())] for hkl in crystal.all_miller_indices])
             areas_m[i] = unscaled_areas_m * scales_m[i]**2
 
+    if face_groups is None:
+        face_groups = get_crystal_face_groups(manager)
+
     return plot_face_property_values(
-        manager=manager,
         property_name='areas',
         property_values=areas,
+        face_groups=face_groups,
         image_paths=image_paths,
         save_dir=save_dir,
         measurement_idxs=measurements['idx'] if measurements is not None else None,
@@ -363,12 +366,24 @@ def plot_rotation(
 @torch.no_grad()
 def annotate_image(
         image_path: Path,
-        scene: Scene,
+        scene: Scene | None = None,
+        crystal: Crystal | None = None,
+        zoom: float | None = None,
         wf_line_width: int = 3
 ) -> Image:
     """
     Draw the projected wireframe onto an image.
     """
+    assert (scene is None and crystal is not None and zoom is not None) \
+           or (scene is not None and crystal is None and zoom is None), \
+        'Either provide a scene and no crystal or zoom, or no scene and a crystal and zoom.'
+
+    # Get the crystal and zoom from the scene
+    if scene is not None:
+        crystal = scene.crystal
+        zoom = orthographic_scale_factor(scene)
+
+    # Load the image
     img = Image.open(image_path)
     image_size = min(img.size)
     if img.size[0] != img.size[1]:
@@ -380,9 +395,9 @@ def annotate_image(
 
     # Set up the projector
     projector = Projector(
-        crystal=scene.crystal,
+        crystal=crystal,
         image_size=(image_size, image_size),
-        zoom=orthographic_scale_factor(scene),
+        zoom=zoom,
         transparent_background=True,
         multi_line=True,
         rtol=1e-2

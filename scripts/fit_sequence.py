@@ -43,6 +43,14 @@ def get_args(printout: bool = True) -> Tuple[Namespace, SequenceFitterArgs, Refi
                            help='Render the evaluated parameters every n steps during training. (Must be a multiple of eval-freq).')
     rt_parser.add_argument('--eval-video-freq', type=int, default=10,
                            help='Make a video of the evaluated parameters every n steps during training. (Must be a multiple of eval-freq).')
+    rt_parser.add_argument('--n-plotting-workers', type=int, default=8,
+                           help='Number of plotting workers.')
+    rt_parser.add_argument('--plot-queue-size', type=int, default=100,
+                           help='Size of the plotting queue.')
+    rt_parser.add_argument('--n-dataloader-workers', type=int, default=2,
+                           help='Number of data loader workers.')
+    rt_parser.add_argument('--prefetch-factor', type=int, default=1,
+                           help='Data loader prefetch factor.')
 
     # Sequence fitter and refiner args
     SequenceFitterArgs.add_args(sf_parser)

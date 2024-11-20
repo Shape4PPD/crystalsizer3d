@@ -1260,7 +1260,7 @@ class Refiner:
         self.X_pred = X_pred
 
         # Use denoised target if available
-        X_target = self.X_target_denoised_wis if self.X_target_denoised is not None else self.X_target_wis
+        X_target = self.X_target_denoised_wis if self.X_target_denoised_wis is not None else self.X_target_wis
 
         # Add some noise to the target image
         if isinstance(X_target, list):
@@ -1654,7 +1654,7 @@ class Refiner:
                 X_target_patches[0],
                 size=(wis, wis),
                 mode='bilinear', align_corners=False
-            ).permute(0, 2, 3, 1)
+            ).permute(0, 2, 3, 1).to(self.device)
 
         # Update the film size parameters
         sf = wis / ps
@@ -1663,12 +1663,12 @@ class Refiner:
 
         # Render the patches
         X_pred_patches = []
+        vertices = self.crystal.mesh_vertices.to(device)
+        faces = self.crystal.mesh_faces.to(device)
+        eta = self.crystal.material_ior.to(device) / self.scene.crystal_material_bsdf['ext_ior']
+        roughness = self.crystal.material_roughness.to(device).clone()
+        radiance = self.scene.light_radiance.to(device).clone()
         for i, patch_centre in enumerate(patch_centres):
-            vertices = self.crystal.mesh_vertices.to(device)
-            faces = self.crystal.mesh_faces.to(device)
-            eta = self.crystal.material_ior.to(device) / self.scene.crystal_material_bsdf['ext_ior']
-            roughness = self.crystal.material_roughness.to(device).clone()
-            radiance = self.scene.light_radiance.to(device).clone()
             self.scene_params[Scene.FILM_CROP_OFFSET_KEY] = (patch_centre * sf - wis / 2).round().int().tolist()
             X_pred_patch = self._render_image(
                 vertices, faces, eta, roughness, radiance,

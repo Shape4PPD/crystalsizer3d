@@ -9,12 +9,12 @@ import yaml
 from torch import Tensor
 
 from app import REFINER_PROPERTY_TYPES
-from app.components.parallelism import start_process, start_thread, stop_event as global_stop_event
 from crystalsizer3d import logger
 from crystalsizer3d.args.refiner_args import RefinerArgs
 from crystalsizer3d.crystal import Crystal
 from crystalsizer3d.refiner.refiner import Refiner
 from crystalsizer3d.scene_components.scene import Scene
+from crystalsizer3d.util.parallelism import start_process, start_thread, stop_event as global_stop_event
 from crystalsizer3d.util.utils import hash_data
 
 

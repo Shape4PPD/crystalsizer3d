@@ -6,7 +6,7 @@ import wx
 
 from app import APP_DATA_PATH
 from app.components.app_frame import AppFrame
-from app.components.parallelism import close_parallel_processes
+from crystalsizer3d.util.parallelism import close_parallel_processes
 
 
 class CrystalSizerApp(wx.App):

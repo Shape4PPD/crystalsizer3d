@@ -1,7 +1,6 @@
 import gc
 import json
 import math
-import os
 import shutil
 import time
 from argparse import Namespace
@@ -25,15 +24,19 @@ from torchvision.transforms.functional import center_crop, to_tensor
 from crystalsizer3d import DATA_PATH, logger
 from crystalsizer3d.args.refiner_args import DENOISER_ARG_NAMES, KEYPOINTS_ARG_NAMES, PREDICTOR_ARG_NAMES, RefinerArgs
 from crystalsizer3d.args.sequence_fitter_args import SequenceFitterArgs
+from crystalsizer3d.crystal import Crystal
 from crystalsizer3d.refiner.denoising import denoise_image
 from crystalsizer3d.refiner.keypoint_detection import find_keypoints
 from crystalsizer3d.refiner.refiner import Refiner
 from crystalsizer3d.scene_components.scene import Scene
 from crystalsizer3d.sequence.adaptive_sampler import AdaptiveSampler
-from crystalsizer3d.sequence.plots import annotate_image, plot_areas, plot_distances
+from crystalsizer3d.sequence.data_loader import get_data_loader
+from crystalsizer3d.sequence.plots import plot_areas, plot_distances
 from crystalsizer3d.sequence.sequence_encoder import SequenceEncoder
+from crystalsizer3d.sequence.sequence_plotter import SequencePlotter
 from crystalsizer3d.sequence.utils import get_image_paths
-from crystalsizer3d.util.utils import FlexibleJSONEncoder, calculate_model_norm, hash_data, init_tensor, is_bad, \
+from crystalsizer3d.util.utils import FlexibleJSONEncoder, calculate_model_norm, get_crystal_face_groups, hash_data, \
+    init_tensor, is_bad, \
     json_to_torch, set_seed, to_dict, to_numpy
 
 PARAMETER_KEYS = ['scale', 'distances', 'origin', 'rotation', 'material_roughness', 'material_ior', 'light_radiance']
@@ -69,16 +72,19 @@ class SequenceFitter:
         self.path.mkdir(parents=True, exist_ok=True)
         self._init_output_dirs()
 
-        # Initialise the refiner
+        # Initialise the refiner and the asynchronous plotter
         self._init_refiner()
+        self._init_plotter()
 
         # Initialise the target data
         self._init_X_targets()
         self._init_X_targets_denoised()
+        self._init_X_wis()
         self._init_keypoints()
 
         # Initialise the outputs
         self._init_initial_predictions()
+        self._init_fixed_parameters()
         self._init_scenes()
         self._init_parameters()
         self._init_losses()
@@ -140,11 +146,20 @@ class SequenceFitter:
         self.manager = self.refiner.manager
         self.device = self.refiner.device
 
+    def _init_plotter(self):
+        """
+        Instantiate the asynchronous plotter.
+        """
+        self.plotter = SequencePlotter(
+            n_workers=self.runtime_args.n_plotting_workers,
+            queue_size=self.runtime_args.plot_queue_size,
+        )
+
     def _init_X_targets(self):
         """
         Instantiate the cropped target images.
         """
-        X_targets_dir = self.base_path / 'X_targets'
+        X_targets_dir = self.base_path / 'X_targets' / 'fullsize'
         if X_targets_dir.exists():
             try:
                 self.X_targets = []
@@ -170,8 +185,10 @@ class SequenceFitter:
                 X = X[:3]
             assert min(X.shape[-2:]) == img_size, 'All images must have the same size.'
             X = center_crop(X, [img_size, img_size])
-            X_target = to_numpy(X.permute(1, 2, 0))
-            Image.fromarray((X_target * 255).astype(np.uint8)).save(X_targets_dir / f'{idx:04d}.png')
+            self.plotter.save_image(X, X_targets_dir / f'{idx:04d}.png')
+
+        # Wait until the plotter queue is empty
+        self.plotter.wait_for_empty_queue()
 
         return self._init_X_targets()
 
@@ -180,7 +197,7 @@ class SequenceFitter:
         """
         Instantiate the denoised data.
         """
-        X_targets_denoised_dir = self.cache_dirs['denoiser']
+        X_targets_denoised_dir = self.cache_dirs['denoiser'] / 'fullsize'
         try:
             self.X_targets_denoised = []
             for (idx, _) in self.image_paths:
@@ -215,7 +232,7 @@ class SequenceFitter:
             )
             X_target_denoised = to_numpy(X_denoised.permute(1, 2, 0))
             idx = self.image_paths[i][0]
-            Image.fromarray((X_target_denoised * 255).astype(np.uint8)).save(X_targets_denoised_dir / f'{idx:04d}.png')
+            self.plotter.save_image(X_target_denoised, X_targets_denoised_dir / f'{idx:04d}.png')
 
         # Destroy the denoiser to free up space
         logger.info('Destroying denoiser to free up space.')
@@ -223,7 +240,49 @@ class SequenceFitter:
         torch.cuda.empty_cache()
         gc.collect()
 
+        # Wait until the plotter queue is empty
+        self.plotter.wait_for_empty_queue()
+
         return self._init_X_targets_denoised()
+
+    def _init_X_wis(self):
+        """
+        Instantiate the dataset of resized images.
+        """
+        wis = self.refiner_args.rendering_size
+        X_dirs = {
+            'og': self.base_path / 'X_targets' / str(wis),
+            'dn': self.cache_dirs['denoiser'] / str(wis)
+        }
+        try:
+            self.X_wis = {'og': [], 'dn': []}
+            for X_type in ['og', 'dn']:
+                for (idx, _) in self.image_paths:
+                    X_wis_path = X_dirs[X_type] / f'{idx:04d}.png'
+                    self.X_wis[X_type].append(to_tensor(Image.open(X_wis_path)))
+            logger.info(f'Loaded resized images from {X_dirs["og"]} and {X_dirs["dn"]}.')
+            return
+        except Exception:
+            pass
+
+        # Resize the images to the rendering sizes
+        logger.info('Initialising the resized images.')
+        for X_dir in X_dirs.values():
+            X_dir.mkdir(parents=True, exist_ok=True)
+        for i, (idx, _) in enumerate(self.image_paths):
+            if (i + 1) % 50 == 0:
+                logger.info(f'Resizing target images {i + 1}/{len(self)}.')
+            X = to_tensor(Image.open(self.X_targets[i]))
+            X_dn = to_tensor(Image.open(self.X_targets_denoised[i]))
+            X_wis = self.refiner._resize(X).permute(1, 2, 0)
+            X_dn_wis = self.refiner._resize(X_dn).permute(1, 2, 0)
+            self.plotter.save_image(X_wis, X_dirs['og'] / f'{idx:04d}.png')
+            self.plotter.save_image(X_dn_wis, X_dirs['dn'] / f'{idx:04d}.png')
+
+        # Wait until the plotter queue is empty
+        self.plotter.wait_for_empty_queue()
+
+        return self._init_X_wis()
 
     @torch.no_grad()
     def _init_keypoints(self):
@@ -435,9 +494,8 @@ class SequenceFitter:
             # Save the parameters and images
             idx = self.image_paths[i][0]
             scene.to_yml(scenes_initial_dir / f'{idx:04d}.yml')
-            X_pred_initial_path = X_preds_initial_dir / f'{idx:04d}.png'
-            Image.fromarray(X_pred_initial).save(X_pred_initial_path)
-            annotate_image(X_path, scene).save(X_annotated_initial_dir / f'{idx:04d}.png')
+            self.plotter.save_image(X_pred_initial, X_preds_initial_dir / f'{idx:04d}.png')
+            self.plotter.annotate_image(X_path, X_annotated_initial_dir / f'{idx:04d}.png', scene)
 
         # Restore the settings
         del self.refiner.projector
@@ -453,7 +511,28 @@ class SequenceFitter:
         torch.cuda.empty_cache()
         gc.collect()
 
+        # Wait until the plotter queue is empty
+        self.plotter.wait_for_empty_queue()
+
         return self._init_initial_predictions()
+
+    def _init_fixed_parameters(self):
+        """
+        Instantiate the fixed parameters.
+        """
+        self.fixed_parameters = {}
+        if self.sf_args.initial_scene is None:
+            self.initial_scene = None
+            return
+        assert self.sf_args.initial_scene.exists(), f'Initial scene file {self.sf_args.initial_scene} does not exist.'
+        logger.info(f'Loading initial scene data from {self.sf_args.initial_scene}.')
+        self.initial_scene = Scene.from_yml(self.sf_args.initial_scene)
+        for k in self.sf_args.fix_parameters:
+            if k == 'light_radiance':
+                v = self.initial_scene.light_radiance
+            else:
+                v = getattr(self.initial_scene.crystal, k)
+            self.fixed_parameters[k] = init_tensor(v)
 
     def _init_scenes(self):
         """
@@ -466,7 +545,6 @@ class SequenceFitter:
                 for i, (idx, _) in enumerate(self.image_paths):
                     for train_or_eval in ['train', 'eval']:
                         scene_path = scenes_dir / train_or_eval / f'{idx:04d}.yml'
-                        assert scene_path.exists()
                         with open(scene_path) as f:
                             scene_dict = yaml.load(f, Loader=yaml.FullLoader)
                         self.scenes[train_or_eval].append({
@@ -478,12 +556,55 @@ class SequenceFitter:
             except Exception:
                 pass
 
+        # If the origin is going to be fixed then we need to adjust the initial predictions to use it
+        crystal = None
+        if 'origin' in self.fixed_parameters:
+            origin_new = init_tensor(self.fixed_parameters['origin'])
+            ds = self.refiner.manager.ds
+            cs = ds.csd_proxy.load(ds.dataset_args.crystal_id)
+            crystal = Crystal(
+                lattice_unit_cell=cs.lattice_unit_cell,
+                lattice_angles=cs.lattice_angles,
+                miller_indices=ds.miller_indices,
+                point_group_symbol=cs.point_group_symbol,
+            )
+
         # Initialise the scene parameters with the initial predictions
         logger.info(f'Initialising scenes at {scenes_dir}.')
         for train_or_eval in ['train', 'eval']:
             (scenes_dir / train_or_eval).mkdir(parents=True, exist_ok=True)
-            for scene_initial_path in self.scenes_initial:
-                shutil.copy(scene_initial_path, scenes_dir / train_or_eval)
+        for i, scene_initial_path in enumerate(self.scenes_initial):
+            if (i + 1) % 50 == 0:
+                logger.info(f'Initialising scene {i + 1}/{len(self)}.')
+            with open(scene_initial_path) as f:
+                scene_initial_dict = yaml.load(f, Loader=yaml.FullLoader)
+            c_dict = scene_initial_dict['crystal']
+
+            # Fix the parameters if required
+            for k, v in self.fixed_parameters.items():
+                if k == 'origin':
+                    crystal.distances.data = init_tensor(c_dict['distances'])
+                    crystal.origin.data = init_tensor(c_dict['origin'])
+                    crystal.adjust_origin(origin_new, verify=False)
+                    c_dict['distances'] = crystal.distances.tolist()
+                    c_dict['origin'] = crystal.origin.tolist()
+                elif k == 'scale':
+                    new_scale = self.fixed_parameters['scale'].item()
+                    distances = init_tensor(c_dict['distances']) * c_dict['scale'] / new_scale
+                    c_dict['scale'] = new_scale
+                    c_dict['distances'] = distances.tolist()
+                elif k == 'light_radiance':
+                    scene_initial_dict['light_radiance'] = v.tolist()
+                else:
+                    if v.numel() == 1:
+                        c_dict[k] = v.item()
+                    else:
+                        c_dict[k] = v.tolist()
+
+            for train_or_eval in ['train', 'eval']:
+                scene_path = scenes_dir / train_or_eval / scene_initial_path.name
+                with open(scene_path, 'w') as f:
+                    yaml.dump(scene_initial_dict, f)
 
         return self._init_scenes()
 
@@ -737,8 +858,20 @@ class SequenceFitter:
             if self.frame_counts[i] > 0:
                 sampler.emas[i].val = self.losses['total/train'][i].item()
 
+        # Dataset
+        dataloader = get_data_loader(
+            sequence_fitter=self,
+            adaptive_sampler=sampler,
+            batch_size=bs,
+            n_workers=self.runtime_args.n_dataloader_workers,
+            prefetch_factor=self.runtime_args.prefetch_factor,
+        )
+
         # Load the first scene and adapt the crystal to use buffers instead of parameters
-        scene = Scene.from_yml(self.scenes['train'][0]['path'])
+        if self.initial_scene is not None:
+            scene = self.initial_scene
+        else:
+            scene = Scene.from_yml(self.scenes['train'][0]['path'])
         crystal = scene.crystal
         for k in list(crystal._parameters.keys()):
             val = crystal.get_parameter(k).data
@@ -762,33 +895,19 @@ class SequenceFitter:
         # Train the sequence encoder
         running_loss = 0.
         running_tps = 0
-        for step in range(start_step, max_steps):
+        step = start_step - 1
+        for batch_idxs, batch in dataloader:
+            step += 1
             start_time = time.time()
             self.sequence_encoder.train()
             self.refiner.step = step
 
-            # Sample frame indices and normalise
-            idxs = sampler.sample_frames(bs)
-            ts = (idxs / (N - 1)).to(self.device)
-
-            # Generate the target images batches
-            X_targets = {'og': [], 'dn': [], 'og_wis': [], 'dn_wis': []}
-            for k, batch in X_targets.items():
-                for idx in idxs:
-                    if k[:2] == 'dn':
-                        X_path = self.X_targets_denoised[idx]
-                    else:
-                        X_path = self.X_targets[idx]
-                    X = to_tensor(Image.open(X_path))
-                    if k[-3:] == 'wis':
-                        X = self.refiner._resize(X)
-                    batch.append(X)
-                X_targets[k] = torch.stack(batch).permute(0, 2, 3, 1).to(self.device)
+            # Normalise frame indices to time points
+            ts = (batch_idxs / (N - 1)).to(self.device)
 
             # Generate the parameters from the encoder
-            parameters_pred = self._parameter_vectors_to_dict(
-                self.sequence_encoder(ts)
-            )
+            parameters_pred = self.sequence_encoder(ts)
+            p_grads = torch.zeros_like(parameters_pred)
 
             # Conditionally enable the inverse rendering
             self.refiner_args.use_inverse_rendering = use_inverse_rendering and step >= self.refiner_args.ir_wait_n_steps
@@ -796,40 +915,47 @@ class SequenceFitter:
             # Loop over the batch and use the refiner to calculate the loss for each frame
             losses_batch = []
             for i in range(bs):
-                idx = idxs[i]
+                idx = batch_idxs[i]
+                p_vec = parameters_pred[i].clone().detach().requires_grad_(True)
+                p_dict = self._parameter_vectors_to_dict(p_vec[None, ...])
 
                 # Update targets
-                self.refiner.X_target = X_targets['og'][i]
-                self.refiner.X_target_wis = X_targets['og_wis'][i]
-                self.refiner.X_target_denoised = X_targets['dn'][i]
-                self.refiner.X_target_denoised_wis = X_targets['dn_wis'][i]
+                self.refiner.X_target = batch[0][i]
+                self.refiner.X_target_denoised = batch[1][i]
+                self.refiner.X_target_wis = batch[2][i].to(self.device)
+                self.refiner.X_target_denoised_wis = batch[3][i].to(self.device)
                 if self.refiner_args.use_keypoints:
                     self.refiner.keypoint_targets = self.keypoints[idx]['keypoints']
 
                 # Update scene and crystal parameters
-                for k, v in parameters_pred.items():
+                for k, v in p_dict.items():
                     if k == 'light_radiance':
-                        scene.light_radiance = v[i].to(self.device)
+                        scene.light_radiance = v[0].to(self.device)
                     else:
-                        setattr(crystal, k, v[i].to('cpu'))
-                    self.parameters['train'][k][idx] = v[i].clone().detach().cpu()
+                        setattr(crystal, k, v[0].to('cpu'))
+                    self.parameters['train'][k][idx] = v[0].clone().detach().cpu()
 
                 # Calculate losses
-                loss_j, stats_j = self.refiner._process_step(add_noise=False)
-                (loss_j / bs).backward(retain_graph=True)
-                losses_batch.append(loss_j)
+                loss_i, stats_i = self.refiner._process_step(add_noise=False)
+                (loss_i / bs).backward()
+                losses_batch.append(loss_i.detach())
+
+                # Accumulate gradients
+                p_grads[i] = p_vec.grad.clone()
 
                 # Update sequence state
-                self.losses['total/train'][idx] = loss_j.item()
+                self.losses['total/train'][idx] = loss_i.item()
                 self.frame_counts[idx] += 1
                 if self.refiner_args.use_inverse_rendering:
-                    X_pred = (to_numpy(self.refiner.X_pred) * 255).astype(np.uint8)
-                    Image.fromarray(X_pred).save(self.X_preds['train'][idx])
-                annotate_image(self.X_targets[idx], scene).save(self.X_targets_annotated['train'][idx])
+                    self.plotter.save_image(self.refiner.X_pred, self.X_preds['train'][idx])
+                self.plotter.annotate_image(self.X_targets[idx], self.X_targets_annotated['train'][idx], scene)
 
-            # Calculate the mean loss and gradients
+            # Save losses
             losses_batch = torch.tensor(losses_batch)
             loss = losses_batch.mean()
+
+            # Propagate the parameter gradients back to the encoder
+            torch.autograd.backward(parameters_pred, grad_tensors=p_grads)
 
             # Clip gradients
             if self.sf_args.clip_grad_norm > 0:
@@ -848,7 +974,7 @@ class SequenceFitter:
             self.optimiser.zero_grad()
 
             # Update the adaptive sampler and log the total sequence loss estimate
-            sampler.update_errors(idxs, losses_batch)
+            sampler.update_errors(batch_idxs, losses_batch)
             seq_loss = sampler.errors.sum().item()
             self.losses['training'] = torch.concatenate([self.losses['training'], torch.tensor(seq_loss)[None, ...]])
             self.tb_logger.add_scalar('losses/seq_train', self.losses['total/train'].sum().item(), step)
@@ -964,11 +1090,9 @@ class SequenceFitter:
                 else:
                     getattr(crystal, k).data = v
             if generate_renders:
-                scene.build_mi_scene()
-                X_pred = scene.render()
-                Image.fromarray(X_pred).save(self.X_preds[train_or_eval][i])
+                self.plotter.render_scene(scene, self.X_preds[train_or_eval][i])
             if generate_annotations:
-                annotate_image(self.X_targets[i], scene).save(self.X_targets_annotated[train_or_eval][i])
+                self.plotter.annotate_image(self.X_targets[i], self.X_targets_annotated[train_or_eval][i], scene)
 
     def _plot_parameters(self, train_or_eval: str):
         """
@@ -978,14 +1102,15 @@ class SequenceFitter:
             parameters=self.parameters[train_or_eval],
             # measurements=measurements,
             image_paths=self.image_paths,
+            face_groups=get_crystal_face_groups(self.refiner.manager)
         )
         plot_dir = self.path / 'plots' / train_or_eval
         for plot_type in ['distances', 'areas']:
             figs = {}
             if plot_type == 'distances':
-                figs['grouped'], figs['mean'] = plot_distances(manager=self.refiner.manager, **plot_args)
+                figs['grouped'], figs['mean'] = plot_distances(**plot_args)
             else:
-                figs['grouped'], figs['mean'] = plot_areas(manager=self.refiner.manager, **plot_args)
+                figs['grouped'], figs['mean'] = plot_areas(self.refiner.manager, **plot_args)
             for group_type in ['grouped', 'mean']:
                 save_dir = plot_dir / f'{plot_type}_{group_type}'
                 save_dir.mkdir(parents=True, exist_ok=True)
@@ -996,15 +1121,12 @@ class SequenceFitter:
         """
         Generate a video from the images.
         """
-        imgs_dir = self.X_targets_annotated[train_or_eval][0].parent
-        out_dir = self.path / 'videos' / train_or_eval / 'annotations'
-        out_dir.mkdir(parents=True, exist_ok=True)
-        save_path = out_dir / f'{self.refiner.step:05d}.mp4'
-        logger.info(f'Making growth video from {imgs_dir} to {save_path}.')
-        escaped_images_dir = str(imgs_dir.absolute()).replace('[', '\\[').replace(']', '\\]')
-        cmd = f'ffmpeg -y -framerate 25 -pattern_type glob -i "{escaped_images_dir}/*.png" -c:v libx264 -pix_fmt yuv420p "{save_path}"'
-        logger.info(f'Running command: {cmd}')
-        os.system(cmd)
+        self.plotter.generate_video(
+            imgs_dir=self.X_targets_annotated[train_or_eval][0].parent,
+            train_or_eval=train_or_eval,
+            save_root=self.path,
+            step=self.refiner.step + 1,
+        )
 
     def get_parameter_vector(self, idx: int, train_or_eval: str = 'eval') -> Tensor:
         """
@@ -1029,14 +1151,17 @@ class SequenceFitter:
 
     def _parameter_vectors_to_dict(self, parameter_vectors: Tensor) -> Dict[str, Tensor]:
         """
-        Convert a parameter vector to a dictionary of parameters.
+        Convert a batch of parameter vectors to a dictionary of parameters, with fixed parameter replacements.
         """
         parameters = {}
+        bs = parameter_vectors.shape[0]
         idx = 0
         for k, v in self.parameters['eval'].items():
             n = v.shape[1] if v.ndim > 1 else 1
             val = parameter_vectors[:, idx:idx + n].squeeze(1)
-            if k == 'scale':
+            if k in self.fixed_parameters:
+                val = self.fixed_parameters[k][None, ...].repeat(bs, 1).squeeze(1)
+            elif k == 'scale':
                 val = val.clamp(0.01, 10)
             elif k == 'distances':
                 val = val.clamp(0.01, 10)

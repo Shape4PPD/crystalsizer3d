@@ -12,7 +12,7 @@ class AdaptiveSampler:
         self.emas = [EMA(val=ema_init, decay=ema_decay) for _ in range(sequence_length)]
 
     @property
-    def errors(self):
+    def errors(self) -> Tensor:
         return torch.tensor([ema.val for ema in self.emas])
 
     def update_errors(self, frame_indices: List[int], errors: Tensor):
@@ -22,7 +22,7 @@ class AdaptiveSampler:
         for i, frame_idx in enumerate(frame_indices):
             self.emas[frame_idx](errors[i].item())
 
-    def get_sampling_probabilities(self):
+    def get_sampling_probabilities(self) -> Tensor:
         """
         Convert errors to probabilities by normalising to sum to 1.
         """
@@ -30,7 +30,7 @@ class AdaptiveSampler:
         probabilities = errors / errors.sum()
         return probabilities
 
-    def sample_frames(self, batch_size: int):
+    def sample_frames(self, batch_size: int) -> Tensor:
         """
         Sample frames according to the adaptive probabilities.
         """
