@@ -27,6 +27,11 @@ PREDICTOR_ARG_NAMES = [
     'latents_model', 'mv2_config_path', 'mv2_checkpoint_path', 'rcf_model_path', 'rcf_loss_type', 'keypoints_loss_type'
 ]
 
+PREDICTOR_ARG_NAMES_BS1 = [
+    'predictor_model_path', 'initial_pred_oversize_input', 'initial_pred_max_img_size', 'rendering_size', 'spp',
+    'integrator_max_depth', 'integrator_rr_depth',
+]
+
 
 class RefinerArgs(BaseArgs):
     def __init__(
