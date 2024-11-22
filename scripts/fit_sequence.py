@@ -51,6 +51,10 @@ def get_args(printout: bool = True) -> Tuple[Namespace, SequenceFitterArgs, Refi
                            help='Number of data loader workers.')
     rt_parser.add_argument('--prefetch-factor', type=int, default=1,
                            help='Data loader prefetch factor.')
+    rt_parser.add_argument('--n-refiner-workers', type=int, default=2,
+                           help='Number of refiner workers.')
+    rt_parser.add_argument('--refiner-queue-size', type=int, default=100,
+                           help='Size of the refiner queue.')
 
     # Sequence fitter and refiner args
     SequenceFitterArgs.add_args(sf_parser)

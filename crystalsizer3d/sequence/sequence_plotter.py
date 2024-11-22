@@ -18,7 +18,7 @@ from crystalsizer3d.util.parallelism import start_process, stop_event as global_
 from crystalsizer3d.util.utils import to_numpy
 
 
-def plotter_worker(queue: mp.Queue, stop_event: mp.Event):
+def plotter_worker(queue: mp.Queue, stop_event: mp.Event, worker_status: mp.Array, worker_idx: int):
     """
     Worker process for the sequence plotter.
     """
@@ -28,10 +28,12 @@ def plotter_worker(queue: mp.Queue, stop_event: mp.Event):
         try:
             job = queue.get(timeout=1)
         except Empty:
+            worker_status[worker_idx] = 0
             continue
         if job is None:
             time.sleep(1)
             continue
+        worker_status[worker_idx] = 1
         method_name = f'_{job["type"]}'
         getattr(SequencePlotter, method_name)(job)
         time.sleep(1)
@@ -42,11 +44,11 @@ class SequencePlotter:
         self.workers = {}
         self.n_workers = n_workers
 
-        if n_workers > 1:
+        if n_workers > 0:
             # Ensure that CUDA will work in subprocesses
             mp.set_start_method('spawn', force=True)
 
-            # Set up the channels
+            # Set up the job queue
             self.queue = mp.Queue(maxsize=queue_size)
 
             # Start the worker processes
@@ -57,10 +59,11 @@ class SequencePlotter:
         """
         Start the worker processes.
         """
+        self.worker_status = mp.Array('i', [1] * self.n_workers)
         for i in range(self.n_workers):
             process = mp.Process(
                 target=plotter_worker,
-                args=(self.queue, self.stop_event),
+                args=(self.queue, self.stop_event, self.worker_status, i),
             )
             start_process(process)
 
@@ -71,7 +74,7 @@ class SequencePlotter:
         method_name = f'_{job["type"]}'
         if not hasattr(SequencePlotter, method_name):
             raise RuntimeError(f'Invalid job type: "{job["type"]}"')
-        if self.n_workers > 1:
+        if self.n_workers > 0:
             while True:
                 try:
                     self.queue.put(job, block=False)
@@ -82,15 +85,22 @@ class SequencePlotter:
         else:
             getattr(SequencePlotter, method_name)(job)
 
-    def wait_for_empty_queue(self):
+    def all_workers_idle(self):
         """
-        Wait for the queue to empty.
+        Check if all workers are idle.
         """
-        if not self.queue.empty():
-            logger.info('Waiting for the queue to empty...')
-            while not self.queue.empty():
+        return (self.n_workers == 0
+                or all(status == 0 for status in self.worker_status))
+
+    def wait_for_workers(self):
+        """
+        Wait for all workers to complete.
+        """
+        if not self.all_workers_idle():
+            logger.info('Waiting for plotter workers...')
+            while not self.all_workers_idle():
                 time.sleep(1)
-            logger.info('Queue is empty.')
+            logger.info('Plotter workers ready.')
 
     def save_image(self, X: Tensor | np.ndarray, save_path: Path):
         """
@@ -118,16 +128,32 @@ class SequencePlotter:
         X = job['X']
         Image.fromarray(X).save(job['save_path'])
 
-    def annotate_image(self, X_path: Path, X_annotated_path: Path, scene: Scene):
+    def annotate_image(
+            self,
+            X_path: Path,
+            X_annotated_path: Path,
+            scene: Scene | None = None,
+            zoom: float | None = None,
+            crystal: Crystal | Dict[str, Any] | None = None
+    ):
         """
         Annotate an image with the wireframe overlay of the crystal.
         """
+        if scene is None:
+            assert zoom is not None and crystal is not None, 'If scene is not provided, zoom and crystal must be.'
+        else:
+            assert zoom is None and crystal is None, 'If scene is provided, zoom and crystal must not be.'
+            crystal = scene.crystal
+            zoom = orthographic_scale_factor(scene)
+        if isinstance(crystal, Crystal):
+            crystal = crystal.to_dict()
+
         self.enqueue_job({
             'type': 'annotate_image',
             'X_path': X_path,
             'X_annotated_path': X_annotated_path,
-            'zoom': orthographic_scale_factor(scene),
-            'crystal': scene.crystal.to_dict()
+            'zoom': zoom,
+            'crystal': crystal
         })
 
     @staticmethod

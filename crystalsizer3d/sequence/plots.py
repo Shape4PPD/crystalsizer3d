@@ -11,6 +11,7 @@ from matplotlib.gridspec import GridSpec
 from torch import Tensor
 
 from crystalsizer3d.crystal import Crystal
+from crystalsizer3d.csd_proxy import CSDProxy
 from crystalsizer3d.nn.manager import Manager
 from crystalsizer3d.projector import Projector
 from crystalsizer3d.scene_components.scene import Scene
@@ -264,7 +265,7 @@ def plot_areas(
 
     # Get a crystal object
     ds = manager.ds
-    cs = ds.csd_proxy.load(ds.dataset_args.crystal_id)
+    cs = CSDProxy().load(ds.dataset_args.crystal_id)
     crystal = Crystal(
         lattice_unit_cell=cs.lattice_unit_cell,
         lattice_angles=cs.lattice_angles,

@@ -141,7 +141,7 @@ class Refiner:
             self._init_manager()
             return self.manager
         elif name == 'projector':
-            self._init_projector()
+            self.init_projector()
             return self.projector
         elif name == 'blur':
             self._init_blur()
@@ -283,7 +283,7 @@ class Refiner:
         )
         self.manager = manager
 
-    def _init_projector(self):
+    def init_projector(self):
         """
         Initialise the projector.
         """
@@ -960,7 +960,7 @@ class Refiner:
 
             # Project the crystal mesh - reinitialise the projector for the new scene
             if self.args.use_keypoints and len(self.keypoint_targets) > 0:
-                self._init_projector()
+                self.init_projector()
                 self.projector.project(generate_image=False)
 
             # Calculate losses
@@ -1007,7 +1007,7 @@ class Refiner:
         self.scene = scene
         self.scene_params = scene_params
         self.crystal = scene.crystal
-        self._init_projector()
+        self.init_projector()
 
     def train(
             self,
@@ -1140,7 +1140,7 @@ class Refiner:
         """
         Train for a single step.
         """
-        loss, stats = self._process_step(add_noise=True)
+        loss, stats = self.process_step(add_noise=True)
 
         # Backpropagate errors
         (loss / self.args.acc_grad_steps).backward()
@@ -1189,7 +1189,7 @@ class Refiner:
 
         return loss, stats
 
-    def _process_step(self, add_noise: bool = True) -> Tuple[Tensor, Dict[str, float]]:
+    def process_step(self, add_noise: bool = True) -> Tuple[Tensor, Dict[str, float]]:
         """
         Process a single step.
         """
@@ -1823,7 +1823,7 @@ class Refiner:
         if self.args.plot_every_n_steps > -1 and (force or (self.step + 1) % self.args.plot_every_n_steps == 0):
             logger.info('Plotting.')
             # Re-process the step with no noise for plotting
-            self._process_step(add_noise=False)
+            self.process_step(add_noise=False)
             with torch.no_grad():
                 fig = self._plot_comparison()
                 self._save_plot(fig, 'optimisation')

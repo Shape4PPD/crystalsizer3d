@@ -22,9 +22,11 @@ from torch.utils.tensorboard import SummaryWriter
 from torchvision.transforms.functional import center_crop, to_tensor
 
 from crystalsizer3d import DATA_PATH, logger
-from crystalsizer3d.args.refiner_args import DENOISER_ARG_NAMES, KEYPOINTS_ARG_NAMES, PREDICTOR_ARG_NAMES, RefinerArgs
+from crystalsizer3d.args.refiner_args import DENOISER_ARG_NAMES, KEYPOINTS_ARG_NAMES, PREDICTOR_ARG_NAMES, \
+    PREDICTOR_ARG_NAMES_BS1, RefinerArgs
 from crystalsizer3d.args.sequence_fitter_args import SequenceFitterArgs
 from crystalsizer3d.crystal import Crystal
+from crystalsizer3d.csd_proxy import CSDProxy
 from crystalsizer3d.refiner.denoising import denoise_image
 from crystalsizer3d.refiner.keypoint_detection import find_keypoints
 from crystalsizer3d.refiner.refiner import Refiner
@@ -32,12 +34,12 @@ from crystalsizer3d.scene_components.scene import Scene
 from crystalsizer3d.sequence.adaptive_sampler import AdaptiveSampler
 from crystalsizer3d.sequence.data_loader import get_data_loader
 from crystalsizer3d.sequence.plots import plot_areas, plot_distances
+from crystalsizer3d.sequence.refiner_pool import RefinerPool
 from crystalsizer3d.sequence.sequence_encoder import SequenceEncoder
 from crystalsizer3d.sequence.sequence_plotter import SequencePlotter
 from crystalsizer3d.sequence.utils import get_image_paths
 from crystalsizer3d.util.utils import FlexibleJSONEncoder, calculate_model_norm, get_crystal_face_groups, hash_data, \
-    init_tensor, is_bad, \
-    json_to_torch, set_seed, to_dict, to_numpy
+    init_tensor, is_bad, json_to_torch, set_seed, to_dict, to_numpy
 
 PARAMETER_KEYS = ['scale', 'distances', 'origin', 'rotation', 'material_roughness', 'material_ior', 'light_radiance']
 SEQUENCE_DATA_PATH = DATA_PATH / 'sequences'
@@ -47,6 +49,9 @@ ARG_NAMES = {
     'keypoints': KEYPOINTS_ARG_NAMES,
     'predictor': PREDICTOR_ARG_NAMES,
 }
+
+# Suppress mitsuba warning messages
+mi.set_log_level(mi.LogLevel.Error)
 
 
 class SequenceFitter:
@@ -103,6 +108,8 @@ class SequenceFitter:
         self.cache_dirs = {}
         for model_name, arg_names in ARG_NAMES.items():
             model_args = {k: getattr(self.refiner_args, k) for k in arg_names}
+            if model_name == 'predictor' and self.refiner_args.initial_pred_batch_size == 1:
+                model_args = {k: getattr(self.refiner_args, k) for k in PREDICTOR_ARG_NAMES_BS1}
             model_id = model_args[f'{model_name}_model_path'].stem[:4]
             model_cache_dir = self.base_path / model_name / f'{model_id}_{hash_data(model_args)}'
             model_cache_dir.mkdir(parents=True, exist_ok=True)
@@ -154,6 +161,7 @@ class SequenceFitter:
             n_workers=self.runtime_args.n_plotting_workers,
             queue_size=self.runtime_args.plot_queue_size,
         )
+        self.plotter.wait_for_workers()
 
     def _init_X_targets(self):
         """
@@ -187,8 +195,8 @@ class SequenceFitter:
             X = center_crop(X, [img_size, img_size])
             self.plotter.save_image(X, X_targets_dir / f'{idx:04d}.png')
 
-        # Wait until the plotter queue is empty
-        self.plotter.wait_for_empty_queue()
+        # Wait for the plotter workers
+        self.plotter.wait_for_workers()
 
         return self._init_X_targets()
 
@@ -240,8 +248,8 @@ class SequenceFitter:
         torch.cuda.empty_cache()
         gc.collect()
 
-        # Wait until the plotter queue is empty
-        self.plotter.wait_for_empty_queue()
+        # Wait for the plotter workers
+        self.plotter.wait_for_workers()
 
         return self._init_X_targets_denoised()
 
@@ -279,8 +287,8 @@ class SequenceFitter:
             self.plotter.save_image(X_wis, X_dirs['og'] / f'{idx:04d}.png')
             self.plotter.save_image(X_dn_wis, X_dirs['dn'] / f'{idx:04d}.png')
 
-        # Wait until the plotter queue is empty
-        self.plotter.wait_for_empty_queue()
+        # Wait for the plotter workers
+        self.plotter.wait_for_workers()
 
         return self._init_X_wis()
 
@@ -379,30 +387,12 @@ class SequenceFitter:
             except Exception:
                 pass
         logger.info('Generating initial predictions.')
+        ds = self.refiner.manager.ds
 
-        # Clean up if anything exists already
-        if scenes_initial_dir.exists():
-            shutil.rmtree(scenes_initial_dir)
-        if X_preds_initial_dir.exists():
-            shutil.rmtree(X_preds_initial_dir)
-        if X_annotated_initial_dir.exists():
-            shutil.rmtree(X_annotated_initial_dir)
+        # Make directories
         scenes_initial_dir.mkdir(parents=True, exist_ok=True)
         X_preds_initial_dir.mkdir(parents=True, exist_ok=True)
         X_annotated_initial_dir.mkdir(parents=True, exist_ok=True)
-
-        # Sinkhorn loss re-enables grad so disable and re-enable it manually
-        # https://github.com/jeanfeydy/geomloss/issues/57
-        prev_grad_enabled = torch.is_grad_enabled()
-        torch.set_grad_enabled(False)
-
-        # Ensure the inverse rendering losses are turned on
-        use_inverse_rendering = self.refiner_args.use_inverse_rendering
-        self.refiner_args.use_inverse_rendering = True
-        use_latents_model = self.refiner_args.use_latents_model
-        self.refiner_args.use_latents_model = self.refiner_args.w_latent > 0
-        use_perceptual_model = self.refiner_args.use_perceptual_model
-        self.refiner_args.use_perceptual_model = self.refiner_args.w_perceptual > 0
 
         # Set up the resizing
         resize_args = dict(mode='bilinear', align_corners=False)
@@ -410,100 +400,178 @@ class SequenceFitter:
         self.manager.predictor.resize_input = False
         oversize_input = self.refiner_args.initial_pred_oversize_input
         img_size = self.refiner_args.initial_pred_max_img_size if oversize_input else self.manager.image_shape[-1]
-        render_size = self.manager.crystal_renderer.dataset_args.image_size  # Use the rendering size the predictor was trained on
+        render_size = ds.dataset_args.image_size  # Use the rendering size the predictor was trained on
 
-        # Noise batch vars
-        bs = self.refiner_args.initial_pred_batch_size // 2
-        noise_scale = torch.linspace(
-            self.refiner_args.initial_pred_noise_min,
-            self.refiner_args.initial_pred_noise_max,
-            bs,
-            device=self.device
-        )
+        # If the batch size is 1 then we can simplify things significantly
+        if self.refiner_args.initial_pred_batch_size == 1:
+            scene_args = ds.dataset_args.to_dict()
+            scene_args['spp'] = self.refiner_args.spp
+            scene_args['res'] = self.refiner_args.rendering_size
 
-        def update_scene_parameters(scene_: Scene):
-            # Update the scene rendering parameters for optimisation
-            scene_.res = self.refiner_args.rendering_size
-            scene_.spp = self.refiner_args.spp
-            scene_.camera_type = 'perspective'  # thinlens doesn't work for inverse rendering
-            scene_.integrator_max_depth = self.refiner_args.integrator_max_depth
-            scene_.integrator_rr_depth = self.refiner_args.integrator_rr_depth
-            scene_.build_mi_scene()
-            scene_.crystal.to('cpu')
-            return scene_
+            cs = CSDProxy().load(ds.dataset_args.crystal_id)
+            crystal_args = dict(
+                lattice_unit_cell=cs.lattice_unit_cell,
+                lattice_angles=cs.lattice_angles,
+                miller_indices=ds.miller_indices,
+                point_group_symbol=cs.point_group_symbol,
+                rotation_mode=ds.dataset_args.rotation_mode,
+            )
 
-        for i, (X_path, X_dn_path) in enumerate(zip(self.X_targets, self.X_targets_denoised)):
-            if (i + 1) % 10 == 0:
-                logger.info(f'Generating initial predictions for frame {i + 1}/{len(self)}.')
+            for i, X_path in enumerate(self.X_targets):
+                idx = self.image_paths[i][0]
+                scene_path = scenes_initial_dir / f'{idx:04d}.yml'
+                X_pred_path = X_preds_initial_dir / f'{idx:04d}.png'
+                X_annotated_path = X_annotated_initial_dir / f'{idx:04d}.png'
+                if scene_path.exists() and X_pred_path.exists() and X_annotated_path.exists():
+                    continue
+                if (i + 1) % 10 == 0:
+                    logger.info(f'Generating initial predictions for frame {i + 1}/{len(self)}.')
+
+                # Resize the input if needed
+                X = to_tensor(Image.open(X_path)).to(self.device)[None, ...]
+                if oversize_input and X.shape[-1] > img_size \
+                        or not oversize_input and X.shape[-1] != img_size:
+                    X = F.interpolate(X, size=img_size, **resize_args)
+
+                # Predict the parameters
+                Y_pred = self.manager.predict(X)
+                params = ds.denormalise_rendering_params(Y_pred, idx=0)
+
+                # Build the crystal
+                crystal = Crystal(
+                    **crystal_args,
+                    distances=params['crystal']['distances'],
+                    scale=params['crystal']['scale'],
+                    origin=params['crystal']['origin'],
+                    rotation=params['crystal']['rotation'],
+                    material_roughness=params['crystal']['material_roughness'],
+                    material_ior=params['crystal']['material_ior'],
+                )
+
+                # Build the scene
+                scene = Scene(
+                    crystal=crystal,
+                    light_radiance=params['light_radiance'],
+                    **scene_args,
+                )
+
+                # Save the parameters and images
+                scene.to_yml(scene_path, overwrite=True)
+                self.plotter.annotate_image(X_path, X_annotated_path, scene)
+                self.plotter.render_scene(scene, X_pred_path)
+
+        else:
+            # Sinkhorn loss re-enables grad so disable and re-enable it manually
+            # https://github.com/jeanfeydy/geomloss/issues/57
+            prev_grad_enabled = torch.is_grad_enabled()
             torch.set_grad_enabled(False)
-            X = to_tensor(Image.open(X_path)).to(self.device)
-            X_dn = to_tensor(Image.open(X_dn_path)).to(self.device)
-            X_target = torch.stack([X, X_dn])
 
-            # Resize the input if needed
-            if oversize_input and X_target.shape[-1] > img_size \
-                    or not oversize_input and X_target.shape[-1] != img_size:
-                X_target = F.interpolate(X_target, size=img_size, **resize_args)
+            # Ensure the inverse rendering losses are turned on
+            use_inverse_rendering = self.refiner_args.use_inverse_rendering
+            self.refiner_args.use_inverse_rendering = True
+            use_latents_model = self.refiner_args.use_latents_model
+            self.refiner_args.use_latents_model = self.refiner_args.w_latent > 0
+            use_perceptual_model = self.refiner_args.use_perceptual_model
+            self.refiner_args.use_perceptual_model = self.refiner_args.w_perceptual > 0
 
-            # Set the target image for loss calculations
-            self.refiner.X_target_aug = self.refiner._resize(X_dn, render_size).permute(1, 2, 0)
+            # Noise batch vars
+            bs = self.refiner_args.initial_pred_batch_size // 2
+            noise_scale = torch.linspace(
+                self.refiner_args.initial_pred_noise_min,
+                self.refiner_args.initial_pred_noise_max,
+                bs,
+                device=self.device
+            )
 
-            # Create a noisy batch
-            X_target_batch = X_target[None, ...].repeat(bs, 1, 1, 1, 1)
-            X_target_batch += torch.randn_like(X_target_batch) * noise_scale[:, None, None, None, None]
-            X_target_batch = torch.cat([X_target_batch[:, 0], X_target_batch[:, 1]])
+            def update_scene_parameters(scene_: Scene):
+                # Update the scene rendering parameters for optimisation
+                scene_.res = self.refiner_args.rendering_size
+                scene_.spp = self.refiner_args.spp
+                scene_.camera_type = 'perspective'  # thinlens doesn't work for inverse rendering
+                scene_.integrator_max_depth = self.refiner_args.integrator_max_depth
+                scene_.integrator_rr_depth = self.refiner_args.integrator_rr_depth
+                scene_.build_mi_scene()
+                scene_.crystal.to('cpu')
+                return scene_
 
-            # Predict the parameters
-            Y_pred_batch = self.manager.predict(X_target_batch)
-
-            # Render the predicted parameters
-            scene_i_batch = []
-            losses_i = []
-            for j in range(bs):
+            for i, (X_path, X_dn_path) in enumerate(zip(self.X_targets, self.X_targets_denoised)):
+                idx = self.image_paths[i][0]
+                scene_path = scenes_initial_dir / f'{idx:04d}.yml'
+                X_pred_path = X_preds_initial_dir / f'{idx:04d}.png'
+                X_annotated_path = X_annotated_initial_dir / f'{idx:04d}.png'
+                if scene_path.exists() and X_pred_path.exists() and X_annotated_path.exists():
+                    continue
+                if (i + 1) % 10 == 0:
+                    logger.info(f'Generating initial predictions for frame {i + 1}/{len(self)}.')
                 torch.set_grad_enabled(False)
+                X = to_tensor(Image.open(X_path)).to(self.device)
+                X_dn = to_tensor(Image.open(X_dn_path)).to(self.device)
+                X_target = torch.stack([X, X_dn])
 
-                # Render the image
-                r_params = self.manager.ds.denormalise_rendering_params(Y_pred_batch, idx=j)
-                X_pred_ij, scene_ij = self.manager.crystal_renderer.render_from_parameters(r_params, return_scene=True)
-                scene_i_batch.append(scene_ij)
+                # Resize the input if needed
+                if oversize_input and X_target.shape[-1] > img_size \
+                        or not oversize_input and X_target.shape[-1] != img_size:
+                    X_target = F.interpolate(X_target, size=img_size, **resize_args)
 
-                # Set the variables temporarily
-                X_pred_ij = X_pred_ij.astype(np.float32) / 255.
-                X_pred_ij = torch.from_numpy(X_pred_ij).to(self.device)
-                self.refiner.X_pred = X_pred_ij
-                self.refiner.scene = scene_ij
-                self.refiner.crystal = scene_ij.crystal
-                self.refiner.crystal.to('cpu')
+                # Set the target image for loss calculations
+                self.refiner.X_target_aug = self.refiner._resize(X_dn, render_size).permute(1, 2, 0)
 
-                # Project the crystal mesh - reinitialise the projector for the new scene
-                if self.refiner_args.use_keypoints:
-                    self.refiner._init_projector()
-                    self.refiner.projector.project(generate_image=False)
-                    self.refiner.keypoint_targets = self.keypoints[i]['keypoints']
+                # Create a noisy batch
+                X_target_batch = X_target[None, ...].repeat(bs, 1, 1, 1, 1)
+                X_target_batch += torch.randn_like(X_target_batch) * noise_scale[:, None, None, None, None]
+                X_target_batch = torch.cat([X_target_batch[:, 0], X_target_batch[:, 1]])
 
-                # Calculate losses
-                loss_ij, _ = self.refiner._calculate_losses()
-                losses_i.append(loss_ij.item())
+                # Predict the parameters
+                Y_pred_batch = self.manager.predict(X_target_batch)
 
-            # Update the scene and render the best initial prediction at the correct resolution
-            best_idx = np.argmin(losses_i)
-            scene = scene_i_batch[best_idx]
-            scene = update_scene_parameters(scene)
-            X_pred_initial = scene.render()
+                # Render the predicted parameters
+                scene_i_batch = []
+                losses_i = []
+                for j in range(bs):
+                    torch.set_grad_enabled(False)
 
-            # Save the parameters and images
-            idx = self.image_paths[i][0]
-            scene.to_yml(scenes_initial_dir / f'{idx:04d}.yml')
-            self.plotter.save_image(X_pred_initial, X_preds_initial_dir / f'{idx:04d}.png')
-            self.plotter.annotate_image(X_path, X_annotated_initial_dir / f'{idx:04d}.png', scene)
+                    # Render the image
+                    r_params = ds.denormalise_rendering_params(Y_pred_batch, idx=j)
+                    X_pred_ij, scene_ij = self.manager.crystal_renderer.render_from_parameters(
+                        r_params, return_scene=True)
+                    scene_i_batch.append(scene_ij)
 
-        # Restore the settings
-        del self.refiner.projector
-        self.manager.predictor.resize_input = resize_input_old
-        self.refiner_args.use_inverse_rendering = use_inverse_rendering
-        self.refiner_args.use_latents_model = use_latents_model
-        self.refiner_args.use_perceptual_model = use_perceptual_model
-        torch.set_grad_enabled(prev_grad_enabled)
+                    # Set the variables temporarily
+                    X_pred_ij = X_pred_ij.astype(np.float32) / 255.
+                    X_pred_ij = torch.from_numpy(X_pred_ij).to(self.device)
+                    self.refiner.X_pred = X_pred_ij
+                    self.refiner.scene = scene_ij
+                    self.refiner.crystal = scene_ij.crystal
+                    self.refiner.crystal.to('cpu')
+
+                    # Project the crystal mesh - reinitialise the projector for the new scene
+                    if self.refiner_args.use_keypoints:
+                        self.refiner.init_projector()
+                        self.refiner.projector.project(generate_image=False)
+                        self.refiner.keypoint_targets = self.keypoints[i]['keypoints']
+
+                    # Calculate losses
+                    loss_ij, _ = self.refiner._calculate_losses()
+                    losses_i.append(loss_ij.item())
+
+                # Update the scene and render the best initial prediction at the correct resolution
+                best_idx = np.argmin(losses_i)
+                scene = scene_i_batch[best_idx]
+                scene = update_scene_parameters(scene)
+                X_pred_initial = scene.render()
+
+                # Save the parameters and images
+                scene.to_yml(scene_path, overwrite=True)
+                self.plotter.save_image(X_pred_initial, X_pred_path)
+                self.plotter.annotate_image(X_path, X_annotated_path, scene)
+
+            # Restore the settings
+            del self.refiner.projector
+            self.manager.predictor.resize_input = resize_input_old
+            self.refiner_args.use_inverse_rendering = use_inverse_rendering
+            self.refiner_args.use_latents_model = use_latents_model
+            self.refiner_args.use_perceptual_model = use_perceptual_model
+            torch.set_grad_enabled(prev_grad_enabled)
 
         # Destroy the predictor to free up space
         logger.info('Destroying predictor to free up space.')
@@ -511,8 +579,8 @@ class SequenceFitter:
         torch.cuda.empty_cache()
         gc.collect()
 
-        # Wait until the plotter queue is empty
-        self.plotter.wait_for_empty_queue()
+        # Wait for the plotter workers
+        self.plotter.wait_for_workers()
 
         return self._init_initial_predictions()
 
@@ -526,7 +594,17 @@ class SequenceFitter:
             return
         assert self.sf_args.initial_scene.exists(), f'Initial scene file {self.sf_args.initial_scene} does not exist.'
         logger.info(f'Loading initial scene data from {self.sf_args.initial_scene}.')
+
+        # Update the scene rendering parameters for optimisation
         self.initial_scene = Scene.from_yml(self.sf_args.initial_scene)
+        self.initial_scene.res = self.refiner_args.rendering_size
+        self.initial_scene.spp = self.refiner_args.spp
+        self.initial_scene.camera_type = 'perspective'  # thinlens doesn't work for inverse rendering
+        self.initial_scene.integrator_max_depth = self.refiner_args.integrator_max_depth
+        self.initial_scene.integrator_rr_depth = self.refiner_args.integrator_rr_depth
+        self.initial_scene.build_mi_scene()
+
+        # Set the fixed parameters
         for k in self.sf_args.fix_parameters:
             if k == 'light_radiance':
                 v = self.initial_scene.light_radiance
@@ -882,12 +960,28 @@ class SequenceFitter:
         self.refiner.scene = scene
         self.refiner.scene_params = mi.traverse(scene.mi_scene)
         self.refiner.crystal = crystal
-        self.refiner._init_projector()
+        self.refiner.init_projector()
         use_inverse_rendering = self.refiner_args.use_inverse_rendering  # Save the inverse rendering setting
 
+        # Set up the refiner pool
+        refiner_pool = None
+        if self.runtime_args.n_refiner_workers > 0:
+            logger.info('Initialising refiner pool.')
+            refiner_pool = RefinerPool(
+                refiner_args=self.refiner_args,
+                output_dir=self.refiner.output_dir,
+                initial_scene_dict=scene.to_dict(),
+                fixed_parameters=self.fixed_parameters,
+                seed=self.sf_args.seed,
+                plotter=self.plotter,
+                n_workers=self.runtime_args.n_refiner_workers,
+                queue_size=self.runtime_args.refiner_queue_size,
+            )
+            refiner_pool.wait_for_workers()
+
         # Determine how many steps have been completed from the frame counts
-        start_step = int(self.frame_counts.sum() / bs)
-        assert start_step == len(self.losses['training']), 'Frame counts and training losses do not match.'
+        start_step = len(self.losses['training'])
+        # assert start_step == int(self.frame_counts.sum() / bs), 'Frame counts and training losses do not match.'
         if start_step > 0:
             logger.info(f'Resuming training from step {start_step}.')
         max_steps = self.sf_args.max_steps
@@ -912,47 +1006,70 @@ class SequenceFitter:
             # Conditionally enable the inverse rendering
             self.refiner_args.use_inverse_rendering = use_inverse_rendering and step >= self.refiner_args.ir_wait_n_steps
 
-            # Loop over the batch and use the refiner to calculate the loss for each frame
-            losses_batch = []
-            for i in range(bs):
-                idx = batch_idxs[i]
-                p_vec = parameters_pred[i].clone().detach().requires_grad_(True)
-                p_dict = self._parameter_vectors_to_dict(p_vec[None, ...])
-
-                # Update targets
-                self.refiner.X_target = batch[0][i]
-                self.refiner.X_target_denoised = batch[1][i]
-                self.refiner.X_target_wis = batch[2][i].to(self.device)
-                self.refiner.X_target_denoised_wis = batch[3][i].to(self.device)
-                if self.refiner_args.use_keypoints:
-                    self.refiner.keypoint_targets = self.keypoints[idx]['keypoints']
+            # Calculate the gradients in parallel using the refiner pool
+            if refiner_pool is not None:
+                losses_batch, p_grads, X_preds = refiner_pool.calculate_grads(
+                    step=step,
+                    refiner_args=self.refiner_args,
+                    p_vec_batch=parameters_pred,
+                    X_target=batch[0],
+                    X_target_denoised=batch[1],
+                    X_target_wis=batch[2],
+                    X_target_denoised_wis=batch[3],
+                    keypoints=[self.keypoints[idx]['keypoints'] for idx in batch_idxs],
+                    X_preds_paths=[self.X_preds['train'][idx] for idx in batch_idxs],
+                    X_targets_paths=[self.X_targets[idx] for idx in batch_idxs],
+                    X_targets_annotated_paths=[self.X_targets_annotated['train'][idx] for idx in batch_idxs],
+                )
+                p_grads = p_grads.to(self.device)
 
                 # Update scene and crystal parameters
-                for k, v in p_dict.items():
-                    if k == 'light_radiance':
-                        scene.light_radiance = v[0].to(self.device)
-                    else:
-                        setattr(crystal, k, v[0].to('cpu'))
-                    self.parameters['train'][k][idx] = v[0].clone().detach().cpu()
+                with torch.no_grad():
+                    p_dict = self._parameter_vectors_to_dict(parameters_pred)
+                    for i, idx in enumerate(batch_idxs):
+                        self.frame_counts[idx] += 1
+                        self.losses['total/train'][idx] = losses_batch[i].item()
+                        for k, v in p_dict.items():
+                            self.parameters['train'][k][idx] = v[i].clone().detach().cpu()
 
-                # Calculate losses
-                loss_i, stats_i = self.refiner._process_step(add_noise=False)
-                (loss_i / bs).backward()
-                losses_batch.append(loss_i.detach())
+            # Loop over the batch and use the refiner to calculate the loss for each frame
+            else:
+                losses_batch = torch.zeros(bs)
+                for i in range(bs):
+                    idx = batch_idxs[i]
+                    p_vec = parameters_pred[i].clone().detach().requires_grad_(True)
+                    p_dict = self._parameter_vectors_to_dict(p_vec[None, ...])
 
-                # Accumulate gradients
-                p_grads[i] = p_vec.grad.clone()
+                    # Update targets
+                    self.refiner.X_target = batch[0][i]
+                    self.refiner.X_target_denoised = batch[1][i]
+                    self.refiner.X_target_wis = batch[2][i].to(self.device)
+                    self.refiner.X_target_denoised_wis = batch[3][i].to(self.device)
+                    if self.refiner_args.use_keypoints:
+                        self.refiner.keypoint_targets = self.keypoints[idx]['keypoints']
 
-                # Update sequence state
-                self.losses['total/train'][idx] = loss_i.item()
-                self.frame_counts[idx] += 1
-                if self.refiner_args.use_inverse_rendering:
-                    self.plotter.save_image(self.refiner.X_pred, self.X_preds['train'][idx])
-                self.plotter.annotate_image(self.X_targets[idx], self.X_targets_annotated['train'][idx], scene)
+                    # Update scene and crystal parameters
+                    for k, v in p_dict.items():
+                        if k == 'light_radiance':
+                            scene.light_radiance = v[0].to(self.device)
+                        else:
+                            setattr(crystal, k, v[0].to('cpu'))
+                        self.parameters['train'][k][idx] = v[0].clone().detach().cpu()
 
-            # Save losses
-            losses_batch = torch.tensor(losses_batch)
-            loss = losses_batch.mean()
+                    # Calculate losses
+                    loss_i, stats_i = self.refiner.process_step(add_noise=False)
+                    loss_i.backward()
+                    losses_batch[i] = loss_i.item()
+
+                    # Accumulate gradients
+                    p_grads[i] = p_vec.grad.clone()
+
+                    # Update sequence state
+                    self.losses['total/train'][idx] = loss_i.item()
+                    self.frame_counts[idx] += 1
+                    if self.refiner_args.use_inverse_rendering:
+                        self.plotter.save_image(self.refiner.X_pred, self.X_preds['train'][idx])
+                    self.plotter.annotate_image(self.X_targets[idx], self.X_targets_annotated['train'][idx], scene)
 
             # Propagate the parameter gradients back to the encoder
             torch.autograd.backward(parameters_pred, grad_tensors=p_grads)
@@ -974,12 +1091,13 @@ class SequenceFitter:
             self.optimiser.zero_grad()
 
             # Update the adaptive sampler and log the total sequence loss estimate
+            loss = losses_batch.mean().item()
             sampler.update_errors(batch_idxs, losses_batch)
             seq_loss = sampler.errors.sum().item()
             self.losses['training'] = torch.concatenate([self.losses['training'], torch.tensor(seq_loss)[None, ...]])
             self.tb_logger.add_scalar('losses/seq_train', self.losses['total/train'].sum().item(), step)
             self.tb_logger.add_scalar('losses/seq_train_ema', seq_loss, step)
-            self.tb_logger.add_scalar('losses/step', loss.item(), step)
+            self.tb_logger.add_scalar('losses/step', loss, step)
 
             # Log learning rate and update
             self.tb_logger.add_scalar('lr', self.optimiser.param_groups[0]['lr'], step)
@@ -993,7 +1111,7 @@ class SequenceFitter:
             # Log statistics every X steps
             time_per_step = time.time() - start_time
             running_tps += time_per_step
-            running_loss += loss.item()
+            running_loss += loss
             if (step + 1) % self.runtime_args.log_freq_train == 0:
                 loss_avg = running_loss / self.runtime_args.log_freq_train
                 average_tps = running_tps / self.runtime_args.log_freq_train
@@ -1013,14 +1131,15 @@ class SequenceFitter:
             # Plot every X steps
             if (step + 1) % self.runtime_args.plot_freq == 0:
                 logger.info('Making training plots.')
-                image_idx = self.image_idxs[idx].item()
-                fig = self.refiner._plot_comparison()
-                self._save_plot(fig, 'train', 'comparison', image_idx)
-                plt.close(fig)
-                if self.refiner.patch_centres is not None:
-                    fig = self.refiner._plot_patches()
-                    self._save_plot(fig, 'train', 'patches', image_idx)
+                if refiner_pool is None:  # Needs fixing for refiner pool
+                    image_idx = self.image_idxs[idx].item()
+                    fig = self.refiner._plot_comparison()
+                    self._save_plot(fig, 'train', 'comparison', image_idx)
                     plt.close(fig)
+                    if self.refiner.patch_centres is not None:
+                        fig = self.refiner._plot_patches()
+                        self._save_plot(fig, 'train', 'patches', image_idx)
+                        plt.close(fig)
                 self._plot_parameters('train')
 
             # Evaluate the sequence every X steps
@@ -1074,14 +1193,14 @@ class SequenceFitter:
             generate_annotations: bool = True
     ):
         """
-        Render predicted images from the parameters.
+        Generate rendered and annotated images from the parameters.
         """
         logger.info('Generating predicted images from the parameters.')
         scene = Scene.from_yml(self.scenes[train_or_eval][0]['path'])
         crystal = scene.crystal
         crystal.to('cpu')
         for i in range(len(self)):
-            if (i + 1) % 10 == 0:
+            if (i + 1) % 50 == 0:
                 logger.info(f'Generating image {i + 1}/{len(self)}.')
             for k in PARAMETER_KEYS:
                 v = init_tensor(self.parameters[train_or_eval][k][i])
@@ -1092,6 +1211,7 @@ class SequenceFitter:
             if generate_renders:
                 self.plotter.render_scene(scene, self.X_preds[train_or_eval][i])
             if generate_annotations:
+                crystal.build_mesh()  # Required to update the buffers
                 self.plotter.annotate_image(self.X_targets[i], self.X_targets_annotated[train_or_eval][i], scene)
 
     def _plot_parameters(self, train_or_eval: str):
