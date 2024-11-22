@@ -406,14 +406,9 @@ class Refiner:
         """
         Initialise the Edge Matching loss for calcullating the distance
         from points on an edge to the detected edge found by RCF
-        Also init edge_matching rcf
-        """      
-        
-        
-        
+        """
         edge_matching_loss = EdgeMatcher(
-            points_per_unit = self.args.edge_matching_points_per_unit)#,
-            # distance_image=rcf_edge_matching_og)
+            points_per_unit = self.args.edge_matching_points_per_unit)
         edge_matching_loss.to(self.device)
         self.edge_matching_loss = edge_matching_loss
 
@@ -1049,7 +1044,7 @@ class Refiner:
 
         # Plot initial prediction
         self.step = start_step - 1
-        # self._make_plots(force=True)
+        self._make_plots(force=True)
 
         for step in range(start_step, end_step):
             start_time = time.time()
@@ -1087,7 +1082,7 @@ class Refiner:
             for i, val in enumerate(self.convergence_detector.convergence_count):
                 param_name = self.convergence_detector_param_names[i]
                 self.tb_logger.add_scalar(f'convergence/{i:02d}_{param_name}', val, step)
-            # self.tb_logger.add_scalar(f'convergence/bad_epochs', self.lr_scheduler.lr_scheduler.num_bad_epochs, step)
+            self.tb_logger.add_scalar(f'convergence/bad_epochs', self.lr_scheduler.lr_scheduler.num_bad_epochs, step)
 
             # Track running loss and metrics
             running_loss += loss
@@ -1114,7 +1109,7 @@ class Refiner:
                     str(timedelta(seconds=seconds_left))))
 
             # Plots
-            # self._make_plots()
+            self._make_plots()
 
             # Callback
             if callback is not None:
@@ -1137,7 +1132,7 @@ class Refiner:
                 break
 
         # Final plots
-        #self._make_plots(force=True)
+        self._make_plots(force=True)
 
         # Restore the inverse rendering losses setting
         self.args.use_inverse_rendering = use_inverse_rendering
@@ -1317,7 +1312,7 @@ class Refiner:
         """
         Calculate losses.
         """
-        
+
         # Inverse rendering losses
         if self.args.use_inverse_rendering:
             l1_loss, l1_stats = self._img_loss(X_target=self.X_target_aug, X_pred=self.X_pred, loss_type='l1',
@@ -1593,10 +1588,6 @@ class Refiner:
         Calculate the symmetry loss - how close are the face distances within each group.
         """
         loss = torch.tensor(0., device=self.crystal.origin.device)
-
-        stats = {} #delete
-        return loss, stats #delete
-        
         if self.symmetry_idx is None:
             return loss, {}
         for i, hkl in enumerate(self.manager.ds.dataset_args.miller_indices):
@@ -1756,7 +1747,7 @@ class Refiner:
         """
         Calculate the keypoints loss.
         """
-        loss = torch.tensor(0.)#, device=self.keypoint_targets.device)
+        loss = torch.tensor(0., device=self.keypoint_targets.device)
         stats = {}
         if not self.args.use_keypoints or self.keypoint_targets is None or len(self.keypoint_targets) == 0:
             return loss, stats
@@ -1957,7 +1948,7 @@ class Refiner:
                     ax.axis('off')
 
         # Plot the distance parameters using custom method as the shared method gives a wierd performance hit
-        #self._plot_distances(axes[n_rows - 1, 0])
+        self._plot_distances(axes[n_rows - 1, 0])
 
         # Plot the transformation and material parameters
         shared_args = dict(
