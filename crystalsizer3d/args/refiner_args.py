@@ -71,6 +71,8 @@ class RefinerArgs(BaseArgs):
             
             # Edge Matching settings
             edge_matching_points_per_unit: float = 0.05,
+            edge_matching_rcf_size: int = 400,
+            edge_matching_use_denoised: bool = False,
 
             # Refining settings
             use_inverse_rendering: bool = True,
@@ -268,6 +270,8 @@ class RefinerArgs(BaseArgs):
         
         # Edge matching settings:
         self.edge_matching_points_per_unit = edge_matching_points_per_unit
+        self.edge_matching_rcf_size = edge_matching_rcf_size
+        self.edge_matching_use_denoised = edge_matching_use_denoised
 
         # Refining settings
         self.use_inverse_rendering = use_inverse_rendering

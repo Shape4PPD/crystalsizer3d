@@ -374,11 +374,7 @@ class Refiner:
         Initialise the Richer Convolutional Features model for edge detection.
         """
         rcf_path = self.args.rcf_model_path
-        if self.args.use_rcf_model:
-            assert rcf_path.exists(), 'RCF model path does not exist!'
-        else:
-            self.rcf = None
-            return
+        assert rcf_path.exists(), 'RCF model path does not exist!'
 
         rcf = RCF()
         checkpoint = torch.load(rcf_path, weights_only=True)
@@ -399,8 +395,18 @@ class Refiner:
         if self.rcf is None:
             self.rcf_feats_og = None
         else:
-            model_input = self.X_target_wis[None, ...].permute(0, 3, 1, 2)
-            self.rcf_feats_og = self.rcf(model_input, apply_sigmoid=False)
+            if self.args.edge_matching_use_denoised:
+                model_input = self.X_target_denoised[None, ...].permute(0, 3, 1, 2)
+            else:
+                model_input = self.X_target[None, ...].permute(0, 3, 1, 2)
+            model_input_res = F.interpolate(model_input,
+                                            size=(self.args.edge_mattching_rcf_size,
+                                                  self.args.edge_mattching_rcf_size),
+                                            mode='bilinear',
+                                            align_corners=False)
+
+            logger.info(f'Calculating RCF on image size {model_input_res.shape}.')     
+            self.rcf_feats_og = self.rcf(model_input_res, apply_sigmoid=False)
 
     def _init_edge_matching_loss(self):
         """
@@ -1823,7 +1829,7 @@ class Refiner:
         """
         Calculate the edge matching loss.
         """
-        loss = torch.tensor(0., device=self.device)
+        loss = torch.tensor(0.)
         stats = {}
         if not self.args.use_edge_matching:
             return loss, stats
@@ -1832,8 +1838,8 @@ class Refiner:
             self.rcf_feats_og[2])
         
         stats[f'losses/edge_matching'] = loss.item()
-        
         return loss, stats
+        
 
     @torch.no_grad()
     def _make_plots(
@@ -1872,7 +1878,7 @@ class Refiner:
 
         n_rows = 3
         rcf_feats = None
-        if self.rcf_feats_og is not None:
+        if self.args.use_rcf_model and self.rcf_feats_og is not None:
             assert self.rcf_feats is not None, 'RCF features not available.'
             rcf_feats = [torch.cat([f0[:, 0], f1[:, 0]]) for f0, f1 in zip(self.rcf_feats_og, self.rcf_feats)]
             assert len(self.args.plot_rcf_feats) <= len(rcf_feats), \
