@@ -143,8 +143,9 @@ def plot_face_property_values(
         measurement_idxs: np.ndarray = None,
         measurement_values: np.ndarray = None,
         show_mean: bool = False,
-        show_std: bool = False
-) -> Tuple[Figure, Figure]:
+        show_std: bool = False,
+        make_means_plot: bool = True
+) -> Figure | Tuple[Figure, Figure]:
     """
     Plot face distances or areas.
     """
@@ -199,6 +200,8 @@ def plot_face_property_values(
         ax.legend(loc='lower right')
     if save_dir is not None:
         plt.savefig(save_dir / f'{property_name}_grouped.{plot_extension}')
+    if not make_means_plot:
+        return fig_grouped
 
     # Make a plot showing the mean values all together
     fig_mean, ax = plt.subplots(1, figsize=(12, 8))
@@ -226,8 +229,10 @@ def plot_distances(
         face_groups: Dict[Tuple[int, int, int], Dict[Tuple[int, int, int], int]],
         image_paths: List[Tuple[int, Path]],
         save_dir: Path = None,
-        measurements: Dict[str, np.ndarray] = None
-) -> Tuple[Figure, Figure]:
+        measurements: Dict[str, np.ndarray] = None,
+        make_means_plot: bool = True,
+        **kwargs
+) -> Figure | Tuple[Figure, Figure]:
     """
     Plot face distances.
     """
@@ -241,7 +246,8 @@ def plot_distances(
         save_dir=save_dir,
         measurement_idxs=measurements['idx'] if measurements is not None else None,
         measurement_values=measurements['distances'] * measurements['scale'][:, None]
-        if measurements is not None else None
+        if measurements is not None else None,
+        make_means_plot=make_means_plot
     )
 
 
@@ -251,8 +257,10 @@ def plot_areas(
         image_paths: List[Tuple[int, Path]],
         save_dir: Path = None,
         face_groups: Dict[Tuple[int, int, int], Dict[Tuple[int, int, int], int]] = None,
-        measurements: Dict[str, np.ndarray] = None
-) -> Tuple[Figure, Figure]:
+        measurements: Dict[str, np.ndarray] = None,
+        make_means_plot: bool = True,
+        **kwargs
+) -> Figure | Tuple[Figure, Figure]:
     """
     Plot face areas.
     """
@@ -302,16 +310,18 @@ def plot_areas(
         image_paths=image_paths,
         save_dir=save_dir,
         measurement_idxs=measurements['idx'] if measurements is not None else None,
-        measurement_values=areas_m
+        measurement_values=areas_m,
+        make_means_plot=make_means_plot
     )
 
 
 def plot_origin(
         parameters: Dict[str, np.ndarray],
         image_paths: List[Tuple[int, Path]],
-        save_dir: Path,
-        measurements: Dict[str, np.ndarray] = None
-):
+        save_dir: Path = None,
+        measurements: Dict[str, np.ndarray] = None,
+        **kwargs
+) -> Figure:
     """
     Plot origin position.
     """
@@ -332,18 +342,27 @@ def plot_origin(
     ax.set_ylabel('Position')
     ax.legend()
     fig.tight_layout()
-    plt.savefig(save_dir / f'origin.{plot_extension}')
+    if save_dir is not None:
+        plt.savefig(save_dir / f'origin.{plot_extension}')
+    return fig
 
 
 def plot_rotation(
         parameters: Dict[str, np.ndarray],
         image_paths: List[Tuple[int, Path]],
-        save_dir: Path,
-        measurements: Dict[str, np.ndarray] = None
-):
+        save_dir: Path = None,
+        measurements: Dict[str, np.ndarray] = None,
+        **kwargs
+) -> Figure:
     """
     Plot rotation.
     """
+
+    def canonicalise_rotations(rotations: np.ndarray) -> np.ndarray:
+        """Canonicalise the rotation vectors."""
+        angles = np.linalg.norm(rotations, axis=-1)
+        return rotations / angles[:, None] * (angles % (2 * np.pi))
+
     rotations = parameters['rotation']
     x_vals = [idx for idx, _ in image_paths]
     fig, ax = plt.subplots(1, figsize=(12, 8))
@@ -361,7 +380,64 @@ def plot_rotation(
     ax.set_ylabel('Component value')
     ax.legend()
     fig.tight_layout()
-    plt.savefig(save_dir / f'rotation.{plot_extension}')
+    if save_dir is not None:
+        plt.savefig(save_dir / f'rotation.{plot_extension}')
+    return fig
+
+
+def plot_material_properties(
+        parameters: Dict[str, np.ndarray],
+        image_paths: List[Tuple[int, Path]],
+        save_dir: Path = None,
+        measurements: Dict[str, np.ndarray] = None,
+        **kwargs
+) -> Figure:
+    """
+    Plot IOR and roughness.
+    """
+    x_vals = [idx for idx, _ in image_paths]
+    fig, axes = plt.subplots(2, figsize=(10, 8), sharex=True)
+    for ax, prop_name in zip(axes, ['ior', 'roughness']):
+        ax.set_title(f'{prop_name}')
+        ax.grid()
+        y = parameters['material_' + prop_name]
+        ax.plot(x_vals, y, label=prop_name)
+        if measurements is not None and prop_name in measurements:
+            y = measurements[prop_name]
+            ax.plot(measurements['idx'], y, label='Manual', linestyle='none',
+                    marker='o', markersize=5, alpha=0.7)
+        ax.set_xlabel('Image index')
+        ax.set_ylabel(prop_name)
+        ax.legend()
+    fig.tight_layout()
+    if save_dir is not None:
+        plt.savefig(save_dir / f'material.{plot_extension}')
+    return fig
+
+
+def plot_light_radiance(
+        parameters: Dict[str, np.ndarray],
+        image_paths: List[Tuple[int, Path]],
+        save_dir: Path = None,
+        **kwargs
+) -> Figure:
+    """
+    Plot rotation.
+    """
+    radiance = parameters['light_radiance']
+    x_vals = [idx for idx, _ in image_paths]
+    fig, ax = plt.subplots(1, figsize=(12, 8))
+    ax.set_title('Light radiance (RGB)')
+    ax.grid()
+    for i in range(3):
+        ax.plot(x_vals, radiance[:, i], label='RGB'[i])
+    ax.set_xlabel('Image index')
+    ax.set_ylabel('Component value')
+    ax.legend()
+    fig.tight_layout()
+    if save_dir is not None:
+        plt.savefig(save_dir / f'light_radiance.{plot_extension}')
+    return fig
 
 
 @torch.no_grad()
