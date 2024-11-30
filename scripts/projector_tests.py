@@ -1,9 +1,13 @@
-import cv2
+from argparse import ArgumentParser
+from pathlib import Path
+
 import ffmpeg
 import matplotlib.pyplot as plt
 import numpy as np
 import torch
+from PIL import Image, ImageDraw
 from kornia.utils import tensor_to_image
+from scipy.spatial.distance import cdist
 from trimesh import Trimesh
 
 from crystalsizer3d import LOGS_PATH, START_TIMESTAMP, USE_CUDA, logger
@@ -12,7 +16,7 @@ from crystalsizer3d.projector import Projector
 from crystalsizer3d.scene_components.scene import Scene
 from crystalsizer3d.scene_components.utils import project_to_image
 from crystalsizer3d.util.keypoints import generate_keypoints_heatmap
-from crystalsizer3d.util.utils import init_tensor, to_numpy
+from crystalsizer3d.util.utils import init_tensor, to_numpy, to_rgb
 
 if USE_CUDA:
     device = torch.device('cuda')
@@ -165,6 +169,28 @@ TEST_CRYSTALS = {
         'material_ior': 1.83,
         'material_roughness': 0.1
     },
+    'alpha9': {
+        'lattice_unit_cell': [7.068, 10.277, 8.755],
+        'lattice_angles': [np.pi / 2, np.pi / 2, np.pi / 2],
+        'miller_indices': [(0, 0, 1), (0, 1, 1), (1, 1, 1), (-1, -1, -1), (1, 0, 0), (1, 1, 0), (0, 0, -1), (0, -1, -1),
+                           (0, 1, -1), (0, -1, 1), (1, -1, -1), (-1, 1, -1), (-1, -1, 1), (-1, 1, 1), (1, -1, 1),
+                           (1, 1, -1), (-1, 0, 0), (1, -1, 0), (-1, 1, 0), (-1, -1, 0)],
+        'distances': [
+            0.3887779414653778, 1.024718999862671, 0.745987057685852, 0.7828164100646973, 1.0540395975112915,
+            0.8920794725418091, 0.29156485199928284, 0.9565051794052124, 0.9716991782188416, 0.9008828401565552,
+            0.8119459748268127, 0.8231415152549744, 0.8070471882820129, 1.0333278179168701, 0.9691855311393738,
+            0.7162739038467407, 1.1065247058868408, 1.1049960851669312, 1.1667091846466064, 0.9211059808731079,
+        ],
+        'scale': 0.8415803909301758,
+        'rotation': [0.006333562545478344, -0.023195751011371613, -4.9023756980896],
+        "origin": [
+            0.0222465842962265,
+            -0.03906448185443878,
+            0.25648394227027893
+        ],
+        'material_ior': 1.725118637084961,
+        'material_roughness': 0.1283971518278122
+    },
     'beta': {
         'lattice_unit_cell': [7.068, 10.277, 8.755],
         'lattice_angles': [np.pi / 2, np.pi / 2, np.pi / 2],
@@ -174,16 +200,16 @@ TEST_CRYSTALS = {
         'scale': 25.0,
     },
     'beta1': {
-        'lattice_unit_cell': [5.159,17.3,6.948],
+        'lattice_unit_cell': [5.159, 17.3, 6.948],
         'lattice_angles': [np.pi / 2, np.pi / 2, np.pi / 2],
         'miller_indices': [(1, 0, 1), (0, 2, 1), (0, 1, 0)],
         'distances': [0.93, 0.29, 0.11],
         'point_group_symbol': '222',
         'scale': 3.0,
-        'rotation': [np.pi/2, 0, 0],
+        'rotation': [np.pi / 2, 0, 0],
     },
     'beta2': {  # permute beta1 (x, y, z) -> (x, z, y)
-        'lattice_unit_cell': [5.159,6.948,17.3],
+        'lattice_unit_cell': [5.159, 6.948, 17.3],
         'lattice_angles': [np.pi / 2, np.pi / 2, np.pi / 2],
         'miller_indices': [(1, 1, 0), (0, 1, 2), (0, 0, 1)],
         'distances': [0.93, 0.29, 0.11],
@@ -191,14 +217,14 @@ TEST_CRYSTALS = {
         'scale': 3.0,
         'rotation': [0, 0, 0],
     },
-    'beta3': { # permute beta1 (x, y, z) -> (z, x, y)
-        'lattice_unit_cell': [6.948, 5.159,17.3],
+    'beta3': {  # permute beta1 (x, y, z) -> (z, x, y)
+        'lattice_unit_cell': [6.948, 5.159, 17.3],
         'lattice_angles': [np.pi / 2, np.pi / 2, np.pi / 2],
         'miller_indices': [(1, 1, 0), (1, 0, 2), (0, 0, 1)],
         'distances': [0.93, 0.29, 0.11],
         'point_group_symbol': '222',
         'scale': 3.0,
-        'rotation': [0, 0, np.pi/2],
+        'rotation': [0, 0, np.pi / 2],
     },
 }
 
@@ -223,14 +249,14 @@ def show_projected_image(which='alpha'):
     Show the projected crystal wireframe.
     """
     # image_size = (256, 256)
-    # image_size = (1000, 1000)
-    image_size = (300, 300)
+    image_size = (1000, 1000)
+    # image_size = (300, 300)
     assert which in TEST_CRYSTALS
     crystal = Crystal(**TEST_CRYSTALS[which])
     if which == 'beta':
         zoom = 0.001
     else:
-        zoom = 0.1
+        zoom = 0.5
     crystal.to(device)
     # v, f = crystal.build_mesh()
     # m = Trimesh(vertices=to_numpy(v), faces=to_numpy(f))
@@ -247,13 +273,13 @@ def show_vertices(which='alpha'):
     """
     Show the projected crystal wireframe along with locations of all the vertices and intersections.
     """
-    image_size = (500, 500)
+    image_size = (1000, 1000)
     assert which in TEST_CRYSTALS
     crystal = Crystal(**TEST_CRYSTALS[which])
     if which == 'beta':
         zoom = 0.001
     else:
-        zoom = 0.2
+        zoom = 0.5
     crystal.to(device)
 
     # Original method
@@ -278,14 +304,73 @@ def show_vertices(which='alpha'):
     plt.show()
 
 
+def show_keypoints(which='alpha'):
+    """
+    Show the projected crystal wireframe along with locations of all the vertices and intersections.
+    """
+    image_size = (1000, 1000)
+    assert which in TEST_CRYSTALS
+    crystal = Crystal(**TEST_CRYSTALS[which])
+    if which == 'beta':
+        zoom = 0.001
+    else:
+        zoom = 0.5
+    crystal.to(device)
+
+    # Set up the projector
+    projector = Projector(
+        crystal=crystal,
+        image_size=image_size,
+        zoom=zoom,
+        transparent_background=True,
+        multi_line=True,
+        rtol=1e-3
+    )
+
+    wf_line_width = 3
+    keypoint_radius = 20
+    kp_fill_colour = tuple((np.array(to_rgb('lightgreen') + (0.3,)) * 255).astype(np.uint8).tolist())
+    img = Image.new(mode='RGB', size=image_size, color=(255, 255, 255))
+    draw = ImageDraw.Draw(img, 'RGBA')
+    for ref_face_idx, face_segments in projector.edge_segments.items():
+        if len(face_segments) == 0:
+            continue
+        colour = projector.colour_facing_towards if ref_face_idx == 'facing' else projector.colour_facing_away
+        colour = tuple((colour * 255).int().tolist())
+        for segment in face_segments:
+            l = segment.clone()
+            l[:, 0] = torch.clamp(l[:, 0], 1, projector.image_size[1] - 2)
+            l[:, 1] = torch.clamp(l[:, 1], 1, projector.image_size[0] - 2)
+            draw.line(xy=[tuple(l[0].int().tolist()), tuple(l[1].int().tolist())],
+                      fill=colour, width=wf_line_width)
+
+    img_wf = img.copy()
+    alpha = np.zeros(image_size, dtype=np.uint8)
+    alpha[np.array(img).sum(axis=-1) < (255 * 3)] = 255
+    img_wf.putalpha(Image.fromarray(alpha))
+    img_wf.save(LOGS_PATH / f'{START_TIMESTAMP}_{which}_wireframe.png')
+
+    # Add the keypoints
+    keypoint_coords = to_numpy(projector.keypoints)
+    for (x, y) in keypoint_coords:
+        draw.circle((x, y), keypoint_radius, fill=kp_fill_colour, outline='darkgreen', width=keypoint_radius // 6)
+
+    # Add the alpha channel
+    alpha = np.zeros(image_size, dtype=np.uint8)
+    alpha[np.array(img).sum(axis=-1) < (255 * 3)] = 255
+    img.putalpha(Image.fromarray(alpha))
+
+    img.save(LOGS_PATH / f'{START_TIMESTAMP}_{which}_keypoints.png')
+
+
 def show_vertex_heatmap(which='alpha'):
     """
     Generate a heatmap of all the vertices and intersections.
     """
-    image_size = (500, 500)
+    image_size = (1000, 1000)
     assert which in TEST_CRYSTALS
     crystal = Crystal(**TEST_CRYSTALS[which])
-    zoom = 0.1
+    zoom = 0.5
     crystal.to(device)
     projector = Projector(crystal, external_ior=1., image_size=image_size, zoom=zoom, camera_axis=[0, 0, -1],
                           multi_line=True)
@@ -294,16 +379,88 @@ def show_vertex_heatmap(which='alpha'):
     heatmap = generate_keypoints_heatmap(
         keypoints=projector.keypoints,
         image_size=image_size[0],
-        blob_height=1.0,
-        blob_variance=20.0
+        blob_variance=100.0
     )
 
-    heatmap = 1 - to_numpy(heatmap)
+    heatmap = 1 - to_numpy(heatmap)**3
     plt.figure(figsize=(10, 10))
-    plt.imshow(heatmap, cmap='hot')
-    plt.scatter(*to_numpy(projector.keypoints).T, color='green', marker='x', s=400, alpha=0.9)
+    plt.imshow(heatmap, cmap='Reds_r')
+    # plt.scatter(*to_numpy(projector.keypoints).T, color='green', marker='x', s=400, alpha=0.9)
+    plt.gca().axis('off')
     plt.tight_layout()
+    plt.savefig(LOGS_PATH / f'{START_TIMESTAMP}_{which}_heatmap.svg')
     plt.show()
+
+
+def make_keypoint_loss_picture():
+    """
+    Make a picture to illustrate the keypoint loss.
+    """
+    img_size = 1000
+    n_targets = 7
+    n_pred = 5
+    keypoint_radius = 30
+    fill_colour_pred = tuple((np.array(to_rgb('coral') + (0.3,)) * 255).astype(np.uint8).tolist())
+    fill_colour_target = tuple((np.array(to_rgb('lightgreen') + (0.3,)) * 255).astype(np.uint8).tolist())
+    outline_colour_pred = 'darkred'
+    outline_colour_target = 'darkgreen'
+    outline_width = keypoint_radius // 6
+    arrow_line_width = 5
+    arrowhead_length = 30
+    arrowhead_angle = 2 * np.pi / 3
+
+    keypoints_pred = np.random.rand(n_pred * 2).reshape(n_pred, 2) * img_size * 0.9
+    keypoints_target = np.random.rand(n_targets * 2).reshape(n_targets, 2) * img_size * 0.9
+
+    img = Image.new('RGB', (img_size, img_size), color='white')
+    draw = ImageDraw.Draw(img)
+
+    # Add the keypoints
+    for keypoints, fill_colour, outline_colour in \
+            zip([keypoints_pred, keypoints_target],
+                [fill_colour_pred, fill_colour_target],
+                [outline_colour_pred, outline_colour_target]):
+        for (x, y) in keypoints:
+            draw.circle((x, y), keypoint_radius, fill=fill_colour, outline=outline_colour, width=outline_width)
+
+    def add_arrow(kp_from, kp_to, colour):
+        draw.line([tuple(kp_from), tuple(kp_to)], fill=colour, width=arrow_line_width)
+
+        # Calculate the arrowhead points
+        direction = kp_from - kp_to
+        length = np.linalg.norm(direction)
+        if length == 0:
+            return
+        v = direction / length
+        arrow_base = kp_from - v * arrowhead_length
+
+        # Rotate the direction vector to get left and right sides of the arrowhead
+        left_dir = np.array([
+            np.cos(arrowhead_angle) * v[0] - np.sin(arrowhead_angle) * v[1],
+            np.sin(arrowhead_angle) * v[0] + np.cos(arrowhead_angle) * v[1]
+        ])
+        right_dir = np.array([
+            np.cos(-arrowhead_angle) * v[0] - np.sin(-arrowhead_angle) * v[1],
+            np.sin(-arrowhead_angle) * v[0] + np.cos(-arrowhead_angle) * v[1]
+        ])
+        left_point = arrow_base + arrowhead_length * left_dir
+        right_point = arrow_base + arrowhead_length * right_dir
+
+        # Draw the arrowhead as a filled polygon
+        draw.polygon([tuple(kp_from), tuple(left_point), tuple(right_point)], fill=colour)
+
+    # Add arrows from each keypoint to it's nearest neighbour
+    distances = cdist(keypoints_target, keypoints_pred)
+    nearest_idxs_to_preds = distances.argmin(axis=0)
+    kp_pred_nearest = keypoints_target[nearest_idxs_to_preds]
+    for i in range(n_pred):
+        add_arrow(kp_pred_nearest[i], keypoints_pred[i], 'darkred')
+    nearest_idxs_to_targets = distances.argmin(axis=1)
+    kp_target_nearest = keypoints_pred[nearest_idxs_to_targets]
+    for i in range(n_targets):
+        add_arrow(keypoints_target[i], kp_target_nearest[i], 'darkgreen')
+
+    img.save(LOGS_PATH / f'{START_TIMESTAMP}_keypoint_loss.png')
 
 
 def check_bounds():
@@ -434,6 +591,22 @@ def match_to_scene():
     plt.show()
 
 
+def render_scene():
+    """
+    Render a scene with a crystal.
+    """
+    parser = ArgumentParser()
+    parser.add_argument('--scene-path', type=Path, help='Path to a scene yml file.')
+    args = parser.parse_args()
+    scene = Scene.from_yml(args.scene_path)
+    crystal = scene.crystal
+    crystal.material_roughness.data = 0.12
+    crystal.distances.data = crystal.distances + torch.randn_like(crystal.distances) * 0.01
+    img = scene.render(seed=2512)
+    plt.imshow(img)
+    plt.show()
+
+
 def make_rotation_video():
     """
     Create a video of a rotating crystal.
@@ -543,9 +716,12 @@ if __name__ == '__main__':
     # show_projected_image('alpha3')
     # show_projected_image('alpha4')
     # show_projected_image('alpha5')
-    # show_projected_image('alpha6')
-    show_vertices('beta3')
-    # show_vertex_heatmap('alpha6')
+    # show_projected_image('alpha9')
+    # show_vertices('alpha9')
+    # show_vertex_heatmap('alpha9')
+    # show_keypoints('alpha9')
+    make_keypoint_loss_picture()
+    # render_scene()
     # match_to_scene()
     # make_rotation_video()
     # make_ior_video()

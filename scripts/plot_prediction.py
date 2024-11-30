@@ -22,7 +22,7 @@ from crystalsizer3d.nn.manager import Manager
 from crystalsizer3d.projector import Projector
 from crystalsizer3d.refiner.denoising import denoise_batch, denoise_image, stitch_image, tile_image
 from crystalsizer3d.scene_components.utils import orthographic_scale_factor
-from crystalsizer3d.util.image_helpers import save_img_grid
+from crystalsizer3d.util.image_helpers import save_img_grid, save_img_with_keypoint_markers2
 from crystalsizer3d.util.plots import make_3d_digital_crystal_image, make_error_image, plot_distances, plot_light, \
     plot_material, plot_transformation
 from crystalsizer3d.util.utils import print_args, str2bool, to_dict, to_numpy
@@ -312,6 +312,7 @@ def _make_plots(
         Y_target: Optional[Dict[str, Tensor]] = None,
         r_params_target: Optional[Dict[str, Tensor]] = None,
         idx: int = 0,
+        resize_res: int = None
 ):
     """
     Make a selection of plots and renderings.
@@ -367,6 +368,8 @@ def _make_plots(
     logger.info('Saving rendered images.')
     img_target = to_numpy(X_target_i * 255).astype(np.uint8).squeeze().transpose(1, 2, 0)
     Image.fromarray(img_target).save(save_dir / f'target_{idx:02d}.png')
+    if resize_res is not None and img_target.shape[-1] != resize_res:
+        img_target = np.array(Image.fromarray(img_target).resize((resize_res, resize_res)))
 
     # Re-render with the rendering pipeline
     if Y_target is not None:
@@ -379,23 +382,36 @@ def _make_plots(
         img_pred = np.array(Image.fromarray(img_pred).resize(img_target.shape[:2][::-1]))
     Image.fromarray(img_pred).save(save_dir / f'predicted_{idx:02d}.png')
 
-    # Project the wireframes onto the images
+    # Project the wireframes and keypoints onto the images
     projector_args = dict(
         crystal=scene_pred.crystal,
         image_size=(img_pred.shape[1], img_pred.shape[0]),
         zoom=orthographic_scale_factor(scene_pred)
     )
-    projector = Projector(background_image=img_pred, **projector_args)
-    img_pred_overlay = to_numpy(projector.image * 255).astype(np.uint8).squeeze().transpose(1, 2, 0)
+    projector_pred = Projector(background_image=img_pred, **projector_args)
+    img_pred_overlay = to_numpy(projector_pred.image * 255).astype(np.uint8).squeeze().transpose(1, 2, 0)
     Image.fromarray(img_pred_overlay).save(save_dir / f'predicted_overlay_pred_{idx:02d}.png')
-    projector = Projector(background_image=img_target, **projector_args)
-    img_target_overlay_pred = to_numpy(projector.image * 255).astype(np.uint8).squeeze().transpose(1, 2, 0)
+    projector_target = Projector(background_image=img_target, **projector_args)
+    img_target_overlay_pred = to_numpy(projector_target.image * 255).astype(np.uint8).squeeze().transpose(1, 2, 0)
     Image.fromarray(img_target_overlay_pred).save(save_dir / f'target_overlay_pred_{idx:02d}.png')
     if Y_target is not None:
-        projector.crystal = scene_target.crystal
-        projector.project()
-        img_target_overlay_target = to_numpy(projector.image * 255).astype(np.uint8).squeeze().transpose(1, 2, 0)
+        projector_target.crystal = scene_target.crystal
+        projector_target.project()
+        img_target_overlay_target = to_numpy(projector_target.image * 255).astype(np.uint8).squeeze().transpose(1, 2, 0)
         Image.fromarray(img_target_overlay_target).save(save_dir / f'target_overlay_target_{idx:02d}.png')
+
+    # Add keypoint images
+    for X, projector, pred_or_target \
+            in zip([img_pred, img_target], [projector_pred, projector_target], ['pred', 'target']):
+        save_img_with_keypoint_markers2(
+            X=X,
+            coords=to_numpy(projector.keypoints),
+            fill_colour='lightgreen' if pred_or_target == 'target' else 'coral',
+            outline_colour='darkgreen' if pred_or_target == 'target' else 'darkred',
+            lbl=f'keypoints_{pred_or_target}',
+            suffix=f'_{idx:02d}',
+            save_dir=save_dir,
+        )
 
     # Create error images
     img_l2 = make_error_image(img_target, img_pred, loss_type='l2')
@@ -456,9 +472,19 @@ def plot_prediction(args: Optional[RuntimeArgs] = None):
     args, manager, save_dir, X_target, Y_target, r_params_target = _init(args, 'prediction')
 
     # Predict parameters and plot
-    logger.info('Predicting parameters.')
+    logger.info('Predicting parameters at full resolution.')
+    full_res = X_target.shape[-1]
     Y_pred = manager.predict(X_target)
-    _make_plots(args, save_dir, manager, X_target, Y_pred, Y_target, r_params_target)
+    (save_dir / f'{full_res}').mkdir(parents=True, exist_ok=True)
+    _make_plots(args, save_dir / f'{full_res}', manager, X_target, Y_pred, Y_target, r_params_target)
+
+    # Resize the input to match the predictor's training resolution
+    resize_args = dict(mode='bilinear', align_corners=False)
+    img_size = manager.image_shape[-1]
+    X_target2 = F.interpolate(X_target, size=img_size, **resize_args)
+    Y_pred2 = manager.predict(X_target2)
+    (save_dir / f'{img_size}').mkdir(parents=True, exist_ok=True)
+    _make_plots(args, save_dir / f'{img_size}', manager, X_target2, Y_pred2, Y_target, r_params_target, resize_res=full_res)
 
 
 def plot_prediction_noise_batch(args: Optional[RuntimeArgs] = None):
@@ -633,8 +659,8 @@ def plot_denoised_patches(args: Optional[RuntimeArgs] = None):
 if __name__ == '__main__':
     start_time = time.time()
 
-    # plot_prediction()
-    plot_prediction_noise_batch()
+    plot_prediction()
+    # plot_prediction_noise_batch()
     # plot_denoised_prediction()
     # plot_denoised_patches()
 

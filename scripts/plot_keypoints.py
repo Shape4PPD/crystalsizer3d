@@ -17,7 +17,7 @@ from crystalsizer3d.nn.manager import Manager
 from crystalsizer3d.refiner.denoising import denoise_image, stitch_image, tile_image
 from crystalsizer3d.refiner.keypoint_detection import detect_keypoints_batch, find_keypoints, to_absolute_coordinates
 from crystalsizer3d.util.image_helpers import save_img, save_img_grid, save_img_with_keypoint_markers, \
-    save_img_with_keypoint_overlay, threshold_img
+    save_img_with_keypoint_markers2, save_img_with_keypoint_overlay, threshold_img
 from crystalsizer3d.util.utils import print_args, str2bool, to_dict, to_numpy
 
 dpi = plt.rcParams['figure.dpi']
@@ -789,8 +789,8 @@ def plot_keypoints_targeted(args: Optional[RuntimeArgs] = None):
     save_img(X_target_denoised, 'denoised', save_dir)
     save_img(res['X_lr'], 'denoised_lowres', save_dir)
     save_img(res['X_lr_kp'], 'kp_low_res', save_dir)
-    save_img_with_keypoint_markers(X_target, res['Y_lr'], 'original_lowres_markers', **kp_img_args)
-    save_img_with_keypoint_markers(res['X_lr'], res['Y_lr'], 'denoised_lowres_markers', **kp_img_args)
+    save_img_with_keypoint_markers2(X_target, res['Y_lr'], lbl='original_lowres_markers', **kp_img_args)
+    save_img_with_keypoint_markers2(res['X_lr'], res['Y_lr'], lbl='denoised_lowres_markers', **kp_img_args)
 
     # Save the patches as a grid
     save_img_grid(res['X_patches'], 'patches_og', save_dir, coords=res['Y_patches'])
@@ -799,9 +799,9 @@ def plot_keypoints_targeted(args: Optional[RuntimeArgs] = None):
     save_img_grid(res['X_patches_dn_kp'], 'patches_dn_kp', save_dir)
 
     # Plot the combined keypoints
-    save_img_with_keypoint_markers(X_target, res['Y_candidates_all'], 'Y_candidates_0_all', **kp_img_args)
-    save_img_with_keypoint_markers(X_target, res['Y_candidates_merged'], 'Y_candidates_1_merged', **kp_img_args)
-    save_img_with_keypoint_markers(X_target, res['Y_candidates_final'], 'Y_candidates_2_final', **kp_img_args)
+    save_img_with_keypoint_markers2(X_target, res['Y_candidates_all'], lbl='Y_candidates_0_all', **kp_img_args)
+    save_img_with_keypoint_markers2(X_target, res['Y_candidates_merged'], lbl='Y_candidates_1_merged', **kp_img_args)
+    save_img_with_keypoint_markers2(X_target, res['Y_candidates_final'], lbl='Y_candidates_2_final', **kp_img_args)
 
 
 if __name__ == '__main__':
