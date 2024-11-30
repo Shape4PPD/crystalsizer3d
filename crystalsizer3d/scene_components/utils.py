@@ -49,11 +49,14 @@ def build_crystal_mesh(
 
     # Set up the material properties
     if crystal.use_bumpmap:
+        bumpmap = crystal.bumpmap
+        if USE_CUDA:
+            bumpmap = bumpmap.cuda()
         bsdf = {
             'type': 'bumpmap',
             'texture': {
                 'type': 'bitmap',
-                'bitmap': mi.Bitmap(mi.TensorXf(crystal.bumpmap)),
+                'bitmap': mi.Bitmap(mi.TensorXf(bumpmap)),
                 'wrap_mode': 'clamp',
                 'raw': True
             },
@@ -79,7 +82,10 @@ def build_crystal_mesh(
 
     # Update the texture coordinates if a bumpmap is used
     if crystal.use_bumpmap:
-        tex_coords = mi.TensorXf(crystal.uv_map)
+        uv_map = crystal.uv_map
+        if USE_CUDA:
+            uv_map = uv_map.cuda()
+        tex_coords = mi.TensorXf(uv_map)
         mesh_params['vertex_texcoords'] = dr.ravel(tex_coords)
 
     return mesh

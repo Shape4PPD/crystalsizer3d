@@ -33,6 +33,10 @@ def get_args(printout: bool = True) -> Tuple[Namespace, SequenceFitterArgs, Refi
                            help='Log every n steps during training.')
     rt_parser.add_argument('--checkpoint-freq', type=int, default=5,
                            help='Checkpoint every n steps during training.')
+    rt_parser.add_argument('--save-annotations-freq', type=int, default=5,
+                           help='Save annotated images every n steps during training.')
+    rt_parser.add_argument('--save-renders-freq', type=int, default=5,
+                           help='Save rendered images every n steps during training.')
     rt_parser.add_argument('--plot-freq', type=int, default=20,
                            help='Make plots every n steps during training.')
     rt_parser.add_argument('--eval-freq', type=int, default=10,
@@ -55,6 +59,8 @@ def get_args(printout: bool = True) -> Tuple[Namespace, SequenceFitterArgs, Refi
                            help='Number of refiner workers.')
     rt_parser.add_argument('--refiner-queue-size', type=int, default=100,
                            help='Size of the refiner queue.')
+    rt_parser.add_argument('--measurements-dir', type=Path,
+                           help='Path to a directory containing manual measurements.')
 
     # Sequence fitter and refiner args
     SequenceFitterArgs.add_args(sf_parser)

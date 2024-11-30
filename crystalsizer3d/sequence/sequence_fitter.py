@@ -33,7 +33,6 @@ from crystalsizer3d.refiner.refiner import Refiner
 from crystalsizer3d.scene_components.scene import Scene
 from crystalsizer3d.sequence.adaptive_sampler import AdaptiveSampler
 from crystalsizer3d.sequence.data_loader import get_data_loader
-from crystalsizer3d.sequence.plots import plot_areas, plot_distances
 from crystalsizer3d.sequence.refiner_pool import RefinerPool
 from crystalsizer3d.sequence.sequence_encoder import SequenceEncoder
 from crystalsizer3d.sequence.sequence_plotter import SequencePlotter
@@ -100,6 +99,9 @@ class SequenceFitter:
 
         # Initialise the sequence encoder
         self._init_sequence_encoder()
+
+        # Load any manual measurements
+        self._load_manual_measurements()
 
     def _init_output_dirs(self):
         """
@@ -918,11 +920,76 @@ class SequenceFitter:
         self.update_parameters_from_encoder()
         self.update_X_preds_from_parameters()
 
+    def _load_manual_measurements(self):
+        """
+        Load manual measurements from the measurements directory.
+        """
+        self.measurements = None
+        measurements_dir = self.runtime_args.measurements_dir
+        if measurements_dir is None:
+            return
+        assert measurements_dir.exists(), f'Measurements directory {measurements_dir} does not exist.'
+        mi_ref = self.manager.crystal.all_miller_indices
+
+        # Expect measurements dir to contain files like XXXX.json
+        keys = ['idx', ] + [k for k in PARAMETER_KEYS if k != 'light_radiance']
+        measurements = {k: [] for k in keys}
+        for file_path in measurements_dir.iterdir():
+            if file_path.suffix != '.json':
+                continue
+            crystal = Crystal.from_json(file_path)
+            idx = int(file_path.stem)
+            for k in keys:
+                if k == 'idx':
+                    measurements[k].append(idx)
+                elif k == 'distances':
+                    mi = crystal.all_miller_indices
+                    mi_idxs = ((mi[None, ...] == mi_ref[:, None]).all(dim=2)).nonzero(as_tuple=True)[1]
+                    measurements[k].append(to_numpy(crystal.distances[mi_idxs]))
+                elif k == 'origin':
+                    # Adjust the origin so that the crystal's smallest z-coordinate is at z=0
+                    z_offset = crystal.vertices.amin(dim=0)[2]
+                    measurements[k].append(to_numpy(crystal.origin - torch.tensor([0, 0, z_offset])))
+                else:
+                    measurements[k].append(to_numpy(getattr(crystal, k)))
+        for k in keys:
+            measurements[k] = np.array(measurements[k])
+
+        # Fix the origin for the automatic measurements to match the manual measurements
+        ds = self.manager.ds
+        cs = CSDProxy().load(ds.dataset_args.crystal_id)
+        crystal = Crystal(
+            lattice_unit_cell=cs.lattice_unit_cell,
+            lattice_angles=cs.lattice_angles,
+            miller_indices=ds.miller_indices,
+            point_group_symbol=cs.point_group_symbol,
+        )
+
+        def adjust_distances(distances_old, origin_old):
+            distances_new = np.zeros_like(distances_old)
+            for i in range(len(origin_old)):
+                crystal.distances.data = init_tensor(distances_old[i])
+                crystal.origin.data = init_tensor(origin_old[i])
+                crystal.adjust_origin(origin0, verify=False)
+                distances_new[i] = to_numpy(crystal.distances)
+            return distances_new
+
+        # Use the origin from the first measured frame for all other frames
+        origin0 = init_tensor(measurements['origin'][0])
+
+        # Ensure the measurements all have the same origin
+        if len(np.unique(measurements['origin'], axis=0)) != 1:
+            measurements['distances'] = adjust_distances(measurements['distances'], measurements['origin'])
+            measurements['origin'] = np.repeat(origin0[None, ...], len(measurements['origin']), axis=0)
+
+        self.measurements = measurements
+
     def fit(self):
         """
         Train the sequence encoder to fit the sequence.
         """
         logger.info('Training the sequence encoder.')
+        ra = self.runtime_args
         N = len(self)
         bs = self.sf_args.batch_size
 
@@ -941,8 +1008,8 @@ class SequenceFitter:
             sequence_fitter=self,
             adaptive_sampler=sampler,
             batch_size=bs,
-            n_workers=self.runtime_args.n_dataloader_workers,
-            prefetch_factor=self.runtime_args.prefetch_factor,
+            n_workers=ra.n_dataloader_workers,
+            prefetch_factor=ra.prefetch_factor,
         )
 
         # Load the first scene and adapt the crystal to use buffers instead of parameters
@@ -965,7 +1032,7 @@ class SequenceFitter:
 
         # Set up the refiner pool
         refiner_pool = None
-        if self.runtime_args.n_refiner_workers > 0:
+        if ra.n_refiner_workers > 0:
             logger.info('Initialising refiner pool.')
             refiner_pool = RefinerPool(
                 refiner_args=self.refiner_args,
@@ -974,8 +1041,8 @@ class SequenceFitter:
                 fixed_parameters=self.fixed_parameters,
                 seed=self.sf_args.seed,
                 plotter=self.plotter,
-                n_workers=self.runtime_args.n_refiner_workers,
-                queue_size=self.runtime_args.refiner_queue_size,
+                n_workers=ra.n_refiner_workers,
+                queue_size=ra.refiner_queue_size,
             )
             refiner_pool.wait_for_workers()
 
@@ -1008,7 +1075,7 @@ class SequenceFitter:
 
             # Calculate the gradients in parallel using the refiner pool
             if refiner_pool is not None:
-                losses_batch, p_grads, X_preds = refiner_pool.calculate_grads(
+                losses_batch, stats_batch, p_grads = refiner_pool.calculate_grads(
                     step=step,
                     refiner_args=self.refiner_args,
                     p_vec_batch=parameters_pred,
@@ -1017,6 +1084,8 @@ class SequenceFitter:
                     X_target_wis=batch[2],
                     X_target_denoised_wis=batch[3],
                     keypoints=[self.keypoints[idx]['keypoints'] for idx in batch_idxs],
+                    save_annotations=(step + 1) % ra.save_annotations_freq == 0,
+                    save_renders=(step + 1) % ra.save_renders_freq == 0,
                     X_preds_paths=[self.X_preds['train'][idx] for idx in batch_idxs],
                     X_targets_paths=[self.X_targets[idx] for idx in batch_idxs],
                     X_targets_annotated_paths=[self.X_targets_annotated['train'][idx] for idx in batch_idxs],
@@ -1029,6 +1098,10 @@ class SequenceFitter:
                     for i, idx in enumerate(batch_idxs):
                         self.frame_counts[idx] += 1
                         self.losses['total/train'][idx] = losses_batch[i].item()
+                        for k, v in stats_batch.items():
+                            if k not in self.losses:
+                                self.losses[k] = torch.zeros(N)
+                            self.losses[k][idx] = float(v[i])
                         for k, v in p_dict.items():
                             self.parameters['train'][k][idx] = v[i].clone().detach().cpu()
 
@@ -1112,9 +1185,9 @@ class SequenceFitter:
             time_per_step = time.time() - start_time
             running_tps += time_per_step
             running_loss += loss
-            if (step + 1) % self.runtime_args.log_freq_train == 0:
-                loss_avg = running_loss / self.runtime_args.log_freq_train
-                average_tps = running_tps / self.runtime_args.log_freq_train
+            if (step + 1) % ra.log_freq_train == 0:
+                loss_avg = running_loss / ra.log_freq_train
+                average_tps = running_tps / ra.log_freq_train
                 seconds_left = float((max_steps - step) * average_tps)
                 logger.info(f'[{step + 1}/{max_steps}]\tLoss: {loss_avg:.4E}'
                             + '\tTime per step: {}\tEst. complete in: {}'.format(
@@ -1124,12 +1197,12 @@ class SequenceFitter:
                 running_tps = 0
 
             # Checkpoint every X steps
-            if (step + 1) % self.runtime_args.checkpoint_freq == 0:
+            if (step + 1) % ra.checkpoint_freq == 0:
                 self.save()
                 self._save_encoder_state()
 
             # Plot every X steps
-            if (step + 1) % self.runtime_args.plot_freq == 0:
+            if (step + 1) % ra.plot_freq == 0:
                 logger.info('Making training plots.')
                 if refiner_pool is None:  # Needs fixing for refiner pool
                     image_idx = self.image_idxs[idx].item()
@@ -1143,19 +1216,19 @@ class SequenceFitter:
                 self._plot_parameters('train')
 
             # Evaluate the sequence every X steps
-            if (step + 1) % self.runtime_args.eval_freq == 0:
+            if (step + 1) % ra.eval_freq == 0:
                 logger.info('Evaluating the sequence.')
                 self.update_parameters_from_encoder()
                 self._plot_parameters('eval')
-                generate_annotations = (step + 1) % self.runtime_args.eval_annotate_freq == 0
-                generate_renders = (step + 1) % self.runtime_args.eval_render_freq == 0
+                generate_annotations = ra.eval_annotate_freq > 0 and (step + 1) % ra.eval_annotate_freq == 0
+                generate_renders = ra.eval_render_freq > 0 and (step + 1) % ra.eval_render_freq == 0
                 if generate_annotations or generate_renders:
                     self.update_X_preds_from_parameters(
                         train_or_eval='eval',
                         generate_renders=generate_renders,
                         generate_annotations=generate_annotations
                     )
-                if (step + 1) % self.runtime_args.eval_video_freq == 0:
+                if ra.eval_video_freq > 0 and (step + 1) % ra.eval_video_freq == 0:
                     logger.info('Generating evaluation video.')
                     self._generate_video(train_or_eval='eval')
 
@@ -1218,24 +1291,20 @@ class SequenceFitter:
         """
         Plot the parameters.
         """
-        plot_args = dict(
+        self.plotter.plot_sequence_parameters(
+            plot_dir=self.path / 'plots' / train_or_eval,
+            step=self.refiner.step,
             parameters=self.parameters[train_or_eval],
-            # measurements=measurements,
+            measurements=self.measurements,
             image_paths=self.image_paths,
             face_groups=get_crystal_face_groups(self.refiner.manager)
         )
-        plot_dir = self.path / 'plots' / train_or_eval
-        for plot_type in ['distances', 'areas']:
-            figs = {}
-            if plot_type == 'distances':
-                figs['grouped'], figs['mean'] = plot_distances(**plot_args)
-            else:
-                figs['grouped'], figs['mean'] = plot_areas(self.refiner.manager, **plot_args)
-            for group_type in ['grouped', 'mean']:
-                save_dir = plot_dir / f'{plot_type}_{group_type}'
-                save_dir.mkdir(parents=True, exist_ok=True)
-                figs[group_type].savefig(save_dir / f'{self.refiner.step + 1:06d}.png')
-                plt.close(figs[group_type])
+        self.plotter.plot_sequence_losses(
+            plot_dir=self.path / 'plots' / train_or_eval,
+            step=self.refiner.step,
+            losses=self.losses,
+            image_paths=self.image_paths,
+        )
 
     def _generate_video(self, train_or_eval: str = 'eval'):
         """

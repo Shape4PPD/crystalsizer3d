@@ -115,7 +115,7 @@ def refiner_worker(
 
         # Update targets
         refiner.X_target = X_target
-        refiner.X_target_denoised = X_target_denoised
+        refiner.X_target_denoised = X_target_denoised.to(refiner.device)
         refiner.X_target_wis = X_target_wis.to(refiner.device)
         refiner.X_target_denoised_wis = X_target_denoised_wis.to(refiner.device)
         if refiner_args.use_keypoints:
@@ -137,7 +137,10 @@ def refiner_worker(
         # Accumulate gradients
         p_grads = p_vec.grad.clone()
 
-        return loss, p_grads, refiner.X_pred
+        # Return the rendered image if it was generated
+        X_pred = refiner.X_pred if refiner_args.use_inverse_rendering else None
+
+        return loss, stats, p_grads, X_pred
 
     while not stop_event.is_set() and not global_stop_event.is_set():
         try:
@@ -154,7 +157,7 @@ def refiner_worker(
         refiner.step = job['step']
 
         # Generate the result
-        loss, p_grads, X_pred = calculate_gradients(
+        loss, stats, p_grads, X_pred = calculate_gradients(
             refiner_args=RefinerArgs.from_args(job['refiner_args']),
             p_vec=init_tensor(job['p_vec']),
             X_target=init_tensor(job['X_target']),
@@ -168,8 +171,9 @@ def refiner_worker(
         response_queue.put({
             'batch_idx': job['batch_idx'],
             'loss': loss.item(),
+            'stats': stats,
             'p_grads': to_numpy(p_grads),
-            'X_pred': to_numpy(X_pred),
+            'X_pred': to_numpy(X_pred) if X_pred is not None else None,
             'crystal': scene.crystal.to_dict(),
             'projector_zoom': orthographic_scale_factor(scene),
         })
@@ -260,10 +264,12 @@ class RefinerPool:
             X_target_wis: Tensor,
             X_target_denoised_wis: Tensor,
             keypoints: List[Tensor] | None,
+            save_annotations: bool,
+            save_renders: bool,
             X_preds_paths: List[Path],
             X_targets_paths: List[Path],
             X_targets_annotated_paths: List[Path],
-    ) -> Tuple[Tensor, Tensor, Tensor]:
+    ) -> Tuple[Tensor, Dict[str, Any], Tensor]:
         """
         Calculate the loss and parameter gradients for a single example.
         """
@@ -275,20 +281,14 @@ class RefinerPool:
                 'step': step,
                 'batch_idx': idx,
                 'refiner_args': refiner_args.to_dict(),
-                'p_vec': to_numpy(p_vec),
+                'p_vec': to_numpy(p_vec_batch[idx]),
                 'X_target': to_numpy(X_target[idx]),
                 'X_target_denoised': to_numpy(X_target_denoised[idx]),
                 'X_target_wis': to_numpy(X_target_wis[idx]),
                 'X_target_denoised_wis': to_numpy(X_target_denoised_wis[idx]),
                 'keypoints': keypoints[idx]
             }
-            while True:
-                try:
-                    self.job_queue.put(job, block=False)
-                    break
-                except Full:
-                    time.sleep(0.2)
-                    continue
+            self.job_queue.put(job, block=True)
 
         # Wait for the results
         results = []
@@ -297,16 +297,17 @@ class RefinerPool:
                 result = self.response_queue.get(timeout=1)
                 results.append(result)
 
-                # Send the results to the plotter immediately
+                # Send the results to the plotter immediately if required
                 idx = result['batch_idx']
-                if result['X_pred'] is not None:
+                if save_renders and result['X_pred'] is not None:
                     self.plotter.save_image(result['X_pred'], X_preds_paths[idx])
-                self.plotter.annotate_image(
-                    X_targets_paths[idx],
-                    X_targets_annotated_paths[idx],
-                    zoom=result['projector_zoom'],
-                    crystal=result['crystal']
-                )
+                if save_annotations:
+                    self.plotter.annotate_image(
+                        X_targets_paths[idx],
+                        X_targets_annotated_paths[idx],
+                        zoom=result['projector_zoom'],
+                        crystal=result['crystal']
+                    )
 
                 # Break if we have all the results
                 if len(results) == len(p_vec_batch):
@@ -317,7 +318,7 @@ class RefinerPool:
         # Sort the results by index
         results = sorted(results, key=lambda x: x['batch_idx'])
         losses = init_tensor([r['loss'] for r in results])
+        stats = {k: [r['stats'][k] for r in results] for k in results[0]['stats']}
         p_grads = init_tensor(np.stack([r['p_grads'] for r in results]))
-        X_preds = init_tensor(np.stack([r['X_pred'] for r in results]))
 
-        return losses, p_grads, X_preds
+        return losses, stats, p_grads

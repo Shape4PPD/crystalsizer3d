@@ -21,6 +21,7 @@ from torchvision.transforms.functional import center_crop
 from crystalsizer3d import LOGS_PATH, START_TIMESTAMP, logger
 from crystalsizer3d.args.refiner_args import DENOISER_ARG_NAMES, KEYPOINTS_ARG_NAMES, PREDICTOR_ARG_NAMES, RefinerArgs
 from crystalsizer3d.crystal import Crystal
+from crystalsizer3d.csd_proxy import CSDProxy
 from crystalsizer3d.projector import Projector
 from crystalsizer3d.refiner.denoising import denoise_image
 from crystalsizer3d.refiner.refiner import Refiner
@@ -882,7 +883,7 @@ def plot_run():
 
         # Fix the origin for the automatic measurements to match the manual measurements
         ds = refiner.manager.ds
-        cs = ds.csd_proxy.load(ds.dataset_args.crystal_id)
+        cs = CSDProxy().load(ds.dataset_args.crystal_id)
         crystal = Crystal(
             lattice_unit_cell=cs.lattice_unit_cell,
             lattice_angles=cs.lattice_angles,

@@ -59,18 +59,25 @@ class SequenceEncoder(BaseNet):
         """
         Apply Fourier encoding to continuous time points.
         """
-        time_points = time_points[:, None] * self.bands.to(
-            time_points.device)  # Broadcasting time points across frequencies
-        sin_features = torch.sin(time_points)
-        cos_features = torch.cos(time_points)
-        return torch.cat([sin_features, cos_features], dim=-1)  # Concatenate sin and cos features
+        assert time_points.ndim == 1, 'Time points must be 1D tensor.'
+        assert time_points.amin() >= 0 and time_points.amax() <= 1, 'Time points must be normalised to [0, 1].'
+
+        # Invert time points to add higher frequencies to the start of the sequence
+        time_points = 1 - time_points
+
+        # Scale to [0, 2pi]
+        time_points = time_points * 2 * math.pi
+
+        # Broadcast time points across frequencies
+        time_points = time_points[:, None] * self.bands.to(time_points.device)
+
+        # Concatenate sin and cos features
+        return torch.cat([torch.sin(time_points), torch.cos(time_points)], dim=-1)
 
     def forward(self, time_points: Tensor):
         """
         Encode continuous time points with Fourier features and pass through transformer encoder.
         """
-        assert time_points.ndim == 1, 'Time points must be 1D tensor.'
-        assert time_points.amin() >= 0 and time_points.amax() <= 1, 'Time points must be normalised to [0, 1].'
         fourier_encoded = self.fourier_encode(time_points)  # Shape: (batch_size, hidden_dim)
 
         # Reshape for transformer (1, batch_size, hidden_dim)

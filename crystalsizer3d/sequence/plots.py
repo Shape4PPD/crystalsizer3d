@@ -160,6 +160,12 @@ def plot_face_property_values(
     else:
         raise ValueError(f'Invalid property name: {property_name}')
 
+    # Restrict the measurements to within the range predicted
+    if measurement_idxs is not None:
+        include_mask = np.array([x_vals[0] <= idx <= x_vals[-1] for idx in measurement_idxs])
+        measurement_idxs = measurement_idxs[include_mask]
+        measurement_values = measurement_values[include_mask]
+
     # Make a grid of plots showing the values for each face group
     n_cols = int(np.ceil(np.sqrt(n_groups)))
     n_rows = int(np.ceil(n_groups / n_cols))

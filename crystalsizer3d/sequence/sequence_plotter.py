@@ -3,17 +3,20 @@ import os
 import time
 from pathlib import Path
 from queue import Empty, Full
-from typing import Any, Dict
+from typing import Any, Dict, List, Tuple
 
 import numpy as np
 from PIL import Image
+from matplotlib import pyplot as plt
+from matplotlib.gridspec import GridSpec
 from torch import Tensor
 
 from crystalsizer3d import N_WORKERS, logger
 from crystalsizer3d.crystal import Crystal
 from crystalsizer3d.scene_components.scene import Scene
 from crystalsizer3d.scene_components.utils import orthographic_scale_factor
-from crystalsizer3d.sequence.plots import annotate_image
+from crystalsizer3d.sequence.plots import annotate_image, plot_distances, plot_light_radiance, plot_material_properties, \
+    plot_origin, plot_rotation
 from crystalsizer3d.util.parallelism import start_process, stop_event as global_stop_event
 from crystalsizer3d.util.utils import to_numpy
 
@@ -213,3 +216,96 @@ class SequencePlotter:
         cmd = f'ffmpeg -y -framerate 25 -pattern_type glob -i "{escaped_images_dir}/*.png" -c:v libx264 -pix_fmt yuv420p "{save_path}"'
         logger.info(f'Running command: {cmd}')
         os.system(cmd)
+
+    def plot_sequence_parameters(
+            self,
+            plot_dir: Path,
+            step: int,
+            parameters: Dict[str, Tensor],
+            measurements: Dict[str, Tensor],
+            image_paths: List[Tuple[int, Path]],
+            face_groups: List[List[int]]
+    ):
+        """
+        Plot the sequence parameters.
+        """
+        plot_args = dict(
+            type='plot_parameter_sequence',
+            plot_dir=plot_dir,
+            step=step,
+            parameters=parameters,
+            measurements=measurements,
+            image_paths=image_paths,
+            face_groups=face_groups,
+            make_means_plot=False,
+        )
+        for plot_type in ['distances', 'origin', 'rotation', 'material', 'light']:
+            self.enqueue_job({'plot_type': plot_type, **plot_args})
+
+    @staticmethod
+    def _plot_parameter_sequence(job: Dict[str, Any]):
+        """
+        Plot the distances.
+        """
+        if job['plot_type'] == 'distances':
+            fig = plot_distances(**job)
+        elif job['plot_type'] == 'origin':
+            fig = plot_origin(**job)
+        elif job['plot_type'] == 'rotation':
+            fig = plot_rotation(**job)
+        elif job['plot_type'] == 'material':
+            fig = plot_material_properties(**job)
+        elif job['plot_type'] == 'light':
+            fig = plot_light_radiance(**job)
+        else:
+            raise ValueError(f'Invalid plot type: {job["plot_type"]}')
+        save_dir = job['plot_dir'] / job['plot_type']
+        save_dir.mkdir(parents=True, exist_ok=True)
+        fig.savefig(save_dir / f'{job["step"] + 1:06d}.png')
+        plt.close(fig)
+
+    def plot_sequence_losses(
+            self,
+            plot_dir: Path,
+            step: int,
+            losses: Dict[str, Tensor],
+            image_paths: List[Tuple[int, Path]],
+    ):
+        """
+        Plot the sequence parameters.
+        """
+        self.enqueue_job({
+            'type': 'plot_sequence_losses',
+            'plot_dir': plot_dir,
+            'step': step,
+            'losses': losses,
+            'image_paths': image_paths,
+        })
+
+    @staticmethod
+    def _plot_sequence_losses(job: Dict[str, Any]):
+        """
+        Plot the sequence losses.
+        """
+        include_keys = ['total/train', 'losses/total', 'losses/l1', 'losses/l2', 'losses/perceptual',
+                        'losses/overshoot', 'losses/symmetry', 'losses/z_pos', 'losses/rotation_xy', 'losses/keypoints']
+        losses = {k: job['losses'][k] for k in include_keys if k in job['losses']}
+        n = len(losses)
+        n_rows = int(np.ceil(np.sqrt(n)))
+        n_cols = int(np.ceil(n / n_rows))
+        fig = plt.figure(figsize=(15, 15))
+        gs = GridSpec(
+            n_rows, n_cols,
+            top=0.95, bottom=0.05, right=0.98, left=0.05,
+            hspace=0.3, wspace=0.2
+        )
+        for i, (name, loss) in enumerate(losses.items()):
+            ax = fig.add_subplot(gs[i])
+            ax.set_title(name)
+            ax.plot(loss)
+            ax.set_xlabel('Image index')
+            ax.grid()
+        save_dir = job['plot_dir'] / 'losses'
+        save_dir.mkdir(parents=True, exist_ok=True)
+        fig.savefig(save_dir / f'{job["step"] + 1:06d}.png')
+        plt.close(fig)
