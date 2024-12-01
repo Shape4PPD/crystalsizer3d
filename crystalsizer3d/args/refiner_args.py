@@ -86,6 +86,8 @@ class RefinerArgs(BaseArgs):
             spp: int = 64,
             integrator_max_depth: int = 16,
             integrator_rr_depth: int = 5,
+            crop_render: bool = False,
+            crop_render_margin: float = 0.05,
 
             # Patches settings
             n_patches: int = 0,
@@ -278,6 +280,8 @@ class RefinerArgs(BaseArgs):
         self.spp = spp
         self.integrator_max_depth = integrator_max_depth
         self.integrator_rr_depth = integrator_rr_depth
+        self.crop_render = crop_render
+        self.crop_render_margin = crop_render_margin
 
         # Patches settings
         self.n_patches = n_patches
@@ -497,6 +501,10 @@ class RefinerArgs(BaseArgs):
                            help='Maximum depth of the ray-tracing integrator.')
         group.add_argument('--integrator-rr-depth', type=int, default=4,
                            help='Path depth at which rays will begin to use the russian roulette termination criterion.')
+        group.add_argument('--crop-render', type=str2bool, default=False,
+                           help='Crop the rendered image to the region where the crystal is projected to.')
+        group.add_argument('--crop-render-margin', type=float, default=0.05,
+                           help='Relative margin to ensure for the cropped rendered image.')
 
         # Patch settings
         group.add_argument('--n-patches', type=int, default=0,
