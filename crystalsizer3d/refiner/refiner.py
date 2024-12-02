@@ -418,16 +418,16 @@ class Refiner:
                                             mode='bilinear',
                                             align_corners=False)
 
-            logger.info(f'Calculating RCF on image size {model_input_res.shape}.')     
+            logger.info(f'Calculating RCF on image size {model_input_res.shape}.')
             self.rcf_feats_og = self.rcf(model_input_res, apply_sigmoid=False)
 
     def _init_edge_matching_loss(self):
         """
-        Initialise the Edge Matching loss for calcullating the distance
+        Initialise the Edge Matching loss for calculating the distance
         from points on an edge to the detected edge found by RCF
         """
         edge_matching_loss = EdgeMatcher(
-            points_per_unit = self.args.edge_matching_points_per_unit)
+            points_per_unit=self.args.edge_matching_points_per_unit)
         edge_matching_loss.to(self.device)
         self.edge_matching_loss = edge_matching_loss
 
@@ -982,7 +982,7 @@ class Refiner:
 
             # Project the crystal mesh - reinitialise the projector for the new scene
             if self.args.use_keypoints and len(self.keypoint_targets) > 0 or self.args.use_edge_matching:
-                self._init_projector()
+                self.init_projector()
                 self.projector.project(generate_image=False)
 
             # Calculate losses
@@ -1402,12 +1402,10 @@ class Refiner:
             switch_loss, switch_stats = self._switch_loss()
             temporal_loss, temporal_stats = self._temporal_loss()
 
-            # Keypoints and anchors
+            # Keypoints, edge matching and anchors
             keypoints_loss, keypoints_stats = self._keypoints_loss()
-            anchors_loss, anchors_stats = self._anchors_loss()
-
-            # Edge matching
             edge_matching_loss, edge_matching_stats = self._edge_matching_loss()
+            anchors_loss, anchors_stats = self._anchors_loss()
 
             # Combine losses
             loss = image_loss \
@@ -1418,8 +1416,8 @@ class Refiner:
                    + switch_loss * self.args.w_switch_probs \
                    + temporal_loss * self.args.w_temporal \
                    + keypoints_loss * self.args.w_keypoints \
-                   + anchors_loss * self.args.w_anchors \
-                   + edge_matching_loss * self.args.w_edge_matching
+                   + edge_matching_loss * self.args.w_edge_matching \
+                   + anchors_loss * self.args.w_anchors
 
             # Patches - recalculate the image losses for each patch
             patch_loss, patch_stats = self._patches_loss()
@@ -1429,9 +1427,8 @@ class Refiner:
             stats = {
                 'losses/total': loss.item(),
                 **l1_stats, **l2_stats, **percept_stats, **latent_stats, **rcf_stats, **overshoot_stats,
-                **symmetry_stats,
-                **z_pos_stats, **rxy_stats, **switch_stats, **temporal_stats, **keypoints_stats, **anchors_stats,
-                **edge_matching_stats, **patch_stats
+                **symmetry_stats, **z_pos_stats, **rxy_stats, **switch_stats, **temporal_stats, **keypoints_stats,
+                **edge_matching_stats, **anchors_stats, **patch_stats
             }
 
         else:
@@ -1875,7 +1872,7 @@ class Refiner:
         stats[f'losses/anchors'] = loss.item()
 
         return loss, stats
-    
+
     def _edge_matching_loss(self):
         """
         Calculate the edge matching loss.
@@ -1887,10 +1884,9 @@ class Refiner:
         loss, distances = self.edge_matching_loss(
             self.projector.edge_segments_rel,
             self.rcf_feats_og[2])
-        
+
         stats[f'losses/edge_matching'] = loss.item()
         return loss, stats
-        
 
     @torch.no_grad()
     def _make_plots(

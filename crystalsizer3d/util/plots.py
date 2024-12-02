@@ -1252,8 +1252,9 @@ def _plot_vaetc_examples(
 
     self._save_plot(fig, 'vaetc', train_or_test)
 
-#not sure if this is used.
-def plot_2d_points(points_list, plot_normals=False,ax=None):
+
+# not sure if this is used.
+def plot_2d_points(points_list, plot_normals=False, ax=None):
     """
     Plots 2D points from a PyTorch tensor or a list of tensors.
     
@@ -1265,49 +1266,52 @@ def plot_2d_points(points_list, plot_normals=False,ax=None):
 
     # Define a color map
     colours = plt.get_cmap('Set1')
-    
+
     for i, points in enumerate(points_list):
-        
+
         if points.dim() != 3 or points.size(1) != 2:
             pointx = points[:, 0].detach().cpu().numpy()
             pointy = points[:, 1].detach().cpu().numpy()
             # raise ValueError("Each tensor must be of shape (N, 2, 2) where N is the number of points.")
         else:
             pointx = points[:, 0, 0].detach().cpu().numpy()
-            pointy = points[:,0, 1].detach().cpu().numpy()
+            pointy = points[:, 0, 1].detach().cpu().numpy()
             normalx = points[:, 1, 0].detach().cpu().numpy()
             normaly = points[:, 1, 1].detach().cpu().numpy()
             # Plot the points # plot_2d_projection.counter % 20
         if ax == None:
-            plt.scatter(pointx, pointy, color=colours(i), label=f'Tensor {i+1}',s=2)
+            plt.scatter(pointx, pointy, color=colours(i), label=f'Tensor {i + 1}', s=2)
             plt.xlabel('X')
             plt.ylabel('Y')
             plt.legend()
             plt.show()
         else:
-            ax.scatter(pointx, pointy, color=colours(i), label=f'Tensor {i+1}',s=2)
-            
+            ax.scatter(pointx, pointy, color=colours(i), label=f'Tensor {i + 1}', s=2)
+
         if plot_normals:
             scale = 0.2
-            for px,py,nx,ny in zip(pointx,pointy,normalx,normaly):
+            for px, py, nx, ny in zip(pointx, pointy, normalx, normaly):
                 if ax == None:
-                    plt.arrow(px, py, nx*scale, ny*scale, head_width=0.1, head_length=0.1, fc=colours(i), ec=colours(i))
+                    plt.arrow(px, py, nx * scale, ny * scale, head_width=0.1, head_length=0.1, fc=colours(i),
+                              ec=colours(i))
                 else:
-                    ax.arrow(px, py, nx*scale, ny*scale, head_width=0.1, head_length=0.1, fc=colours(i), ec=colours(i))
-    
+                    ax.arrow(px, py, nx * scale, ny * scale, head_width=0.1, head_length=0.1, fc=colours(i),
+                             ec=colours(i))
+
     ### this is broken now that the points are generated in the projector
+
+
 def plot_coutour_loss(
-    ax: Axes,
-    title: str,
-    bg_image: np.ndarray,
-    points: np.ndarray,
-    distances: np.ndarray,
-    plot_loss_dist: bool = False
-    ):
-    
+        ax: Axes,
+        title: str,
+        bg_image: np.ndarray,
+        points: np.ndarray,
+        distances: np.ndarray,
+        plot_loss_dist: bool = False
+):
     ax.set_title(title)
     ax.imshow(bg_image)
-    
+
     if plot_loss_dist:
         for point, distance in zip(points, distances):
             x, y = point
@@ -1315,10 +1319,10 @@ def plot_coutour_loss(
 
             if np.array_equal(distance, [0, 0]):
                 # If the distance is [0, 0], plot a point with a different color
-                ax.plot(x, y, 'go',markersize=2)  # 'ro' is red circle for stationary points
+                ax.plot(x, y, 'go', markersize=2)  # 'ro' is red circle for stationary points
             else:
                 # Otherwise, draw a line from the point to the point + distance
                 ax.arrow(x, y, dx, dy, head_width=0.1, head_length=0.1, fc='blue', ec='blue')
-                ax.plot(x, y, 'ro',markersize=2)  # 'ro' is red circle for stationary points
-    else:            
-        ax.scatter(points[:, 0], points[:, 1], c='blue',s=3)
+                ax.plot(x, y, 'ro', markersize=2)  # 'ro' is red circle for stationary points
+    else:
+        ax.scatter(points[:, 0], points[:, 1], c='blue', s=3)

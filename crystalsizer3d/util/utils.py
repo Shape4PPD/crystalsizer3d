@@ -86,6 +86,7 @@ def to_uint8(arr: np.ndarray) -> np.ndarray:
 
     return uint8_array
 
+
 def init_tensor(
         tensor: Union[Tensor, np.ndarray, List[float], Tuple[float, ...], float, int],
         dtype: torch.dtype = torch.float32,
@@ -139,6 +140,7 @@ def json_to_numpy(data: Any) -> Any:
             if len(set(n_entries)) == 1:
                 return np.array(data)
         return [json_to_numpy(v) for v in data]
+
 
 def json_to_torch(data: Any) -> Any:
     """

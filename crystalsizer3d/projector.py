@@ -400,7 +400,7 @@ class Projector:
         self.front_edges = torch.tensor(list(front_edges))
         self.rear_edges = torch.tensor(list(rear_edges))
 
-    def _calculate_edge_segments(self): ####
+    def _calculate_edge_segments(self):
         """
         Calculate the edge segments for each face.
         """
@@ -435,7 +435,7 @@ class Projector:
 
         self.edge_segments = segments
         self.edge_segments_rel = {k: self._to_relative_coords(v) for k, v in segments.items()}
-    
+
     def _collate_keypoints(self):
         """
         Collate the vertices and intersections into a single keypoints tensor.
