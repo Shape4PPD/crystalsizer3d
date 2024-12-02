@@ -107,6 +107,8 @@ def init_tensor(
 
 class FlexibleJSONEncoder(JSONEncoder):
     def default(self, obj):
+        if isinstance(obj, Tensor):
+            obj = to_numpy(obj)
         if isinstance(obj, np.generic) or isinstance(obj, np.ndarray):
             return obj.tolist()
         if isinstance(obj, Path):
@@ -137,6 +139,22 @@ def json_to_numpy(data: Any) -> Any:
             if len(set(n_entries)) == 1:
                 return np.array(data)
         return [json_to_numpy(v) for v in data]
+
+def json_to_torch(data: Any) -> Any:
+    """
+    Convert json data to torch tensors where possible.
+    """
+    if isinstance(data, dict):
+        return {k: json_to_torch(v) for k, v in data.items()}
+    if isinstance(data, list):
+        types = [type(v) for v in data]
+        if all([t in [int, float] for t in types]):
+            return torch.tensor(data)
+        if all([t in [list, dict] for t in types]):
+            n_entries = [len(v) for v in data]
+            if len(set(n_entries)) == 1:
+                return torch.tensor(data)
+        return [json_to_torch(v) for v in data]
 
 
 def hash_data(data) -> str:

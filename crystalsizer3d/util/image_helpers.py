@@ -2,12 +2,12 @@ from pathlib import Path
 from typing import List
 
 import numpy as np
-from PIL import Image
+from PIL import Image, ImageDraw
 from matplotlib import pyplot as plt
 from matplotlib.gridspec import GridSpec
 from torch import Tensor
 
-from crystalsizer3d.util.utils import to_numpy
+from crystalsizer3d.util.utils import to_numpy, to_rgb
 
 dpi = plt.rcParams['figure.dpi']
 
@@ -95,6 +95,44 @@ def save_img_with_keypoint_markers(
         bbox_inches='tight', pad_inches=0
     )
     plt.close(fig)
+
+
+def save_img_with_keypoint_markers2(
+        X: np.ndarray | Tensor,
+        coords: np.ndarray | Tensor,
+        keypoint_radius: int = 30,
+        fill_colour: str = 'lightgreen',
+        outline_colour: str = 'darkgreen',
+        lbl: str = None,
+        save_dir: Path = None,
+        suffix: str = '_markers',
+        **kwargs
+) -> Image.Image:
+    if isinstance(X, Tensor):
+        X = to_numpy(X)
+    if isinstance(coords, Tensor):
+        coords = to_numpy(coords)
+    X = X.squeeze()
+    if X.ndim == 3 and X.shape[0] == 3:
+        X = X.transpose(1, 2, 0)
+
+    kp_fill_colour = tuple((np.array(to_rgb(fill_colour) + (0.3,)) * 255).astype(np.uint8).tolist())
+    kp_outline_colour = tuple((np.array(to_rgb(outline_colour) + (1,)) * 255).astype(np.uint8).tolist())
+    if X.dtype == np.uint8:
+        img = Image.fromarray(X)
+    else:
+        img = Image.fromarray((X * 255).astype(np.uint8))
+    draw = ImageDraw.Draw(img, 'RGBA')
+
+    # Add the keypoints
+    for (x, y) in coords:
+        draw.circle((x, y), keypoint_radius, fill=kp_fill_colour, outline=kp_outline_colour,
+                    width=keypoint_radius // 6)
+
+    if save_dir:
+        img.save(save_dir / f'{lbl}{suffix}.png')
+
+    return img
 
 
 def save_img_grid(

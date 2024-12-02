@@ -7,12 +7,12 @@ from torch import Tensor
 
 from app.components.anchor_manager import AnchorManager
 from app.components.app_panel import AppPanel
-from app.components.parallelism import start_thread, stop_event
 from app.components.refiner_settings_dialog import RefinerSettingsDialog
 from app.components.utils import CrystalChangedEvent, DenoisedImageChangedEvent, EVT_ANCHORS_CHANGED, \
     EVT_REFINING_STARTED, RefinerArgsChangedEvent, RefiningEndedEvent, RefiningStartedEvent, SceneChangedEvent, \
     SceneImageChangedEvent
 from crystalsizer3d import logger
+from crystalsizer3d.util.parallelism import start_thread, stop_event
 
 
 class OptimisationPanel(AppPanel):

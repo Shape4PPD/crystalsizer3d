@@ -21,6 +21,7 @@ from torchvision.transforms.functional import center_crop
 from crystalsizer3d import LOGS_PATH, START_TIMESTAMP, logger
 from crystalsizer3d.args.refiner_args import DENOISER_ARG_NAMES, KEYPOINTS_ARG_NAMES, PREDICTOR_ARG_NAMES, RefinerArgs
 from crystalsizer3d.crystal import Crystal
+from crystalsizer3d.csd_proxy import CSDProxy
 from crystalsizer3d.projector import Projector
 from crystalsizer3d.refiner.denoising import denoise_image
 from crystalsizer3d.refiner.refiner import Refiner
@@ -29,8 +30,8 @@ from crystalsizer3d.scene_components.utils import orthographic_scale_factor
 from crystalsizer3d.sequence.plots import plot_areas, plot_distances, plot_losses, plot_origin, plot_rotation
 from crystalsizer3d.sequence.utils import get_image_paths
 from crystalsizer3d.util.kalman_filter import KalmanFilter
-from crystalsizer3d.util.utils import FlexibleJSONEncoder, hash_data, init_tensor, json_to_numpy, print_args, \
-    str2bool, to_dict, to_numpy
+from crystalsizer3d.util.utils import FlexibleJSONEncoder, get_crystal_face_groups, hash_data, init_tensor, \
+    json_to_numpy, print_args, str2bool, to_dict, to_numpy
 
 ARG_NAMES = {
     'denoiser': DENOISER_ARG_NAMES,
@@ -282,10 +283,10 @@ def _calculate_crystals(
                 # Update the parameters from the initial scene
                 if scene_init is not None:
                     refiner.scene.crystal.copy_parameters_from(scene_init.crystal)
-                refiner.scene.light_radiance.data = init_tensor(scene_init.light_radiance)
+                    refiner.scene.light_radiance.data = init_tensor(scene_init.light_radiance)
 
                 # Update the Kalman filter with the initial distances
-                distances_actual = (scene_init.crystal.distances * scene_init.crystal.scale).detach()
+                distances_actual = (refiner.scene.crystal.distances * refiner.scene.crystal.scale).detach()
                 kalman_filter.update(distances_actual)
 
             # Otherwise, use the previous solution as the starting point
@@ -791,11 +792,12 @@ def track_sequence():
     # Instantiate a refiner if it isn't there already
     if refiner is None:
         refiner = Refiner(args=refiner_args, do_init=False)
+    face_groups = get_crystal_face_groups(refiner.manager)
 
     # Make some plots
     plot_losses(data['losses_final'], data['losses_all'], image_paths, save_dir_run)
-    plot_distances(refiner.manager, data['parameters_final'], image_paths, save_dir_run)
-    plot_areas(refiner.manager, data['parameters_final'], image_paths, save_dir_run)
+    plot_distances(data['parameters_final'], face_groups, image_paths, save_dir_run)
+    plot_areas(refiner.manager, data['parameters_final'], image_paths, save_dir_run, face_groups)
     plot_origin(data['parameters_final'], image_paths, save_dir_run)
     plot_rotation(data['parameters_final'], image_paths, save_dir_run)
 
@@ -881,7 +883,7 @@ def plot_run():
 
         # Fix the origin for the automatic measurements to match the manual measurements
         ds = refiner.manager.ds
-        cs = ds.csd_proxy.load(ds.dataset_args.crystal_id)
+        cs = CSDProxy().load(ds.dataset_args.crystal_id)
         crystal = Crystal(
             lattice_unit_cell=cs.lattice_unit_cell,
             lattice_angles=cs.lattice_angles,
@@ -916,8 +918,9 @@ def plot_run():
         image_paths=image_paths,
         save_dir=run_dir,
     )
-    plot_distances(manager=refiner.manager, **plot_args)
-    plot_areas(manager=refiner.manager, **plot_args)
+    face_groups = get_crystal_face_groups(refiner.manager)
+    plot_distances(face_groups=face_groups, **plot_args)
+    plot_areas(face_groups=face_groups, **plot_args)
     plot_origin(**plot_args)
     plot_rotation(**plot_args)
 

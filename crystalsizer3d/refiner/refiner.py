@@ -33,7 +33,7 @@ from torch.optim import Optimizer
 from torch.utils.data import default_collate
 from torch.utils.tensorboard import SummaryWriter
 from torchvision.transforms import Compose, GaussianBlur
-from torchvision.transforms.functional import center_crop, to_tensor
+from torchvision.transforms.functional import center_crop, crop, to_tensor
 
 from crystalsizer3d import DATA_PATH, LOGS_PATH, START_TIMESTAMP, USE_CUDA, logger
 from crystalsizer3d.args.refiner_args import RefinerArgs
@@ -118,9 +118,13 @@ class Refiner:
         self.destroy_keypoint_detector = destroy_keypoint_detector
         self.destroy_predictor = destroy_predictor
 
+        # Output directory
+        self.output_dir = output_dir
+        self.output_dir_base = output_dir_base
+
         if do_init:
             # Set up the log directory
-            self.init_save_dir(output_dir, output_dir_base)
+            self.init_save_dir()
 
             # Load the optimisation targets
             self.init_X_target()
@@ -138,7 +142,7 @@ class Refiner:
             self._init_manager()
             return self.manager
         elif name == 'projector':
-            self._init_projector()
+            self.init_projector()
             return self.projector
         elif name == 'blur':
             self._init_blur()
@@ -203,6 +207,15 @@ class Refiner:
         logger.info('Initialising output directory.')
         assert not (output_dir is not None and output_dir_base is not None), \
             'Can\'t set both the output_dir and the output_dir_base.'
+        if output_dir is None and output_dir_base is None:
+            output_dir = self.output_dir
+            output_dir_base = self.output_dir_base
+        elif output_dir is not None:
+            self.output_dir = output_dir
+            self.output_dir_base = None
+        elif output_dir_base is not None:
+            self.output_dir = None
+            self.output_dir_base = output_dir_base
         copy_dirs = ['cache', 'initial_prediction', 'denoise_patches', 'keypoints']
 
         if output_dir is None:
@@ -274,7 +287,7 @@ class Refiner:
         )
         self.manager = manager
 
-    def _init_projector(self):
+    def init_projector(self):
         """
         Initialise the projector.
         """
@@ -968,7 +981,7 @@ class Refiner:
             self.crystal.to('cpu')
 
             # Project the crystal mesh - reinitialise the projector for the new scene
-            if self.args.use_keypoints and len(self.keypoint_targets) and self.args.use_edge_matching> 0:
+            if self.args.use_keypoints and len(self.keypoint_targets) > 0 or self.args.use_edge_matching:
                 self._init_projector()
                 self.projector.project(generate_image=False)
 
@@ -1016,7 +1029,7 @@ class Refiner:
         self.scene = scene
         self.scene_params = scene_params
         self.crystal = scene.crystal
-        self._init_projector()
+        self.init_projector()
 
     def train(
             self,
@@ -1149,7 +1162,7 @@ class Refiner:
         """
         Train for a single step.
         """
-        loss, stats = self._process_step(add_noise=True)
+        loss, stats = self.process_step(add_noise=True)
 
         # Backpropagate errors
         (loss / self.args.acc_grad_steps).backward()
@@ -1198,7 +1211,7 @@ class Refiner:
 
         return loss, stats
 
-    def _process_step(self, add_noise: bool = True) -> Tuple[Tensor, Dict[str, float]]:
+    def process_step(self, add_noise: bool = True) -> Tuple[Tensor, Dict[str, float]]:
         """
         Process a single step.
         """
@@ -1253,23 +1266,65 @@ class Refiner:
         # Rebuild the mesh
         v, f = self.crystal.build_mesh(distances=distances, rotation=rotation, update_uv_map=False)
 
+        # Project the crystal mesh
+        if (self.args.use_keypoints and len(self.keypoint_targets) > 0) or len(self.anchors) > 0 \
+                or (self.args.use_inverse_rendering and self.args.crop_render):
+            self.projector.project(generate_image=False)
+
         # Render new image
+        is_cropped = False
         if self.args.use_inverse_rendering:
             device = self.scene.device
             v, f = v.to(device), f.to(device)
             eta = ior.to(device) / self.scene.crystal_material_bsdf['ext_ior']
             roughness = roughness.to(device).clone()
             radiance = radiance.to(device).clone()
+
+            # If the crystal is projected, render just the area where the predicted crystal is
+            if self.args.crop_render:
+                wis = self.args.rendering_size
+                margin = self.args.crop_render_margin
+                kp = (self.projector.keypoints_rel.detach() + 1) / 2
+                tl = torch.clamp(kp.amin(dim=0) - margin, min=0)
+                br = torch.clamp(kp.amax(dim=0) + margin, max=1)
+                region_w = (br[0] - tl[0]).item()
+                region_h = (br[1] - tl[1]).item()
+                region_size = max(region_w, region_h)
+                cp = (tl + br) / 2
+
+                # Update the film parameters to only render the crystal region
+                exp_size = wis / region_size
+                self.scene_params[Scene.FILM_SIZE_KEY] = round(exp_size)
+                self.scene_params[Scene.FILM_CROP_SIZE_KEY] = wis
+                self.scene_params[Scene.FILM_CROP_OFFSET_KEY] = (
+                    ((cp - region_size / 2) * exp_size).round().int().tolist())
+                is_cropped = True
+
             X_pred = self._render_image(v, f, eta, roughness, radiance, seed=self.step)
             X_pred = torch.clip(X_pred, 0, 1)
             if self.args.multiscale:
                 X_pred = to_multiscale(X_pred, self.blur)
+
+            # Restore full-size rendering parameters
+            if self.args.crop_render:
+                self.scene_params[Scene.FILM_SIZE_KEY] = self.args.rendering_size
+                self.scene_params[Scene.FILM_CROP_OFFSET_KEY] = [0, 0]
         else:
             X_pred = torch.zeros_like(self.X_target_wis)
         self.X_pred = X_pred
 
-        # Use denoised target if available
-        X_target = self.X_target_denoised_wis if self.X_target_denoised is not None else self.X_target_wis
+        # Crop to match the zoomed-in rendered region
+        if is_cropped:
+            X_target = self.X_target_denoised if self.X_target_denoised is not None else self.X_target
+            full_size = X_target.shape[0]
+            tl2 = ((cp - region_size / 2) * full_size).round().int().tolist()
+            crop_size = round(region_size * full_size)
+            X_target = crop(X_target.permute(2, 1, 0), tl2[0], tl2[1], crop_size, crop_size)
+            X_target = self._resize(X_target.permute(2, 1, 0))
+
+        # Use the full image (resized to the rendering size)
+        else:
+            X_target = self.X_target_denoised_wis if self.X_target_denoised_wis is not None else self.X_target_wis
 
         # Add some noise to the target image
         if isinstance(X_target, list):
@@ -1279,10 +1334,6 @@ class Refiner:
             X_target_aug = X_target + torch.randn_like(X_target) * self.args.image_noise_std
             X_target_aug.clip_(0, 1)
         self.X_target_aug = X_target_aug
-
-        # Project the crystal mesh
-        if (self.args.use_keypoints and len(self.keypoint_targets) > 0) or len(self.anchors) > 0:
-            self.projector.project(generate_image=False)
 
         # Calculate losses
         loss, stats = self._calculate_losses(distances=distances)
@@ -1626,7 +1677,7 @@ class Refiner:
         """
         Calculate the super-resolution patches loss.
         """
-        loss = torch.tensor(0., device=self.device)
+        loss = torch.tensor(0.)
         stats = {}
         if not self.args.use_inverse_rendering or self.args.n_patches is None or self.args.n_patches <= 0 or self.scene_params is None:
             return loss, stats
@@ -1667,7 +1718,7 @@ class Refiner:
                 X_target_patches[0],
                 size=(wis, wis),
                 mode='bilinear', align_corners=False
-            ).permute(0, 2, 3, 1)
+            ).permute(0, 2, 3, 1).to(self.device)
 
         # Update the film size parameters
         sf = wis / ps
@@ -1676,12 +1727,12 @@ class Refiner:
 
         # Render the patches
         X_pred_patches = []
+        vertices = self.crystal.mesh_vertices.to(device)
+        faces = self.crystal.mesh_faces.to(device)
+        eta = self.crystal.material_ior.to(device) / self.scene.crystal_material_bsdf['ext_ior']
+        roughness = self.crystal.material_roughness.to(device).clone()
+        radiance = self.scene.light_radiance.to(device).clone()
         for i, patch_centre in enumerate(patch_centres):
-            vertices = self.crystal.mesh_vertices.to(device)
-            faces = self.crystal.mesh_faces.to(device)
-            eta = self.crystal.material_ior.to(device) / self.scene.crystal_material_bsdf['ext_ior']
-            roughness = self.crystal.material_roughness.to(device).clone()
-            radiance = self.scene.light_radiance.to(device).clone()
             self.scene_params[Scene.FILM_CROP_OFFSET_KEY] = (patch_centre * sf - wis / 2).round().int().tolist()
             X_pred_patch = self._render_image(
                 vertices, faces, eta, roughness, radiance,
@@ -1753,7 +1804,7 @@ class Refiner:
         """
         Calculate the keypoints loss.
         """
-        loss = torch.tensor(0., device=self.keypoint_targets.device)
+        loss = torch.tensor(0.)
         stats = {}
         if not self.args.use_keypoints or self.keypoint_targets is None or len(self.keypoint_targets) == 0:
             return loss, stats
@@ -1852,7 +1903,7 @@ class Refiner:
         if self.args.plot_every_n_steps > -1 and (force or (self.step + 1) % self.args.plot_every_n_steps == 0):
             logger.info('Plotting.')
             # Re-process the step with no noise for plotting
-            self._process_step(add_noise=False)
+            self.process_step(add_noise=False)
             with torch.no_grad():
                 fig = self._plot_comparison()
                 self._save_plot(fig, 'optimisation')

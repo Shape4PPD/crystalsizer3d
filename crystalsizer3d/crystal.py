@@ -657,8 +657,8 @@ class Crystal(nn.Module):
             fv_idxs = face.flatten().unique()
             faces[i] = fv_idxs
             try:
-                v2 = align_points_to_xy_plane(v[fv_idxs[1:]])[:, :2]
-                v2 = rotate_2d_points_to_square(v2)  # Rotate so the bounding box is square
+                v2, _ = align_points_to_xy_plane(v[fv_idxs[1:]])
+                v2 = rotate_2d_points_to_square(v2[:, :2])  # Rotate so the bounding box is square
             except Exception:
                 # Align vertices in a circle around the centroid
                 theta = torch.linspace(0, 2 * torch.pi, steps=len(fv_idxs), device=device)[:-1]

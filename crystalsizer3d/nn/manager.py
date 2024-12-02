@@ -40,6 +40,7 @@ from crystalsizer3d.args.transcoder_args import TranscoderArgs
 from crystalsizer3d.crystal import Crystal, ROTATION_MODE_AXISANGLE, ROTATION_MODE_QUATERNION
 from crystalsizer3d.crystal_generator import CrystalGenerator
 from crystalsizer3d.crystal_renderer import CrystalRenderer
+from crystalsizer3d.csd_proxy import CSDProxy
 from crystalsizer3d.nn.checkpoint import Checkpoint
 from crystalsizer3d.nn.data_loader import DataBatch, get_data_loader
 from crystalsizer3d.nn.dataset import DatasetProxy
@@ -1012,7 +1013,8 @@ class Manager:
         """
         Initialise the crystal object.
         """
-        cs = self.ds.csd_proxy.load(self.ds.dataset_args.crystal_id)
+        csd_proxy = CSDProxy()
+        cs = csd_proxy.load(self.ds.dataset_args.crystal_id)
         crystal = Crystal(
             lattice_unit_cell=cs.lattice_unit_cell,
             lattice_angles=cs.lattice_angles,

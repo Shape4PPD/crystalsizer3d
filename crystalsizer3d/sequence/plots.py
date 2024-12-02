@@ -3,13 +3,20 @@ from typing import Dict, List, Tuple
 
 import numpy as np
 import torch
+from PIL import Image, ImageDraw
 from matplotlib import pyplot as plt
 from matplotlib.colors import hsv_to_rgb, rgb_to_hsv
+from matplotlib.figure import Figure
 from matplotlib.gridspec import GridSpec
+from torch import Tensor
 
 from crystalsizer3d.crystal import Crystal
+from crystalsizer3d.csd_proxy import CSDProxy
 from crystalsizer3d.nn.manager import Manager
-from crystalsizer3d.util.utils import get_crystal_face_groups, init_tensor, smooth_signal, to_rgb
+from crystalsizer3d.projector import Projector
+from crystalsizer3d.scene_components.scene import Scene
+from crystalsizer3d.scene_components.utils import orthographic_scale_factor
+from crystalsizer3d.util.utils import get_crystal_face_groups, init_tensor, smooth_signal, to_numpy, to_rgb
 
 plot_extension = 'png'  # or svg
 line_styles = ['--', '-.', ':']
@@ -128,22 +135,22 @@ def plot_losses(
 
 
 def plot_face_property_values(
-        manager: Manager,
         property_name: str,
         property_values: np.ndarray,
+        face_groups: Dict[Tuple[int, int, int], Dict[Tuple[int, int, int], int]],
         image_paths: List[Tuple[int, Path]],
-        save_dir: Path,
+        save_dir: Path = None,
         measurement_idxs: np.ndarray = None,
         measurement_values: np.ndarray = None,
         show_mean: bool = False,
-        show_std: bool = False
-):
+        show_std: bool = False,
+        make_means_plot: bool = True
+) -> Figure | Tuple[Figure, Figure]:
     """
     Plot face distances or areas.
     """
     x_vals = [idx for idx, _ in image_paths]
-    groups = get_crystal_face_groups(manager)
-    n_groups = len(groups)
+    n_groups = len(face_groups)
     group_colours = get_face_group_colours(n_groups)
 
     if property_name == 'areas':
@@ -153,16 +160,22 @@ def plot_face_property_values(
     else:
         raise ValueError(f'Invalid property name: {property_name}')
 
+    # Restrict the measurements to within the range predicted
+    if measurement_idxs is not None:
+        include_mask = np.array([x_vals[0] <= idx <= x_vals[-1] for idx in measurement_idxs])
+        measurement_idxs = measurement_idxs[include_mask]
+        measurement_values = measurement_values[include_mask]
+
     # Make a grid of plots showing the values for each face group
     n_cols = int(np.ceil(np.sqrt(n_groups)))
     n_rows = int(np.ceil(n_groups / n_cols))
-    fig = plt.figure(figsize=(n_cols * 6, n_rows * 4))
+    fig_grouped = plt.figure(figsize=(n_cols * 6, n_rows * 4))
     gs = GridSpec(
         n_rows, n_cols,
         top=0.95, bottom=0.08, right=0.99, left=0.05,
         hspace=0.3, wspace=0.2
     )
-    for i, (group_hkl, group_idxs) in enumerate(groups.items()):
+    for i, (group_hkl, group_idxs) in enumerate(face_groups.items()):
         colour = group_colours[i]
         colour_variants = get_colour_variations(colour, len(group_idxs))
         y = property_values[:, list(group_idxs.values())]
@@ -171,7 +184,7 @@ def plot_face_property_values(
         y_std = y.std(axis=1)
         lbls = [get_hkl_label(hkl) for hkl in list(group_idxs.keys())]
 
-        ax = fig.add_subplot(gs[i])
+        ax = fig_grouped.add_subplot(gs[i])
         ax.set_title(get_hkl_label(group_hkl, is_group=True))
 
         # Plot the mean +/- std
@@ -191,13 +204,16 @@ def plot_face_property_values(
         ax.set_xlabel('Image index')
         ax.set_ylabel(y_label)
         ax.legend(loc='lower right')
-    plt.savefig(save_dir / f'{property_name}_grouped.{plot_extension}')
+    if save_dir is not None:
+        plt.savefig(save_dir / f'{property_name}_grouped.{plot_extension}')
+    if not make_means_plot:
+        return fig_grouped
 
     # Make a plot showing the mean values all together
-    fig, ax = plt.subplots(1, figsize=(12, 8))
+    fig_mean, ax = plt.subplots(1, figsize=(12, 8))
     ax.set_title(f'Mean {property_name}')
     ax.grid()
-    for i, (group_hkl, group_idxs) in enumerate(groups.items()):
+    for i, (group_hkl, group_idxs) in enumerate(face_groups.items()):
         colour = group_colours[i]
         y = property_values[:, list(group_idxs.values())]
         y_mean = y.mean(axis=1)
@@ -207,31 +223,37 @@ def plot_face_property_values(
     ax.set_xlabel('Image index')
     ax.set_ylabel(y_label)
     ax.legend()
-    fig.tight_layout()
-    plt.savefig(save_dir / f'{property_name}_mean.{plot_extension}')
+    fig_mean.tight_layout()
+    if save_dir is not None:
+        plt.savefig(save_dir / f'{property_name}_mean.{plot_extension}')
+
+    return fig_grouped, fig_mean
 
 
 def plot_distances(
-        manager: Manager,
         parameters: Dict[str, np.ndarray],
+        face_groups: Dict[Tuple[int, int, int], Dict[Tuple[int, int, int], int]],
         image_paths: List[Tuple[int, Path]],
-        save_dir: Path,
-        measurements: Dict[str, np.ndarray] = None
-):
+        save_dir: Path = None,
+        measurements: Dict[str, np.ndarray] = None,
+        make_means_plot: bool = True,
+        **kwargs
+) -> Figure | Tuple[Figure, Figure]:
     """
     Plot face distances.
     """
     distances = parameters['distances']
     scales = parameters['scale']
-    plot_face_property_values(
-        manager=manager,
+    return plot_face_property_values(
         property_name='distances',
         property_values=distances * scales[:, None],
+        face_groups=face_groups,
         image_paths=image_paths,
         save_dir=save_dir,
         measurement_idxs=measurements['idx'] if measurements is not None else None,
         measurement_values=measurements['distances'] * measurements['scale'][:, None]
-        if measurements is not None else None
+        if measurements is not None else None,
+        make_means_plot=make_means_plot
     )
 
 
@@ -239,18 +261,25 @@ def plot_areas(
         manager: Manager,
         parameters: Dict[str, np.ndarray],
         image_paths: List[Tuple[int, Path]],
-        save_dir: Path,
-        measurements: Dict[str, np.ndarray] = None
-):
+        save_dir: Path = None,
+        face_groups: Dict[Tuple[int, int, int], Dict[Tuple[int, int, int], int]] = None,
+        measurements: Dict[str, np.ndarray] = None,
+        make_means_plot: bool = True,
+        **kwargs
+) -> Figure | Tuple[Figure, Figure]:
     """
     Plot face areas.
     """
     distances = parameters['distances']
     scales = parameters['scale']
+    if isinstance(distances, Tensor):
+        distances = to_numpy(distances)
+    if isinstance(scales, Tensor):
+        scales = to_numpy(scales)
 
     # Get a crystal object
     ds = manager.ds
-    cs = ds.csd_proxy.load(ds.dataset_args.crystal_id)
+    cs = CSDProxy().load(ds.dataset_args.crystal_id)
     crystal = Crystal(
         lattice_unit_cell=cs.lattice_unit_cell,
         lattice_angles=cs.lattice_angles,
@@ -277,23 +306,28 @@ def plot_areas(
             unscaled_areas_m = np.array([crystal.areas[tuple(hkl.tolist())] for hkl in crystal.all_miller_indices])
             areas_m[i] = unscaled_areas_m * scales_m[i]**2
 
-    plot_face_property_values(
-        manager=manager,
+    if face_groups is None:
+        face_groups = get_crystal_face_groups(manager)
+
+    return plot_face_property_values(
         property_name='areas',
         property_values=areas,
+        face_groups=face_groups,
         image_paths=image_paths,
         save_dir=save_dir,
         measurement_idxs=measurements['idx'] if measurements is not None else None,
-        measurement_values=areas_m
+        measurement_values=areas_m,
+        make_means_plot=make_means_plot
     )
 
 
 def plot_origin(
         parameters: Dict[str, np.ndarray],
         image_paths: List[Tuple[int, Path]],
-        save_dir: Path,
-        measurements: Dict[str, np.ndarray] = None
-):
+        save_dir: Path = None,
+        measurements: Dict[str, np.ndarray] = None,
+        **kwargs
+) -> Figure:
     """
     Plot origin position.
     """
@@ -314,18 +348,27 @@ def plot_origin(
     ax.set_ylabel('Position')
     ax.legend()
     fig.tight_layout()
-    plt.savefig(save_dir / f'origin.{plot_extension}')
+    if save_dir is not None:
+        plt.savefig(save_dir / f'origin.{plot_extension}')
+    return fig
 
 
 def plot_rotation(
         parameters: Dict[str, np.ndarray],
         image_paths: List[Tuple[int, Path]],
-        save_dir: Path,
-        measurements: Dict[str, np.ndarray] = None
-):
+        save_dir: Path = None,
+        measurements: Dict[str, np.ndarray] = None,
+        **kwargs
+) -> Figure:
     """
     Plot rotation.
     """
+
+    def canonicalise_rotations(rotations: np.ndarray) -> np.ndarray:
+        """Canonicalise the rotation vectors."""
+        angles = np.linalg.norm(rotations, axis=-1)
+        return rotations / angles[:, None] * (angles % (2 * np.pi))
+
     rotations = parameters['rotation']
     x_vals = [idx for idx, _ in image_paths]
     fig, ax = plt.subplots(1, figsize=(12, 8))
@@ -343,4 +386,117 @@ def plot_rotation(
     ax.set_ylabel('Component value')
     ax.legend()
     fig.tight_layout()
-    plt.savefig(save_dir / f'rotation.{plot_extension}')
+    if save_dir is not None:
+        plt.savefig(save_dir / f'rotation.{plot_extension}')
+    return fig
+
+
+def plot_material_properties(
+        parameters: Dict[str, np.ndarray],
+        image_paths: List[Tuple[int, Path]],
+        save_dir: Path = None,
+        measurements: Dict[str, np.ndarray] = None,
+        **kwargs
+) -> Figure:
+    """
+    Plot IOR and roughness.
+    """
+    x_vals = [idx for idx, _ in image_paths]
+    fig, axes = plt.subplots(2, figsize=(10, 8), sharex=True)
+    for ax, prop_name in zip(axes, ['ior', 'roughness']):
+        ax.set_title(f'{prop_name}')
+        ax.grid()
+        y = parameters['material_' + prop_name]
+        ax.plot(x_vals, y, label=prop_name)
+        if measurements is not None and prop_name in measurements:
+            y = measurements[prop_name]
+            ax.plot(measurements['idx'], y, label='Manual', linestyle='none',
+                    marker='o', markersize=5, alpha=0.7)
+        ax.set_xlabel('Image index')
+        ax.set_ylabel(prop_name)
+        ax.legend()
+    fig.tight_layout()
+    if save_dir is not None:
+        plt.savefig(save_dir / f'material.{plot_extension}')
+    return fig
+
+
+def plot_light_radiance(
+        parameters: Dict[str, np.ndarray],
+        image_paths: List[Tuple[int, Path]],
+        save_dir: Path = None,
+        **kwargs
+) -> Figure:
+    """
+    Plot rotation.
+    """
+    radiance = parameters['light_radiance']
+    x_vals = [idx for idx, _ in image_paths]
+    fig, ax = plt.subplots(1, figsize=(12, 8))
+    ax.set_title('Light radiance (RGB)')
+    ax.grid()
+    for i in range(3):
+        ax.plot(x_vals, radiance[:, i], label='RGB'[i])
+    ax.set_xlabel('Image index')
+    ax.set_ylabel('Component value')
+    ax.legend()
+    fig.tight_layout()
+    if save_dir is not None:
+        plt.savefig(save_dir / f'light_radiance.{plot_extension}')
+    return fig
+
+
+@torch.no_grad()
+def annotate_image(
+        image_path: Path,
+        scene: Scene | None = None,
+        crystal: Crystal | None = None,
+        zoom: float | None = None,
+        wf_line_width: int = 3
+) -> Image:
+    """
+    Draw the projected wireframe onto an image.
+    """
+    assert (scene is None and crystal is not None and zoom is not None) \
+           or (scene is not None and crystal is None and zoom is None), \
+        'Either provide a scene and no crystal or zoom, or no scene and a crystal and zoom.'
+
+    # Get the crystal and zoom from the scene
+    if scene is not None:
+        crystal = scene.crystal
+        zoom = orthographic_scale_factor(scene)
+
+    # Load the image
+    img = Image.open(image_path)
+    image_size = min(img.size)
+    if img.size[0] != img.size[1]:
+        offset_l = (img.size[0] - image_size) // 2
+        offset_t = (img.size[1] - image_size) // 2
+    else:
+        offset_l = 0
+        offset_t = 0
+
+    # Set up the projector
+    projector = Projector(
+        crystal=crystal,
+        image_size=(image_size, image_size),
+        zoom=zoom,
+        transparent_background=True,
+        multi_line=True,
+        rtol=1e-2
+    )
+
+    draw = ImageDraw.Draw(img, 'RGB')
+    for ref_face_idx, face_segments in projector.edge_segments.items():
+        if len(face_segments) == 0:
+            continue
+        colour = projector.colour_facing_towards if ref_face_idx == 'facing' else projector.colour_facing_away
+        colour = tuple((colour * 255).int().tolist())
+        for segment in face_segments:
+            l = segment.clone()
+            l[:, 0] = torch.clamp(l[:, 0], 1, projector.image_size[1] - 2) + offset_l
+            l[:, 1] = torch.clamp(l[:, 1], 1, projector.image_size[0] - 2) + offset_t
+            draw.line(xy=[tuple(l[0].int().tolist()), tuple(l[1].int().tolist())],
+                      fill=colour, width=wf_line_width)
+
+    return img

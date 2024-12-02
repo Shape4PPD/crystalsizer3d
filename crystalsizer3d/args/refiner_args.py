@@ -22,11 +22,17 @@ EDGE_MATTCHING_ARG_NAMES = ['edge_matching_points_per_unit']
 
 PREDICTOR_ARG_NAMES = [
     'predictor_model_path', 'initial_pred_noise_min', 'initial_pred_noise_max', 'initial_pred_oversize_input',
-    'initial_pred_max_img_size', 'multiscale', 'use_keypoints', 'use_edge_matching', 'n_patches', 'w_img_l1', 'w_img_l2', 'w_perceptual',
+    'initial_pred_max_img_size', 'multiscale', 'use_keypoints', 'use_edge_matching', 'rendering_size', 'spp',
+    'integrator_max_depth', 'integrator_rr_depth', 'n_patches', 'patch_size', 'w_img_l1', 'w_img_l2', 'w_perceptual',
     'w_latent', 'w_rcf', 'w_overshoot', 'w_symmetry', 'w_z_pos', 'w_rotation_xy', 'w_patches', 'w_fullsize',
     'w_switch_probs', 'w_keypoints', 'w_anchors', 'l_decay_l1', 'l_decay_l2', 'l_decay_perceptual', 'l_decay_latent',
     'l_decay_rcf', 'perceptual_model', 'latents_model', 'mv2_config_path', 'mv2_checkpoint_path', 'rcf_model_path',
     'rcf_loss_type', 'keypoints_loss_type'
+]
+
+PREDICTOR_ARG_NAMES_BS1 = [
+    'predictor_model_path', 'initial_pred_oversize_input', 'initial_pred_max_img_size', 'rendering_size', 'spp',
+    'integrator_max_depth', 'integrator_rr_depth',
 ]
 
 
@@ -68,7 +74,7 @@ class RefinerArgs(BaseArgs):
             keypoints_max_attenuation_factor: float = 1.5,
             keypoints_low_res_catchment_distance: int = 100,
             keypoints_loss_type: str = 'mindists',
-            
+
             # Edge Matching settings
             edge_matching_points_per_unit: float = 0.05,
             edge_matching_rcf_size: int = 400,
@@ -89,6 +95,8 @@ class RefinerArgs(BaseArgs):
             spp: int = 64,
             integrator_max_depth: int = 16,
             integrator_rr_depth: int = 5,
+            crop_render: bool = False,
+            crop_render_margin: float = 0.05,
 
             # Patches settings
             n_patches: int = 0,
@@ -97,7 +105,7 @@ class RefinerArgs(BaseArgs):
             # Optimisation settings
             seed: Optional[int] = None,
             max_steps: int = 1000,
-            multiscale: bool = True,
+            multiscale: bool = False,
             acc_grad_steps: int = 1,
             clip_grad_norm: float = 0.0,
             opt_algorithm: str = 'sgd',
@@ -267,7 +275,7 @@ class RefinerArgs(BaseArgs):
         self.keypoints_max_attenuation_factor = keypoints_max_attenuation_factor
         self.keypoints_low_res_catchment_distance = keypoints_low_res_catchment_distance
         self.keypoints_loss_type = keypoints_loss_type
-        
+
         # Edge matching settings:
         self.edge_matching_points_per_unit = edge_matching_points_per_unit
         self.edge_matching_rcf_size = edge_matching_rcf_size
@@ -288,6 +296,8 @@ class RefinerArgs(BaseArgs):
         self.spp = spp
         self.integrator_max_depth = integrator_max_depth
         self.integrator_rr_depth = integrator_rr_depth
+        self.crop_render = crop_render
+        self.crop_render_margin = crop_render_margin
 
         # Patches settings
         self.n_patches = n_patches
@@ -366,7 +376,7 @@ class RefinerArgs(BaseArgs):
         self.w_keypoints = w_keypoints
         self.w_anchors = w_anchors
         self.w_edge_matching = w_edge_matching
-        
+
         # Loss decay factors
         self.l_decay_l1 = l_decay_l1
         self.l_decay_l2 = l_decay_l2
@@ -508,6 +518,10 @@ class RefinerArgs(BaseArgs):
                            help='Maximum depth of the ray-tracing integrator.')
         group.add_argument('--integrator-rr-depth', type=int, default=4,
                            help='Path depth at which rays will begin to use the russian roulette termination criterion.')
+        group.add_argument('--crop-render', type=str2bool, default=False,
+                           help='Crop the rendered image to the region where the crystal is projected to.')
+        group.add_argument('--crop-render-margin', type=float, default=0.05,
+                           help='Relative margin to ensure for the cropped rendered image.')
 
         # Patch settings
         group.add_argument('--n-patches', type=int, default=0,
@@ -554,7 +568,7 @@ class RefinerArgs(BaseArgs):
                            help='Standard deviation of the zero-mean Gaussian noise to add to the light radiance.')
 
         # Conjugate face switching
-        group.add_argument('--use-conj-switching', type=str2bool, default=True,
+        group.add_argument('--use-conj-switching', type=str2bool, default=False,
                            help='Stochastically switch the distances of two conjugate faces during the refinement process. '
                                 'Can sometimes help to get out of local minima.')
         group.add_argument('--conj-switch-prob-init', type=float, default=0.4,
