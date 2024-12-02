@@ -35,6 +35,7 @@ from crystalsizer3d.sequence.adaptive_sampler import AdaptiveSampler
 from crystalsizer3d.sequence.data_loader import get_data_loader
 from crystalsizer3d.sequence.refiner_pool import RefinerPool
 from crystalsizer3d.sequence.sequence_encoder import SequenceEncoder
+from crystalsizer3d.sequence.sequence_encoder_ffn import SequenceEncoderFFN
 from crystalsizer3d.sequence.sequence_plotter import SequencePlotter
 from crystalsizer3d.sequence.utils import get_image_paths
 from crystalsizer3d.util.utils import FlexibleJSONEncoder, calculate_model_norm, get_crystal_face_groups, hash_data, \
@@ -827,15 +828,25 @@ class SequenceFitter:
         Instantiate the sequence encoder, optimiser and learning rate scheduler.
         """
         sa = self.sf_args
-        self.sequence_encoder = SequenceEncoder(
-            param_dim=self.n_parameters,
-            hidden_dim=sa.hidden_dim,
-            n_layers=sa.n_layers,
-            n_heads=sa.n_heads,
-            max_freq=sa.max_freq,
-            dropout=sa.dropout,
-            activation=sa.activation,
-        )
+        if sa.seq_encoder_model == 'transformer':
+            self.sequence_encoder = SequenceEncoder(
+                param_dim=self.n_parameters,
+                hidden_dim=sa.hidden_dim,
+                n_layers=sa.n_layers,
+                n_heads=sa.n_heads,
+                max_freq=sa.max_freq,
+                dropout=sa.dropout,
+                activation=sa.activation,
+            )
+        elif sa.seq_encoder_model == 'ffn':
+            self.sequence_encoder = SequenceEncoderFFN(
+                param_dim=self.n_parameters,
+                hidden_dim=sa.hidden_dim,
+                n_layers=sa.n_layers,
+                max_freq=sa.max_freq,
+                dropout=sa.dropout,
+                activation=sa.activation,
+            )
         logger.info(f'Instantiated sequence encoder with {self.sequence_encoder.get_n_params() / 1e6:.4f}M parameters.')
         logger.debug(f'----------- Sequence Encoder Network --------------\n\n{self.sequence_encoder}\n\n')
         self.sequence_encoder = self.sequence_encoder.to(self.device)
@@ -1084,8 +1095,8 @@ class SequenceFitter:
                     X_target_wis=batch[2],
                     X_target_denoised_wis=batch[3],
                     keypoints=[self.keypoints[idx]['keypoints'] for idx in batch_idxs],
-                    save_annotations=(step + 1) % ra.save_annotations_freq == 0,
-                    save_renders=(step + 1) % ra.save_renders_freq == 0,
+                    save_annotations=ra.save_annotations_freq > 0 and (step + 1) % ra.save_annotations_freq == 0,
+                    save_renders=ra.save_renders_freq > 0 and (step + 1) % ra.save_renders_freq == 0,
                     X_preds_paths=[self.X_preds['train'][idx] for idx in batch_idxs],
                     X_targets_paths=[self.X_targets[idx] for idx in batch_idxs],
                     X_targets_annotated_paths=[self.X_targets_annotated['train'][idx] for idx in batch_idxs],

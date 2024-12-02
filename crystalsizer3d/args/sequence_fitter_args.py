@@ -18,6 +18,7 @@ class SequenceFitterArgs(BaseArgs):
             fix_parameters: List[str] | None = None,
 
             # Sequence encoder model parameters
+            seq_encoder_model: str = 'transformer',
             hidden_dim: int = 256,
             n_layers: int = 4,
             n_heads: int = 8,
@@ -66,6 +67,7 @@ class SequenceFitterArgs(BaseArgs):
         self.fix_parameters = fix_parameters
 
         # Sequence encoder model parameters
+        self.seq_encoder_model = seq_encoder_model
         self.hidden_dim = hidden_dim
         self.n_layers = n_layers
         self.n_heads = n_heads
@@ -119,6 +121,8 @@ class SequenceFitterArgs(BaseArgs):
                             help='Fix these parameters to the values set in the initial scene file.')
 
         # Sequence encoder model parameters
+        group.add_argument('--seq-encoder-model', type=str, default='transformer', choices=['transformer', 'ffn'],
+                           help='Sequence encoder model to use.')
         group.add_argument('--hidden-dim', type=int, default=256,
                            help='Hidden dimension of the transformer encoder.')
         group.add_argument('--n-layers', type=int, default=4,
