@@ -843,7 +843,6 @@ class SequenceFitter:
                 param_dim=self.n_parameters,
                 hidden_dim=sa.hidden_dim,
                 n_layers=sa.n_layers,
-                max_freq=sa.max_freq,
                 dropout=sa.dropout,
                 activation=sa.activation,
             )
