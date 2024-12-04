@@ -2,11 +2,12 @@ import multiprocessing as mp
 import os
 import time
 from pathlib import Path
-from queue import Empty, Full
+from queue import Empty
 from typing import Any, Dict, List, Tuple
 
 import mitsuba as mi
 import numpy as np
+import torch
 from torch import Tensor
 
 from crystalsizer3d import N_WORKERS, logger
@@ -98,31 +99,30 @@ def refiner_worker(
             idx += n
         return parameters
 
-    def calculate_gradients(
+    def calculate_losses(
             refiner_args: RefinerArgs,
             p_vec: Tensor,
-            X_target: Tensor,
-            X_target_denoised: Tensor,
+            X_target: Path,
+            X_target_denoised: Path,
             X_target_wis: Tensor,
             X_target_denoised_wis: Tensor,
             keypoints: Tensor | None,
     ):
         """
-        Calculate gradients for the given parameters and targets
+        Calculate losses for the given parameters and targets
         """
         # Update args
         refiner.args = refiner_args
 
         # Update targets
         refiner.X_target = X_target
-        refiner.X_target_denoised = X_target_denoised.to(refiner.device)
+        refiner.X_target_denoised = X_target_denoised
         refiner.X_target_wis = X_target_wis.to(refiner.device)
         refiner.X_target_denoised_wis = X_target_denoised_wis.to(refiner.device)
         if refiner_args.use_keypoints:
             refiner.keypoint_targets = keypoints
 
         # Update scene and crystal parameters
-        p_vec.requires_grad = True
         p_dict = _parameter_vector_to_dict(p_vec)
         for k, v in p_dict.items():
             if k == 'light_radiance':
@@ -132,15 +132,11 @@ def refiner_worker(
 
         # Calculate losses
         loss, stats = refiner.process_step(add_noise=False)
-        loss.backward()
-
-        # Accumulate gradients
-        p_grads = p_vec.grad.clone()
 
         # Return the rendered image if it was generated
         X_pred = refiner.X_pred if refiner_args.use_inverse_rendering else None
 
-        return loss, stats, p_grads, X_pred
+        return loss, stats, X_pred
 
     while not stop_event.is_set() and not global_stop_event.is_set():
         try:
@@ -156,23 +152,39 @@ def refiner_worker(
         # Update the refiner step
         refiner.step = job['step']
 
-        # Generate the result
-        loss, stats, p_grads, X_pred = calculate_gradients(
+        # Load the parameters and enable gradient tracking if required
+        p_vec = init_tensor(job['p_vec'])
+        if job['calculate_grads']:
+            p_vec.requires_grad = True
+        else:
+            grad_enabled = torch.is_grad_enabled()
+            torch.set_grad_enabled(False)
+
+        # Calculate the losses
+        loss, stats, X_pred = calculate_losses(
             refiner_args=RefinerArgs.from_args(job['refiner_args']),
-            p_vec=init_tensor(job['p_vec']),
-            X_target=init_tensor(job['X_target']),
-            X_target_denoised=init_tensor(job['X_target_denoised']),
+            p_vec=p_vec,
+            X_target=job['X_target'],
+            X_target_denoised=job['X_target_denoised'],
             X_target_wis=init_tensor(job['X_target_wis']),
             X_target_denoised_wis=init_tensor(job['X_target_denoised_wis']),
             keypoints=init_tensor(job['keypoints']) if job['keypoints'] is not None else None
         )
+
+        # Calculate grads
+        if job['calculate_grads']:
+            loss.backward()
+            p_grads = to_numpy(p_vec.grad.clone())
+        else:
+            p_grads = None
+            torch.set_grad_enabled(grad_enabled)  # Reset the gradient tracking
 
         # Return the result through the response queue
         response_queue.put({
             'batch_idx': job['batch_idx'],
             'loss': loss.item(),
             'stats': stats,
-            'p_grads': to_numpy(p_grads),
+            'p_grads': p_grads,
             'X_pred': to_numpy(X_pred) if X_pred is not None else None,
             'crystal': scene.crystal.to_dict(),
             'projector_zoom': orthographic_scale_factor(scene),
@@ -188,7 +200,6 @@ class RefinerPool:
             fixed_parameters: Dict[str, Tensor],
             seed: int | None,
             plotter: SequencePlotter,
-
             n_workers: int = N_WORKERS,
             queue_size: int = 100
     ):
@@ -254,16 +265,17 @@ class RefinerPool:
                 time.sleep(1)
             logger.info('Refiner workers ready.')
 
-    def calculate_grads(
+    def calculate_losses(
             self,
             step: int,
             refiner_args: RefinerArgs,
             p_vec_batch: Tensor,
-            X_target: Tensor,
-            X_target_denoised: Tensor,
+            X_target: List[Path],
+            X_target_denoised: List[Path],
             X_target_wis: Tensor,
             X_target_denoised_wis: Tensor,
             keypoints: List[Tensor] | None,
+            calculate_grads: bool,
             save_annotations: bool,
             save_renders: bool,
             X_preds_paths: List[Path],
@@ -282,11 +294,12 @@ class RefinerPool:
                 'batch_idx': idx,
                 'refiner_args': refiner_args.to_dict(),
                 'p_vec': to_numpy(p_vec_batch[idx]),
-                'X_target': to_numpy(X_target[idx]),
-                'X_target_denoised': to_numpy(X_target_denoised[idx]),
+                'X_target': X_target[idx],
+                'X_target_denoised': X_target_denoised[idx],
                 'X_target_wis': to_numpy(X_target_wis[idx]),
                 'X_target_denoised_wis': to_numpy(X_target_denoised_wis[idx]),
-                'keypoints': keypoints[idx]
+                'keypoints': keypoints[idx],
+                'calculate_grads': calculate_grads,
             }
             self.job_queue.put(job, block=True)
 
@@ -319,6 +332,9 @@ class RefinerPool:
         results = sorted(results, key=lambda x: x['batch_idx'])
         losses = init_tensor([r['loss'] for r in results])
         stats = {k: [r['stats'][k] for r in results] for k in results[0]['stats']}
-        p_grads = init_tensor(np.stack([r['p_grads'] for r in results]))
+        if calculate_grads:
+            p_grads = init_tensor(np.stack([r['p_grads'] for r in results]))
+        else:
+            p_grads = None
 
         return losses, stats, p_grads

@@ -1294,6 +1294,8 @@ class Refiner:
         # Crop to match the zoomed-in rendered region
         if is_cropped:
             X_target = self.X_target_denoised if self.X_target_denoised is not None else self.X_target
+            if isinstance(X_target, Path):
+                X_target = to_tensor(Image.open(X_target)).permute(1, 2, 0).to(self.device)
             full_size = X_target.shape[0]
             tl2 = ((cp - region_size / 2) * full_size).round().int().tolist()
             crop_size = round(region_size * full_size)

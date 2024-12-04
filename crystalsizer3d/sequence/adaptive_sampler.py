@@ -35,5 +35,5 @@ class AdaptiveSampler:
         Sample frames according to the adaptive probabilities.
         """
         probabilities = self.get_sampling_probabilities()
-        frame_indices = torch.multinomial(probabilities, batch_size, replacement=False)
-        return frame_indices
+        frame_idxs = torch.multinomial(probabilities, batch_size, replacement=False)
+        return frame_idxs

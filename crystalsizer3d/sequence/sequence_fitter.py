@@ -18,6 +18,7 @@ from matplotlib.figure import Figure
 from timm.optim import create_optimizer_v2
 from timm.scheduler import create_scheduler_v2
 from torch import Tensor, nn
+from torch.utils.data import DataLoader
 from torch.utils.tensorboard import SummaryWriter
 from torchvision.transforms.functional import center_crop, to_tensor
 
@@ -37,7 +38,7 @@ from crystalsizer3d.sequence.refiner_pool import RefinerPool
 from crystalsizer3d.sequence.sequence_encoder import SequenceEncoder
 from crystalsizer3d.sequence.sequence_encoder_ffn import SequenceEncoderFFN
 from crystalsizer3d.sequence.sequence_plotter import SequencePlotter
-from crystalsizer3d.sequence.utils import get_image_paths
+from crystalsizer3d.sequence.utils import get_image_paths, load_manual_measurements
 from crystalsizer3d.util.utils import FlexibleJSONEncoder, calculate_model_norm, get_crystal_face_groups, hash_data, \
     init_tensor, is_bad, json_to_torch, set_seed, to_dict, to_numpy
 
@@ -55,6 +56,8 @@ mi.set_log_level(mi.LogLevel.Error)
 
 
 class SequenceFitter:
+    dataloader: DataLoader
+
     def __init__(
             self,
             sf_args: SequenceFitterArgs,
@@ -79,6 +82,8 @@ class SequenceFitter:
 
         # Initialise the refiner and the asynchronous plotter
         self._init_refiner()
+        self.refiner_pool = None  # Instantiated on demand
+        self._load_manual_measurements()
         self._init_plotter()
 
         # Initialise the target data
@@ -100,9 +105,6 @@ class SequenceFitter:
 
         # Initialise the sequence encoder
         self._init_sequence_encoder()
-
-        # Load any manual measurements
-        self._load_manual_measurements()
 
     def _init_output_dirs(self):
         """
@@ -156,6 +158,18 @@ class SequenceFitter:
         self.manager = self.refiner.manager
         self.device = self.refiner.device
 
+    def _load_manual_measurements(self):
+        """
+        Load manual measurements from the measurements directory.
+        """
+        measurements_dir = self.runtime_args.measurements_dir
+        if measurements_dir is None:
+            return
+        self.measurements = load_manual_measurements(
+            measurements_dir=measurements_dir,
+            manager=self.manager
+        )
+
     def _init_plotter(self):
         """
         Instantiate the asynchronous plotter.
@@ -163,6 +177,7 @@ class SequenceFitter:
         self.plotter = SequencePlotter(
             n_workers=self.runtime_args.n_plotting_workers,
             queue_size=self.runtime_args.plot_queue_size,
+            measurements=self.measurements
         )
         self.plotter.wait_for_workers()
 
@@ -727,20 +742,45 @@ class SequenceFitter:
         Instantiate the losses.
         """
         losses_path = self.path / 'losses.json'
+        losses_init = {
+            'train': {
+                'total': np.zeros(len(self), dtype=np.float32),
+                'measurement': np.zeros(len(self), dtype=np.float32),
+            },
+            'eval': {
+                'total': np.zeros(len(self), dtype=np.float32),
+                'measurement': np.zeros(len(self), dtype=np.float32),
+            },
+            'log': {
+                'train': [],
+                'eval': [],
+            },
+        }
         if losses_path.exists():
             with open(losses_path, 'r') as f:
                 self.losses = json_to_torch(json.load(f))
+
+            # Ensure the losses is in correct format
+            if 'train' not in self.losses or 'eval' not in self.losses:
+                losses = losses_init.copy()
+                for k, v in self.losses.items():
+                    if k == 'training':
+                        losses['log']['train'] = v
+                        continue
+                    k_parts = k.split('/')
+                    if k_parts[0] == 'total':
+                        continue
+                    if k_parts[0] == 'losses':
+                        k_parts = k_parts[1:]
+                    losses['train']['/'.join(k_parts)] = v
+                self.losses = losses
+
             logger.info(f'Loaded losses from {losses_path}.')
             return
 
         logger.info(f'Initialising losses at {losses_path}.')
-        losses = {
-            'total/train': np.zeros(len(self), dtype=np.float32),
-            'total/eval': np.zeros(len(self), dtype=np.float32),
-            'training': []
-        }
         with open(losses_path, 'w') as f:
-            json.dump(losses, f, cls=FlexibleJSONEncoder)
+            json.dump(losses_init, f, cls=FlexibleJSONEncoder)
         return self._init_losses()
 
     def _init_frame_counts(self):
@@ -930,70 +970,6 @@ class SequenceFitter:
         self.update_parameters_from_encoder()
         self.update_X_preds_from_parameters()
 
-    def _load_manual_measurements(self):
-        """
-        Load manual measurements from the measurements directory.
-        """
-        self.measurements = None
-        measurements_dir = self.runtime_args.measurements_dir
-        if measurements_dir is None:
-            return
-        assert measurements_dir.exists(), f'Measurements directory {measurements_dir} does not exist.'
-        mi_ref = self.manager.crystal.all_miller_indices
-
-        # Expect measurements dir to contain files like XXXX.json
-        keys = ['idx', ] + [k for k in PARAMETER_KEYS if k != 'light_radiance']
-        measurements = {k: [] for k in keys}
-        for file_path in measurements_dir.iterdir():
-            if file_path.suffix != '.json':
-                continue
-            crystal = Crystal.from_json(file_path)
-            idx = int(file_path.stem)
-            for k in keys:
-                if k == 'idx':
-                    measurements[k].append(idx)
-                elif k == 'distances':
-                    mi = crystal.all_miller_indices
-                    mi_idxs = ((mi[None, ...] == mi_ref[:, None]).all(dim=2)).nonzero(as_tuple=True)[1]
-                    measurements[k].append(to_numpy(crystal.distances[mi_idxs]))
-                elif k == 'origin':
-                    # Adjust the origin so that the crystal's smallest z-coordinate is at z=0
-                    z_offset = crystal.vertices.amin(dim=0)[2]
-                    measurements[k].append(to_numpy(crystal.origin - torch.tensor([0, 0, z_offset])))
-                else:
-                    measurements[k].append(to_numpy(getattr(crystal, k)))
-        for k in keys:
-            measurements[k] = np.array(measurements[k])
-
-        # Fix the origin for the automatic measurements to match the manual measurements
-        ds = self.manager.ds
-        cs = CSDProxy().load(ds.dataset_args.crystal_id)
-        crystal = Crystal(
-            lattice_unit_cell=cs.lattice_unit_cell,
-            lattice_angles=cs.lattice_angles,
-            miller_indices=ds.miller_indices,
-            point_group_symbol=cs.point_group_symbol,
-        )
-
-        def adjust_distances(distances_old, origin_old):
-            distances_new = np.zeros_like(distances_old)
-            for i in range(len(origin_old)):
-                crystal.distances.data = init_tensor(distances_old[i])
-                crystal.origin.data = init_tensor(origin_old[i])
-                crystal.adjust_origin(origin0, verify=False)
-                distances_new[i] = to_numpy(crystal.distances)
-            return distances_new
-
-        # Use the origin from the first measured frame for all other frames
-        origin0 = init_tensor(measurements['origin'][0])
-
-        # Ensure the measurements all have the same origin
-        if len(np.unique(measurements['origin'], axis=0)) != 1:
-            measurements['distances'] = adjust_distances(measurements['distances'], measurements['origin'])
-            measurements['origin'] = np.repeat(origin0[None, ...], len(measurements['origin']), axis=0)
-
-        self.measurements = measurements
-
     def fit(self):
         """
         Train the sequence encoder to fit the sequence.
@@ -1011,10 +987,10 @@ class SequenceFitter:
         )
         for i in range(N):
             if self.frame_counts[i] > 0:
-                sampler.emas[i].val = self.losses['total/train'][i].item()
+                sampler.emas[i].val = self.losses['train']['total'][i].item()
 
         # Dataset
-        dataloader = get_data_loader(
+        self.dataloader = get_data_loader(
             sequence_fitter=self,
             adaptive_sampler=sampler,
             batch_size=bs,
@@ -1041,10 +1017,9 @@ class SequenceFitter:
         use_inverse_rendering = self.refiner_args.use_inverse_rendering  # Save the inverse rendering setting
 
         # Set up the refiner pool
-        refiner_pool = None
         if ra.n_refiner_workers > 0:
             logger.info('Initialising refiner pool.')
-            refiner_pool = RefinerPool(
+            self.refiner_pool = RefinerPool(
                 refiner_args=self.refiner_args,
                 output_dir=self.refiner.output_dir,
                 initial_scene_dict=scene.to_dict(),
@@ -1054,10 +1029,10 @@ class SequenceFitter:
                 n_workers=ra.n_refiner_workers,
                 queue_size=ra.refiner_queue_size,
             )
-            refiner_pool.wait_for_workers()
+            self.refiner_pool.wait_for_workers()
 
         # Determine how many steps have been completed from the frame counts
-        start_step = len(self.losses['training'])
+        start_step = len(self.losses['log']['train'])
         # assert start_step == int(self.frame_counts.sum() / bs), 'Frame counts and training losses do not match.'
         if start_step > 0:
             logger.info(f'Resuming training from step {start_step}.')
@@ -1067,7 +1042,7 @@ class SequenceFitter:
         running_loss = 0.
         running_tps = 0
         step = start_step - 1
-        for batch_idxs, batch in dataloader:
+        for batch_idxs, batch in self.dataloader:
             step += 1
             start_time = time.time()
             self.sequence_encoder.train()
@@ -1084,8 +1059,8 @@ class SequenceFitter:
             self.refiner_args.use_inverse_rendering = use_inverse_rendering and step >= self.refiner_args.ir_wait_n_steps
 
             # Calculate the gradients in parallel using the refiner pool
-            if refiner_pool is not None:
-                losses_batch, stats_batch, p_grads = refiner_pool.calculate_grads(
+            if self.refiner_pool is not None:
+                losses_batch, stats_batch, p_grads = self.refiner_pool.calculate_losses(
                     step=step,
                     refiner_args=self.refiner_args,
                     p_vec_batch=parameters_pred,
@@ -1094,6 +1069,7 @@ class SequenceFitter:
                     X_target_wis=batch[2],
                     X_target_denoised_wis=batch[3],
                     keypoints=[self.keypoints[idx]['keypoints'] for idx in batch_idxs],
+                    calculate_grads=True,
                     save_annotations=ra.save_annotations_freq > 0 and (step + 1) % ra.save_annotations_freq == 0,
                     save_renders=ra.save_renders_freq > 0 and (step + 1) % ra.save_renders_freq == 0,
                     X_preds_paths=[self.X_preds['train'][idx] for idx in batch_idxs],
@@ -1107,13 +1083,22 @@ class SequenceFitter:
                     p_dict = self._parameter_vectors_to_dict(parameters_pred)
                     for i, idx in enumerate(batch_idxs):
                         self.frame_counts[idx] += 1
-                        self.losses['total/train'][idx] = losses_batch[i].item()
+                        self.losses['train']['total'][idx] = losses_batch[i].item()
                         for k, v in stats_batch.items():
-                            if k not in self.losses:
-                                self.losses[k] = torch.zeros(N)
-                            self.losses[k][idx] = float(v[i])
+                            k = k if k[:7] != 'losses/' else k[7:]
+                            if k not in self.losses['train']:
+                                self.losses['train'][k] = torch.zeros(N)
+                            self.losses['train'][k][idx] = float(v[i])
                         for k, v in p_dict.items():
                             self.parameters['train'][k][idx] = v[i].clone().detach().cpu()
+
+                        # Calculate the measurement loss
+                        if self.measurements is not None and idx in self.measurements['idx']:
+                            idx_m = np.where(self.measurements['idx'] == idx)[0][0]
+                            dists_m = self.measurements['distances'][idx_m] * self.measurements['scale'][idx_m]
+                            dists_p = to_numpy(p_dict['distances'][i] * p_dict['scale'][i])
+                            loss_m = np.sum((dists_m - dists_p)**2)
+                            self.losses['train']['measurement'][idx] = loss_m.item()
 
             # Loop over the batch and use the refiner to calculate the loss for each frame
             else:
@@ -1148,7 +1133,7 @@ class SequenceFitter:
                     p_grads[i] = p_vec.grad.clone()
 
                     # Update sequence state
-                    self.losses['total/train'][idx] = loss_i.item()
+                    self.losses['train']['total'][idx] = loss_i.item()
                     self.frame_counts[idx] += 1
                     if self.refiner_args.use_inverse_rendering:
                         self.plotter.save_image(self.refiner.X_pred, self.X_preds['train'][idx])
@@ -1176,11 +1161,15 @@ class SequenceFitter:
             # Update the adaptive sampler and log the total sequence loss estimate
             loss = losses_batch.mean().item()
             sampler.update_errors(batch_idxs, losses_batch)
-            seq_loss = sampler.errors.sum().item()
-            self.losses['training'] = torch.concatenate([self.losses['training'], torch.tensor(seq_loss)[None, ...]])
-            self.tb_logger.add_scalar('losses/seq_train', self.losses['total/train'].sum().item(), step)
-            self.tb_logger.add_scalar('losses/seq_train_ema', seq_loss, step)
+            seq_loss_ema = sampler.errors.sum().item()
+            seq_loss = self.losses['train']['total'].sum().item()
+            mes_loss = self.losses['train']['measurement'].sum().item()
+            self.losses['log']['train'] = torch.concatenate([self.losses['log']['train'],
+                                                             torch.tensor(seq_loss)[None, ...]])
+            self.tb_logger.add_scalar('losses/seq_train', seq_loss, step)
+            self.tb_logger.add_scalar('losses/seq_train_ema', seq_loss_ema, step)
             self.tb_logger.add_scalar('losses/step', loss, step)
+            self.tb_logger.add_scalar('losses/measurement_train', mes_loss, step)
 
             # Log learning rate and update
             self.tb_logger.add_scalar('lr', self.optimiser.param_groups[0]['lr'], step)
@@ -1214,7 +1203,7 @@ class SequenceFitter:
             # Plot every X steps
             if (step + 1) % ra.plot_freq == 0:
                 logger.info('Making training plots.')
-                if refiner_pool is None:  # Needs fixing for refiner pool
+                if self.refiner_pool is None:  # Needs fixing for refiner pool
                     image_idx = self.image_idxs[idx].item()
                     fig = self.refiner._plot_comparison()
                     self._save_plot(fig, 'train', 'comparison', image_idx)
@@ -1228,16 +1217,15 @@ class SequenceFitter:
             # Evaluate the sequence every X steps
             if (step + 1) % ra.eval_freq == 0:
                 logger.info('Evaluating the sequence.')
-                self.update_parameters_from_encoder()
+                self.update_parameters_from_encoder(save=False)
+                save_annotations = ra.eval_annotate_freq > 0 and (step + 1) % ra.eval_annotate_freq == 0
+                save_renders = ra.eval_render_freq > 0 and (step + 1) % ra.eval_render_freq == 0
+                self.calculate_evaluation_losses(
+                    save_annotations=save_annotations,
+                    save_renders=save_renders,
+                )
+                self.save()
                 self._plot_parameters('eval')
-                generate_annotations = ra.eval_annotate_freq > 0 and (step + 1) % ra.eval_annotate_freq == 0
-                generate_renders = ra.eval_render_freq > 0 and (step + 1) % ra.eval_render_freq == 0
-                if generate_annotations or generate_renders:
-                    self.update_X_preds_from_parameters(
-                        train_or_eval='eval',
-                        generate_renders=generate_renders,
-                        generate_annotations=generate_annotations
-                    )
                 if ra.eval_video_freq > 0 and (step + 1) % ra.eval_video_freq == 0:
                     logger.info('Generating evaluation video.')
                     self._generate_video(train_or_eval='eval')
@@ -1245,7 +1233,7 @@ class SequenceFitter:
         logger.info('Training complete.')
 
     @torch.no_grad()
-    def update_parameters_from_encoder(self, train_or_eval: str = 'eval'):
+    def update_parameters_from_encoder(self, train_or_eval: str = 'eval', save: bool = True):
         """
         Generate the parameters for the sequence using the encoder.
         """
@@ -1266,7 +1254,87 @@ class SequenceFitter:
             for k, v in parameters_i.items():
                 self.parameters[train_or_eval][k][i * bs:(i + 1) * bs] = v.detach().cpu().clone().squeeze()
         self.sequence_encoder.eval()  # Ensure the encoder is returned to eval mode
-        self.save()
+        if save:
+            self.save()
+
+    @torch.no_grad()
+    def calculate_evaluation_losses(
+            self,
+            save_annotations: bool = True,
+            save_renders: bool = True
+    ):
+        """
+        Calculate the evaluation losses.
+        """
+        logger.info(f'Calculating evaluation losses.')
+        ds = self.dataloader.dataset
+        step = self.refiner.step
+
+        # Disable the cropping so the renders are generated at full size
+        crop_renders = self.refiner_args.crop_render
+        self.refiner_args.crop_render = False
+
+        # Process the entire sequence in batches
+        bs = min(len(self), self.runtime_args.n_refiner_workers * 4)
+        n_batches = math.ceil(len(self) / bs)
+        log_freq = int(n_batches / 4)
+        for i in range(n_batches):
+            if (i + 1) % log_freq == 0:
+                logger.info(f'Calculating evaluation losses for frame batch {i + 1}/{n_batches}.')
+
+            # Load the batch
+            batch_idxs = list(range(i * bs, min((i + 1) * bs, len(self))))
+            p_vec_batch = torch.stack([
+                self.get_parameter_vector(idx) for idx in batch_idxs
+            ]).to(self.device)
+            p_dict_batch = self._parameter_vectors_to_dict(p_vec_batch)
+            X_batch = [ds[idx] for idx in batch_idxs]
+
+            # Calculate losses and stats
+            losses_batch, stats_batch, _ = self.refiner_pool.calculate_losses(
+                step=step,
+                refiner_args=self.refiner_args,
+                p_vec_batch=p_vec_batch,
+                X_target=[X[0] for X in X_batch],
+                X_target_denoised=[X[1] for X in X_batch],
+                X_target_wis=torch.stack([X[2] for X in X_batch]).permute(0, 2, 3, 1),
+                X_target_denoised_wis=torch.stack([X[3] for X in X_batch]).permute(0, 2, 3, 1),
+                keypoints=[self.keypoints[idx]['keypoints'] for idx in batch_idxs],
+                calculate_grads=False,
+                save_annotations=save_annotations,
+                save_renders=save_renders,
+                X_preds_paths=[self.X_preds['eval'][idx] for idx in batch_idxs],
+                X_targets_paths=[self.X_targets[idx] for idx in batch_idxs],
+                X_targets_annotated_paths=[self.X_targets_annotated['eval'][idx] for idx in batch_idxs],
+            )
+
+            # Update scene and crystal parameters
+            for j, idx in enumerate(batch_idxs):
+                self.losses['eval']['total'][idx] = losses_batch[j].item()
+                for k, v in stats_batch.items():
+                    k = k if k[:7] != 'losses/' else k[7:]
+                    if k not in self.losses['eval']:
+                        self.losses['eval'][k] = torch.zeros(len(self))
+                    self.losses['eval'][k][idx] = float(v[j])
+
+                # Calculate the measurement loss
+                if self.measurements is not None and idx in self.measurements['idx']:
+                    idx_m = np.where(self.measurements['idx'] == idx)[0][0]
+                    dists_m = self.measurements['distances'][idx_m] * self.measurements['scale'][idx_m]
+                    dists_p = to_numpy(p_dict_batch['distances'][j] * p_dict_batch['scale'][j])
+                    loss_m = np.sum((dists_m - dists_p)**2)
+                    self.losses['eval']['measurement'][idx] = loss_m.item()
+
+        # Restore the cropping setting
+        self.refiner_args.crop_render = crop_renders
+
+        # Log the total sequence loss
+        seq_loss = self.losses['eval']['total'].sum().item()
+        mes_loss = self.losses['eval']['measurement'].sum().item()
+        self.losses['log']['eval'] = torch.concatenate([self.losses['log']['eval'],
+                                                        torch.tensor(seq_loss)[None, ...]])
+        self.tb_logger.add_scalar('losses/seq_eval', seq_loss, step)
+        self.tb_logger.add_scalar('losses/measurement_eval', mes_loss, step)
 
     @torch.no_grad()
     def update_X_preds_from_parameters(
@@ -1305,14 +1373,13 @@ class SequenceFitter:
             plot_dir=self.path / 'plots' / train_or_eval,
             step=self.refiner.step,
             parameters=self.parameters[train_or_eval],
-            measurements=self.measurements,
             image_paths=self.image_paths,
             face_groups=get_crystal_face_groups(self.refiner.manager)
         )
         self.plotter.plot_sequence_losses(
             plot_dir=self.path / 'plots' / train_or_eval,
             step=self.refiner.step,
-            losses=self.losses,
+            losses=self.losses[train_or_eval],
             image_paths=self.image_paths,
         )
 
