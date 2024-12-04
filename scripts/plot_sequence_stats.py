@@ -2,16 +2,35 @@ import json
 import os
 from argparse import ArgumentParser, Namespace
 from pathlib import Path
-from typing import Tuple
+from typing import List, Optional, Tuple
 
+import cv2
+import matplotlib.lines as mlines
+import matplotlib.ticker as mticker
 import numpy as np
+import torch
 import yaml
+from PIL import Image
 from matplotlib import pyplot as plt
+from mayavi import mlab
+from trimesh import Trimesh
 
 from crystalsizer3d import LOGS_PATH, START_TIMESTAMP, logger
+from crystalsizer3d.args.refiner_args import RefinerArgs
+from crystalsizer3d.args.sequence_fitter_args import SequenceFitterArgs
+from crystalsizer3d.crystal import Crystal
+from crystalsizer3d.csd_proxy import CSDProxy
+from crystalsizer3d.nn.manager import Manager
 from crystalsizer3d.scene_components.scene import Scene
+from crystalsizer3d.sequence.plots import get_colour_variations, get_face_group_colours, get_hkl_label, line_styles, \
+    marker_styles
+from crystalsizer3d.sequence.utils import get_image_paths, load_manual_measurements
 from crystalsizer3d.util.plots import make_3d_digital_crystal_image
-from crystalsizer3d.util.utils import json_to_numpy, print_args, set_seed, to_dict
+from crystalsizer3d.util.utils import get_crystal_face_groups, init_tensor, json_to_numpy, print_args, set_seed, \
+    to_dict, to_numpy, to_rgb
+
+# Off-screen rendering
+mlab.options.offscreen = True
 
 
 def get_args() -> Namespace:
@@ -31,6 +50,8 @@ def get_args() -> Namespace:
                         help='End with this image.')
     parser.add_argument('--frame-idxs', type=lambda s: (int(i) for i in s.split(',')), default=(3, 100, 502),
                         help='Plot these frame idxs.')
+    parser.add_argument('--interval-mins', type=int, default=5,
+                        help='Interval in minutes between frames.')
 
     args = parser.parse_args()
 
@@ -60,9 +81,42 @@ def _init() -> Tuple[Namespace, Path]:
     return args, output_dir
 
 
-def plot_sequence_errors():
+def _get_ts(x_vals: np.ndarray, interval: int) -> List[float]:
     """
-    Plot the sequence errors.
+    Get the timestamps as cumulative seconds.
+    """
+    ts = [interval * 60 * i for i in range(len(x_vals))]  # Store cumulative time in seconds
+    return ts
+
+
+def _format_xtime(ax: plt.Axes, ts: List[float], add_xlabel: bool = True):
+    """
+    Format the x-axis label with cumulative hours.
+    """
+
+    def format_func(x, _):
+        hours = int(x // 3600)  # Convert seconds to hours
+        return f'{hours}'
+
+    ax.xaxis.set_major_formatter(mticker.FuncFormatter(format_func))
+
+    # Automatically set major ticks at 6 or 12-hour intervals, depending on the length
+    max_hours = ts[-1] / 3600  # Total hours
+    if max_hours <= 30:
+        interval = 6  # Use 6-hour intervals for shorter time ranges
+    else:
+        interval = 12  # Use 12-hour intervals for longer time ranges
+
+    ax.xaxis.set_major_locator(mticker.MultipleLocator(base=interval * 3600))  # Set major ticks every interval hours
+
+    ax.set_xlim([ts[0], ts[-1]])
+    if add_xlabel:
+        ax.set_xlabel('Hours elapsed')
+
+
+def plot_sequence_errors_for_sampler():
+    """
+    Plot the sequence errors as a bar chart for illustrating the adaptive sampler.
     """
     args, output_dir = _init()
     bs = 5
@@ -83,10 +137,11 @@ def plot_sequence_errors():
     for idx in sampled_idxs:
         colours[idx] = 'darkred'
 
-    fig, ax = plt.subplots(1, 1,
-                           figsize=(0.85, 0.47),
-                           gridspec_kw={'left': 0.1, 'right': 0.9, 'top': 0.9, 'bottom': 0.1}
-                           )
+    fig, ax = plt.subplots(
+        1, 1,
+        figsize=(0.85, 0.47),
+        gridspec_kw={'left': 0.1, 'right': 0.9, 'top': 0.9, 'bottom': 0.1}
+    )
     # fig = plt.figure(figsize=(5, 3))
     ax.bar(range(len(losses)), losses, color=colours)
     ax.set_xticks([])
@@ -119,7 +174,495 @@ def plot_3d_crystals():
         dig_pred.save(output_dir / f'digital_predicted_{idx:02d}.png')
 
 
+def plot_sequence_losses():
+    """
+    Plot the sequence losses.
+    """
+    args, output_dir = _init()
+
+    # Load the losses
+    with open(args.sf_path / 'losses.json', 'r') as f:
+        losses = json_to_numpy(json.load(f))
+    lm = losses['measurement']
+    l2 = losses['losses/l2']
+    lkp = losses['losses/keypoints']
+
+    fig, ax = plt.subplots(
+        1, 1,
+        figsize=(10, 5),
+        gridspec_kw={'left': 0.1, 'right': 0.9, 'top': 0.9, 'bottom': 0.1}
+    )
+    # fig = plt.figure(figsize=(5, 3))
+    ax.plot(losses)
+    ax.set_xticks([])
+    ax.set_yticks([])
+
+    # plt.savefig(output_dir / 'sequence_losses.svg')
+    plt.show()
+
+
+def plot_distances_and_areas():
+    """
+    Plot the distances.
+    """
+    args, output_dir = _init()
+    show_n = 5000
+
+    # Load the args
+    with open(args.sf_path / 'args_sequence_fitter.yml', 'r') as f:
+        sf_args = SequenceFitterArgs.from_args(yaml.load(f, Loader=yaml.FullLoader))
+    with open(args.sf_path / 'args_refiner.yml', 'r') as f:
+        ref_args = RefinerArgs.from_args(yaml.load(f, Loader=yaml.FullLoader))
+    with open(args.sf_path / 'args_runtime.yml', 'r') as f:
+        runtime_args = Namespace(**yaml.load(f, Loader=yaml.FullLoader))
+
+    # Instantiate a manager
+    manager = Manager.load(
+        model_path=ref_args.predictor_model_path,
+        args_changes={
+            'runtime_args': {
+                'use_gpu': False,
+                'batch_size': 1
+            },
+        },
+        save_dir=output_dir
+    )
+
+    # Load the measurements
+    logger.info(f'Loading manual measurements from {runtime_args.measurements_dir}')
+    measurements = load_manual_measurements(
+        measurements_dir=Path(runtime_args.measurements_dir),
+        manager=manager
+    )
+    measurement_idxs = measurements['idx']
+    distances_m = measurements['distances']
+    scales_m = measurements['scale']
+
+    # Get a crystal object
+    ds = manager.ds
+    cs = CSDProxy().load(ds.dataset_args.crystal_id)
+    crystal = Crystal(
+        lattice_unit_cell=cs.lattice_unit_cell,
+        lattice_angles=cs.lattice_angles,
+        miller_indices=ds.miller_indices,
+        point_group_symbol=cs.point_group_symbol,
+        dtype=torch.float64
+    )
+
+    # Load the parameters
+    param_path = args.sf_path / 'parameters.json'
+    logger.info(f'Loading parameters from {param_path}.')
+    with open(param_path, 'r') as f:
+        parameters = json_to_numpy(json.load(f))
+    distances = parameters['eval']['distances'][:show_n]
+    scales = parameters['eval']['scale'][:show_n]
+
+    # Calculate the face areas
+    logger.info('Calculating face areas.')
+    areas = np.zeros_like(distances)
+    for i in range(len(distances)):
+        crystal.build_mesh(distances=init_tensor(distances[i], dtype=torch.float64))
+        unscaled_areas = np.array([crystal.areas[tuple(hkl.tolist())] for hkl in crystal.all_miller_indices])
+        areas[i] = unscaled_areas * scales[i]**2
+
+    # Calculate the face areas for the manual measurements
+    logger.info('Calculating face areas for the manual measurements.')
+    areas_m = np.zeros_like(distances_m)
+    for i in range(len(distances_m)):
+        crystal.build_mesh(distances=init_tensor(distances_m[i], dtype=torch.float64))
+        unscaled_areas_m = np.array([crystal.areas[tuple(hkl.tolist())] for hkl in crystal.all_miller_indices])
+        areas_m[i] = unscaled_areas_m * scales_m[i]**2
+
+    # Set up some variables
+    logger.info('Setting up plot variables.')
+    face_groups = get_crystal_face_groups(manager)
+    image_paths = get_image_paths(sf_args, load_all=True)[:show_n]
+    x_vals = [idx for idx, _ in image_paths]
+    n_groups = len(face_groups)
+    group_colours = get_face_group_colours(n_groups)
+
+    # Restrict the measurements to within the range predicted
+    include_mask = np.array([x_vals[0] <= idx <= x_vals[-1] for idx in measurement_idxs])
+    measurement_idxs = measurement_idxs[include_mask]
+    distances_m = distances_m[include_mask]
+    scales_m = scales_m[include_mask]
+    areas_m = areas_m[include_mask]
+
+    # Get the timestamps
+    ts = _get_ts(x_vals, args.interval_mins)
+    m_idxs = np.array([(x_vals == m_idx).nonzero()[0] for m_idx in measurement_idxs]).squeeze()
+    m_ts = [ts[m_idx] for m_idx in m_idxs]
+
+    # Set font sizes
+    plt.rc('axes', titlesize=7, titlepad=1)  # fontsize of the title
+    plt.rc('axes', labelsize=6, labelpad=1)  # fontsize of the x and y labels
+    plt.rc('xtick', labelsize=6)  # fontsize of the x tick labels
+    plt.rc('ytick', labelsize=6)  # fontsize of the y tick labels
+    plt.rc('legend', fontsize=7)  # fontsize of the legend
+    plt.rc('xtick.major', pad=2, size=2)
+    plt.rc('xtick.minor', pad=2, size=1)
+    plt.rc('ytick.major', pad=1, size=2)
+    plt.rc('axes', linewidth=0.5)
+
+    def format_tick(value, _):
+        return f'{value:.2g}'
+
+    # Make a grid of plots showing the values for each face group
+    n_cols = 6  # int(np.ceil(np.sqrt(n_groups)))
+    n_rows = 2  # int(np.ceil(n_groups / n_cols))
+    fig, axes = plt.subplots(
+        n_rows, n_cols,
+        figsize=(5, 1.6),
+        gridspec_kw=dict(
+            top=0.92, bottom=0.13, right=0.99, left=0.05,
+            hspace=0.1, wspace=0.4
+        ),
+    )
+    for i, (group_hkl, group_idxs) in enumerate(face_groups.items()):
+        logger.info(f'Plotting group {i + 1}/{n_groups}')
+        colour = group_colours[i]
+        colour_variants = get_colour_variations(colour, len(group_idxs))
+        lbls = [get_hkl_label(hkl) for hkl in list(group_idxs.keys())]
+
+        axd = axes[0, i]
+        axa = axes[1, i]
+        axd.set_title(get_hkl_label(group_hkl, is_group=True))
+        d = distances[:, list(group_idxs.values())] * scales[:, None]
+        dm = distances_m[:, list(group_idxs.values())] * scales_m[:, None]
+        a = areas[:, list(group_idxs.values())]
+        am = areas_m[:, list(group_idxs.values())]
+
+        for ax, y, y_m in zip([axd, axa], [d, a], [dm, am]):
+            _format_xtime(ax, ts, add_xlabel=(ax == axa))
+            for j, (y_j, lbl, colour_j) in enumerate(zip(y.T, lbls, colour_variants)):
+                ax.plot(ts, y_j, label=lbl, c=colour_j,
+                        linestyle=line_styles[j % len(line_styles)], linewidth=0.4, alpha=0.8)
+                marker = marker_styles[j % len(marker_styles)]
+                scatter_args = dict(
+                    label=lbl + ' (manual)',
+                    color=colour_j,
+                    marker=marker,
+                    alpha=0.8,
+                    linewidth=0.2
+                )
+                if marker in ['o', 's']:
+                    scatter_args['facecolors'] = 'none'
+                    scatter_args['s'] = 1.5
+                else:
+                    scatter_args['s'] = 2
+                ax.scatter(m_ts, y_m[:, j], **scatter_args)
+
+            if i == 0:
+                ax.set_ylabel('Distance (mm)' if ax == axd else 'Area (mm²)')
+            if ax != axa:
+                ax.tick_params(labelbottom=False)
+            ax.yaxis.set_major_formatter(mticker.FuncFormatter(format_tick))
+
+    plt.savefig(output_dir / 'distances_and_areas.svg', transparent=True)
+    plt.show()
+
+
+def make_3d_digital_crystal_image_with_highlight(
+        crystal: Crystal,
+        highlight_hkls: List[Tuple[int, int, int]],
+        highlight_colours: List[np.ndarray],
+        res: int = 100,
+        bg_col: float = 1.,
+        wireframe_radius_factor: float = 0.1,
+        surface_colour: str = 'skyblue',
+        wireframe_colour: str = 'cornflowerblue',
+        opacity: float = 0.6,
+        opacity_highlight: float = 1,
+        azim: float = 150,
+        elev: float = 160,
+        distance: Optional[float] = None,
+        roll: float = 0
+) -> Image:
+    """
+    Make a 3D image of the crystal.
+    """
+    assert len(highlight_hkls) == len(highlight_colours)
+    fig = mlab.figure(size=(res * 2, res * 2), bgcolor=(bg_col, bg_col, bg_col))
+
+    # Depth peeling required for nice opacity, the rest don't seem to make any difference
+    fig.scene.renderer.use_depth_peeling = True
+    fig.scene.renderer.maximum_number_of_peels = 32
+    fig.scene.render_window.point_smoothing = True
+    fig.scene.render_window.line_smoothing = True
+    fig.scene.render_window.polygon_smoothing = True
+    fig.scene.render_window.multi_samples = 20
+    fig.scene.anti_aliasing_frames = 20
+
+    # Add faces individually
+    for hkl, fv_idxs in crystal.faces.items():
+        fv = to_numpy(crystal.vertices[fv_idxs])
+        cp = fv.mean(axis=0)
+        mfv = np.stack([cp, *fv])
+        N = len(fv)
+        jdx = np.arange(N)
+        mfi = np.stack([np.zeros(N, dtype=np.int64), jdx % N + 1, (jdx + 1) % N + 1], axis=1)
+
+        if hkl in highlight_hkls:
+            colour = tuple(highlight_colours[highlight_hkls.index(hkl)].tolist())
+            opacity_face = opacity_highlight
+        else:
+            colour = to_rgb(surface_colour)
+            opacity_face = opacity
+
+        mlab.triangular_mesh(*mfv.T, mfi, figure=fig, color=colour, opacity=opacity_face)
+
+    # Add wireframe
+    tube_radius = max(0.0001, crystal.distances[0].item() * wireframe_radius_factor)
+    for fv_idxs in crystal.faces.values():
+        fv = to_numpy(crystal.vertices[fv_idxs])
+        fv = np.vstack([fv, fv[0]])  # Close the loop
+        mlab.plot3d(*fv.T, color=to_rgb(wireframe_colour), tube_radius=tube_radius)
+
+    # Render
+    mlab.view(figure=fig, azimuth=azim, elevation=elev, distance=distance, roll=roll, focalpoint=np.zeros(3))
+
+    # # Useful for getting the view parameters when recording from the gui:
+    # mlab.show()
+    # scene = mlab.get_engine().scenes[0]
+    # scene.scene.camera.position = [-3.6962036386805432, 0.6413960469922849, 1.3880525106450643]
+    # scene.scene.camera.focal_point = [0.0, 0.0, 0.0]
+    # scene.scene.camera.view_angle = 30.0
+    # scene.scene.camera.view_up = [0.335754138129981, -0.09354125783100545, 0.9372935462340426]
+    # scene.scene.camera.clipping_range = [1.0143450579340336, 7.546385011525549]
+    # scene.scene.camera.compute_view_plane_normal()
+    # scene.scene.render()
+    # print(mlab.view())  # (azimuth, elevation, distance, focalpoint)
+    # print(mlab.roll())
+    # exit()
+
+    # mlab.show()
+    # exit()
+
+    # fig.scene.render()
+    frame = mlab.screenshot(mode='rgba', antialiased=True, figure=fig)
+    frame = cv2.resize(frame, None, fx=0.5, fy=0.5, interpolation=cv2.INTER_AREA)
+    img = Image.fromarray((frame * 255).astype(np.uint8), 'RGBA')
+
+    mlab.close()
+
+    return img
+
+
+def plot_3d_crystals_with_highlighted_faces():
+    """
+    Plot some 3d crystals with highlighted faces.
+    """
+    args, output_dir = _init()
+    frame_idx = args.frame_idxs[-1]
+
+    # Load the args
+    with open(args.sf_path / 'args_refiner.yml', 'r') as f:
+        ref_args = RefinerArgs.from_args(yaml.load(f, Loader=yaml.FullLoader))
+
+    # Instantiate a manager
+    manager = Manager.load(
+        model_path=ref_args.predictor_model_path,
+        args_changes={
+            'runtime_args': {
+                'use_gpu': False,
+                'batch_size': 1
+            },
+        },
+        save_dir=output_dir
+    )
+
+    # Get the face groups
+    face_groups = get_crystal_face_groups(manager)
+    n_groups = len(face_groups)
+    group_colours = get_face_group_colours(n_groups)
+
+    # Load the template crystal
+    scene = Scene.from_yml(args.sf_path / 'scenes' / 'eval' / f'{frame_idx:04d}.yml')
+    crystal = scene.crystal
+    crystal.origin.data = torch.zeros_like(crystal.origin)
+
+    for i, (group_hkl, group_idxs) in enumerate(face_groups.items()):
+        colour = group_colours[i]
+        colour_variants = get_colour_variations(colour, len(group_idxs))
+        img = make_3d_digital_crystal_image_with_highlight(
+            crystal=crystal,
+            highlight_hkls=list(group_idxs.keys()),
+            highlight_colours=colour_variants,
+            res=1000,
+            wireframe_radius_factor=0.02,
+            surface_colour='lightgrey',
+            wireframe_colour='darkgrey',
+            opacity=0.3,
+            opacity_highlight=0.8,
+            azim=170,
+            elev=70,
+            roll=95,
+            distance=4.3,
+        )
+        group_lbl = ','.join([str(hkl) for hkl in group_hkl])
+        img.save(output_dir / f'crystal_highlight_{group_lbl}.png')
+
+
+def plot_volume():
+    """
+    Plot the volume.
+    """
+    args, output_dir = _init()
+    show_n = 5000
+
+    # Load the args
+    with open(args.sf_path / 'args_sequence_fitter.yml', 'r') as f:
+        sf_args = SequenceFitterArgs.from_args(yaml.load(f, Loader=yaml.FullLoader))
+    with open(args.sf_path / 'args_refiner.yml', 'r') as f:
+        ref_args = RefinerArgs.from_args(yaml.load(f, Loader=yaml.FullLoader))
+    with open(args.sf_path / 'args_runtime.yml', 'r') as f:
+        runtime_args = Namespace(**yaml.load(f, Loader=yaml.FullLoader))
+
+    # Instantiate a manager
+    manager = Manager.load(
+        model_path=ref_args.predictor_model_path,
+        args_changes={
+            'runtime_args': {
+                'use_gpu': False,
+                'batch_size': 1
+            },
+        },
+        save_dir=output_dir
+    )
+
+    # Load the measurements
+    logger.info(f'Loading manual measurements from {runtime_args.measurements_dir}')
+    measurements = load_manual_measurements(
+        measurements_dir=Path(runtime_args.measurements_dir),
+        manager=manager
+    )
+    measurement_idxs = measurements['idx']
+    distances_m = measurements['distances']
+    scales_m = measurements['scale']
+
+    # Get a crystal object
+    ds = manager.ds
+    cs = CSDProxy().load(ds.dataset_args.crystal_id)
+    crystal = Crystal(
+        lattice_unit_cell=cs.lattice_unit_cell,
+        lattice_angles=cs.lattice_angles,
+        miller_indices=ds.miller_indices,
+        point_group_symbol=cs.point_group_symbol,
+        dtype=torch.float64
+    )
+
+    # Load the parameters
+    param_path = args.sf_path / 'parameters.json'
+    logger.info(f'Loading parameters from {param_path}.')
+    with open(param_path, 'r') as f:
+        parameters = json_to_numpy(json.load(f))
+    distances = parameters['eval']['distances'][:show_n]
+    scales = parameters['eval']['scale'][:show_n]
+
+    # Calculate the volumes
+    logger.info('Calculating volumes.')
+    volumes = np.zeros(len(distances))
+    for i in range(len(distances)):
+        v, f = crystal.build_mesh(
+            scale=init_tensor(scales[i], dtype=torch.float64),
+            distances=init_tensor(distances[i], dtype=torch.float64)
+        )
+        v, f = to_numpy(v), to_numpy(f)
+        m = Trimesh(vertices=v, faces=f)
+        volumes[i] = m.volume
+
+    # Calculate the volumes for the manual measurements
+    logger.info('Calculating volumes for the manual measurements.')
+    volumes_m = np.zeros(len(distances_m))
+    for i in range(len(distances_m)):
+        v, f = crystal.build_mesh(
+            scale=init_tensor(scales_m[i], dtype=torch.float64),
+            distances=init_tensor(distances_m[i], dtype=torch.float64)
+        )
+        v, f = to_numpy(v), to_numpy(f)
+        m = Trimesh(vertices=v, faces=f)
+        volumes_m[i] = m.volume
+
+    # Set up some variables
+    logger.info('Setting up plot variables.')
+    image_paths = get_image_paths(sf_args, load_all=True)[:show_n]
+    x_vals = [idx for idx, _ in image_paths]
+
+    # Restrict the measurements to within the range predicted
+    include_mask = np.array([x_vals[0] <= idx <= x_vals[-1] for idx in measurement_idxs])
+    measurement_idxs = measurement_idxs[include_mask]
+    volumes_m = volumes_m[include_mask]
+
+    # Set font sizes
+    plt.rc('axes', titlesize=7, titlepad=1)  # fontsize of the title
+    plt.rc('axes', labelsize=6, labelpad=2)  # fontsize of the x and y labels
+    plt.rc('xtick', labelsize=6)  # fontsize of the x tick labels
+    plt.rc('ytick', labelsize=6)  # fontsize of the y tick labels
+    plt.rc('xtick.major', pad=2, size=2)
+    plt.rc('xtick.minor', pad=2, size=1)
+    plt.rc('ytick.major', pad=1, size=2)
+    plt.rc('axes', linewidth=0.5)
+
+    # Make a single plot showing the values for each face group
+    fig, ax = plt.subplots(
+        1, 1,
+        figsize=(1.7, 1.5),
+        gridspec_kw=dict(
+            top=0.98, bottom=0.15, right=0.99, left=0.2,
+            hspace=0.1, wspace=0.4
+        ),
+    )
+    ax.set_ylabel('Volume (mm³)')
+    ts = _get_ts(x_vals, args.interval_mins)
+    m_idxs = np.array([(x_vals == m_idx).nonzero()[0] for m_idx in measurement_idxs]).squeeze()
+    m_ts = [ts[m_idx] for m_idx in m_idxs]
+    _format_xtime(ax, ts)
+    ax.plot(ts, volumes, c='black', linewidth=0.6)
+    ax.plot(m_ts, volumes_m, c='grey', marker='o', linestyle='none',
+            markersize=5, markerfacecolor='none')
+    plt.savefig(output_dir / 'volumes.svg')
+    plt.show()
+
+
+def create_legend_plot():
+    """
+    Create a plot showing the legends.
+    """
+    line_styles = ['-', '--', '-.', ':']
+    marker_styles = ['o', 'x', 's', '+']
+
+    # Create dummy line objects for automatic measurements
+    automatic_lines = [
+        mlines.Line2D([], [], color='black', linestyle=style) for style in line_styles
+    ]
+
+    # Create dummy marker objects for manual measurements
+    manual_markers = [
+        mlines.Line2D([], [], color='black', linestyle='None', marker=marker) for marker in marker_styles
+    ]
+
+    # Create the figure and axis
+    fig, ax = plt.subplots(figsize=(6, 2))
+    ax.axis('off')  # Turn off the axis
+
+    # Create the legend with grouped handles
+    legend_handles = automatic_lines + manual_markers
+    legend_labels = ['Automatic Measurements'] * len(line_styles) + ['Manual Measurements'] * len(marker_styles)
+
+    # Adding grouped handles with labels
+    ax.legend(legend_handles, legend_labels, loc='center', frameon=False, ncol=2, handletextpad=2)
+
+    args, output_dir = _init()
+    plt.savefig(output_dir / 'legend.svg', transparent=True)
+    plt.show()
+
+
 if __name__ == '__main__':
     os.makedirs(LOGS_PATH, exist_ok=True)
-    # plot_sequence_errors()
-    plot_3d_crystals()
+    # plot_sequence_errors_for_sampler()
+    # plot_3d_crystals()
+    # plot_sequence_losses()
+    plot_distances_and_areas()
+    # plot_3d_crystals_with_highlighted_faces()
+    # plot_volume()
+    # create_legend_plot()
