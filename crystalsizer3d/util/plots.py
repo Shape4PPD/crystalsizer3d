@@ -121,7 +121,8 @@ def make_3d_digital_crystal_image(
     """
     Make a 3D image of the crystal.
     """
-    fig = mlab.figure(size=(res * 2, res * 2), bgcolor=(bg_col, bg_col, bg_col))
+    fig = mlab.figure(size=(res * 2, res * 2),
+                      bgcolor=(bg_col, bg_col, bg_col))
 
     # Depth peeling required for nice opacity, the rest don't seem to make any difference
     fig.scene.renderer.use_depth_peeling = True
@@ -138,21 +139,26 @@ def make_3d_digital_crystal_image(
         crystal_.origin.data = torch.zeros_like(origin)
         v, f = crystal_.build_mesh()
         v, f = to_numpy(v), to_numpy(f)
-        mlab.triangular_mesh(*v.T, f, figure=fig, color=to_rgb(surface_colour_), opacity=opacity)
-        tube_radius = max(0.0001, crystal_.distances[0].item() * wireframe_radius_factor)
+        mlab.triangular_mesh(*v.T, f, figure=fig,
+                             color=to_rgb(surface_colour_), opacity=opacity)
+        tube_radius = max(
+            0.0001, crystal_.distances[0].item() * wireframe_radius_factor)
         for fv_idxs in crystal_.faces.values():
             fv = to_numpy(crystal_.vertices[fv_idxs])
             fv = np.vstack([fv, fv[0]])  # Close the loop
-            mlab.plot3d(*fv.T, color=to_rgb(wireframe_colour_), tube_radius=tube_radius)
+            mlab.plot3d(*fv.T, color=to_rgb(wireframe_colour_),
+                        tube_radius=tube_radius)
         crystal_.origin.data = origin
 
     # Add crystal(s)
     _add_crystal_mesh(crystal, surface_colour, wireframe_colour)
     if crystal_comp is not None:
-        _add_crystal_mesh(crystal_comp, surface_colour_comp, wireframe_colour_comp)
+        _add_crystal_mesh(crystal_comp, surface_colour_comp,
+                          wireframe_colour_comp)
 
     # Render
-    mlab.view(figure=fig, azimuth=azim, elevation=elev, distance=distance, roll=roll, focalpoint=np.zeros(3))
+    mlab.view(figure=fig, azimuth=azim, elevation=elev,
+              distance=distance, roll=roll, focalpoint=np.zeros(3))
 
     # # Useful for getting the view parameters when recording from the gui:
     # mlab.show()
@@ -173,7 +179,8 @@ def make_3d_digital_crystal_image(
 
     # fig.scene.render()
     frame = mlab.screenshot(mode='rgba', antialiased=True, figure=fig)
-    frame = cv2.resize(frame, None, fx=0.5, fy=0.5, interpolation=cv2.INTER_AREA)
+    frame = cv2.resize(frame, None, fx=0.5, fy=0.5,
+                       interpolation=cv2.INTER_AREA)
     img = Image.fromarray((frame * 255).astype(np.uint8), 'RGBA')
 
     mlab.close()
@@ -189,8 +196,10 @@ def make_error_image(
     """
     Make an error image.
     """
-    img_target = np.array(Image.fromarray(img_target).convert('L')).astype(np.float32) / 255
-    img_pred = np.array(Image.fromarray(img_pred).convert('L')).astype(np.float32) / 255
+    img_target = np.array(Image.fromarray(
+        img_target).convert('L')).astype(np.float32) / 255
+    img_pred = np.array(Image.fromarray(
+        img_pred).convert('L')).astype(np.float32) / 255
     if loss_type == 'l2':
         err = (img_target - img_pred)**2
     elif loss_type == 'l1':
@@ -269,8 +278,10 @@ def plot_zingg(
     """
     z_pred = to_numpy(Y_pred['zingg'][idx])
     z_target = to_numpy(Y_target['zingg'][idx])
-    ax.scatter(z_target[0], z_target[1], c='r', marker='x', s=100, label='Target')
-    ax.scatter(z_pred[0], z_pred[1], c='b', marker='o', s=100, label='Predicted')
+    ax.scatter(z_target[0], z_target[1], c='r',
+               marker='x', s=100, label='Target')
+    ax.scatter(z_pred[0], z_pred[1], c='b',
+               marker='o', s=100, label='Predicted')
     ax.set_title('Zingg')
     ax.set_xlabel('S/I', labelpad=-5)
     ax.set_xlim(0, 1)
@@ -302,14 +313,18 @@ def _add_bars(
     if pred2 is not None:
         bar_width = 0.25
         offset = bar_width
-        ax.bar(locs - offset, target, bar_width, color=colour_target, label='Target')
+        ax.bar(locs - offset, target, bar_width,
+               color=colour_target, label='Target')
         ax.bar(locs, pred, bar_width, color=colour_pred, label='Predicted')
-        ax.bar(locs + offset, pred2, bar_width, color=colour_pred2, label='Predicted2')
+        ax.bar(locs + offset, pred2, bar_width,
+               color=colour_pred2, label='Predicted2')
     elif target is not None:
         bar_width = 0.35
         offset = bar_width / 2
-        ax.bar(locs - offset, target, bar_width, color=colour_target, label='Target')
-        ax.bar(locs + offset, pred, bar_width, color=colour_pred, label='Predicted')
+        ax.bar(locs - offset, target, bar_width,
+               color=colour_target, label='Target')
+        ax.bar(locs + offset, pred, bar_width,
+               color=colour_pred, label='Predicted')
     else:
         bar_width = 0.7
         offset = 0
@@ -356,11 +371,14 @@ def plot_distances(
     d_pred2 = _load_single_parameter(Y_pred2, 'distances', idx)
 
     # Prepare the distances
-    d_pred = ds.prep_distances(torch.from_numpy(d_pred), normalise=ds.dst_args.train_scale)
+    d_pred = ds.prep_distances(torch.from_numpy(
+        d_pred), normalise=ds.dst_args.train_scale)
     if d_target is not None:
-        d_target = ds.prep_distances(torch.from_numpy(d_target), normalise=ds.dst_args.train_scale)
+        d_target = ds.prep_distances(torch.from_numpy(
+            d_target), normalise=ds.dst_args.train_scale)
     if d_pred2 is not None:
-        d_pred2 = ds.prep_distances(torch.from_numpy(d_pred2), normalise=ds.dst_args.train_scale)
+        d_pred2 = ds.prep_distances(torch.from_numpy(
+            d_pred2), normalise=ds.dst_args.train_scale)
 
     # Group asymmetric distances by face group
     distance_groups = {}
@@ -369,7 +387,8 @@ def plot_distances(
         grouped_order_target = []
         grouped_order_pred2 = []
         for i, hkl in enumerate(ds.dataset_args.miller_indices):
-            group_idxs = (manager.crystal.symmetry_idx == i).nonzero().squeeze()
+            group_idxs = (manager.crystal.symmetry_idx ==
+                          i).nonzero().squeeze()
             distance_groups[hkl] = group_idxs
             dpi = d_pred[group_idxs].argsort()
             grouped_order_pred.append(group_idxs[dpi])
@@ -409,9 +428,11 @@ def plot_distances(
 
             # Add vertical separator lines between face groups
             if i < len(distance_groups) - 1:
-                ax.axvline(locs[len(xlabels) - 1] + 0.5, color='black', linestyle='--', linewidth=1)
+                ax.axvline(locs[len(xlabels) - 1] + 0.5,
+                           color='black', linestyle='--', linewidth=1)
     else:
-        xlabels = ['(' + ''.join(list(l[3:])) + ')' for l in ds.labels_distances]
+        xlabels = ['(' + ''.join(list(l[3:])) +
+                   ')' for l in ds.labels_distances]
 
     # Replace -X with \bar{X} in labels
     xlabels = [re.sub(r'-(\d)', r'$\\bar{\1}$', label) for label in xlabels]
@@ -428,9 +449,12 @@ def plot_distances(
             if st > 0.5:
                 ax.axvspan(i - k * offset, i, alpha=0.1, color='blue')
             if sp > 0.5:
-                ax.axvspan(i, i + k * offset, alpha=0.1, color='red' if st < 0.5 else 'green')
-            colours.append('red' if (st < 0.5 < sp) or (st > 0.5 > sp) else 'green')
-        ax.scatter(locs + offset, s_pred, color=colours, marker='+', s=100, label='Switches')
+                ax.axvspan(i, i + k * offset, alpha=0.1,
+                           color='red' if st < 0.5 else 'green')
+            colours.append('red' if (st < 0.5 < sp)
+                           or (st > 0.5 > sp) else 'green')
+        ax.scatter(locs + offset, s_pred, color=colours,
+                   marker='+', s=100, label='Switches')
 
     ax.set_title('Distances')
     ax.set_xticks(locs)
@@ -501,7 +525,8 @@ def plot_areas(
         grouped_order_pred = []
         grouped_order_target = []
         for i, hkl in enumerate(ds.dataset_args.miller_indices):
-            group_idxs = (manager.crystal.symmetry_idx == i).nonzero().squeeze()
+            group_idxs = (manager.crystal.symmetry_idx ==
+                          i).nonzero().squeeze()
             distance_groups[hkl] = group_idxs
             dpi = d_pred[group_idxs].argsort()
             grouped_order_pred.append(group_idxs[dpi])
@@ -537,7 +562,8 @@ def plot_areas(
 
             # Add vertical separator lines between face groups
             if i < len(distance_groups) - 1:
-                ax.axvline(locs[len(xlabels) - 1] + 0.5, color='black', linestyle='--', linewidth=1)
+                ax.axvline(locs[len(xlabels) - 1] + 0.5,
+                           color='black', linestyle='--', linewidth=1)
     else:
         xlabels = ['(' + l[3:] + ')' for l in ds.labels_distances]
 
@@ -737,12 +763,12 @@ def plot_training_samples(
         X_pred2 = None
         Y_pred2 = None
     n_rows = 4 \
-             + int(dsa.train_zingg) \
-             + 2 * int(dsa.train_distances) \
-             + int(dsa.train_transformation) \
-             + int(dsa.train_material and len(manager.ds.labels_material_active) > 0) \
-             + int(dsa.train_light) \
-             + int(dsa.train_generator) * 2
+        + int(dsa.train_zingg) \
+        + 2 * int(dsa.train_distances) \
+        + int(dsa.train_transformation) \
+        + int(dsa.train_material and len(manager.ds.labels_material_active) > 0) \
+        + int(dsa.train_light) \
+        + int(dsa.train_generator) * 2
 
     height_ratios = [1.3, 1.3, 1.1, 1.1]  # images and 3d plots
     if dsa.train_zingg:
@@ -790,9 +816,12 @@ def plot_training_samples(
     for i, idx in enumerate(idxs):
         meta = metas[idx]
         r_params_target = meta['rendering_parameters']
-        r_params_pred = manager.ds.denormalise_rendering_params(Y_pred, idx, r_params_target)
-        crystal_target = manager.ds.load_crystal(r_params=r_params_target, zero_origin=True)
-        crystal_pred = manager.ds.load_crystal(r_params=r_params_pred, zero_origin=True)
+        r_params_pred = manager.ds.denormalise_rendering_params(
+            Y_pred, idx, r_params_target)
+        crystal_target = manager.ds.load_crystal(
+            r_params=r_params_target, zero_origin=True)
+        crystal_pred = manager.ds.load_crystal(
+            r_params=r_params_pred, zero_origin=True)
         row_idx = 0
 
         # Plot the (possibly augmented) input image, either clean or noisy
@@ -807,10 +836,12 @@ def plot_training_samples(
 
         # Plot the rendering from the predicted parameters
         try:
-            img = manager.crystal_renderer.render_from_parameters(r_params_pred)
+            img = manager.crystal_renderer.render_from_parameters(
+                r_params_pred)
             plot_image(fig.add_subplot(gs[row_idx, i]), 'Render', img)
         except Exception as e:
-            plot_error(fig.add_subplot(gs[row_idx, i]), f'Rendering failed:\n{e}')
+            plot_error(fig.add_subplot(
+                gs[row_idx, i]), f'Rendering failed:\n{e}')
         row_idx += 1
 
         # Plot the generated image(s)
@@ -1025,7 +1056,8 @@ def plot_keypoint_detector_samples(
             if overlay.ndim == 3:
                 alpha = overlay.max(axis=0)
                 if overlay.shape[0] == 2:
-                    overlay = np.concatenate([overlay, np.zeros_like(overlay[0:1])])
+                    overlay = np.concatenate(
+                        [overlay, np.zeros_like(overlay[0:1])])
                 if overlay.shape[0] == 3:
                     overlay = overlay.transpose(1, 2, 0)
             else:
@@ -1081,17 +1113,18 @@ def _plot_vaetc_examples(
     """
     Plot some VAE transcoder examples.
     """
-    n_examples = min(self.runtime_args.plot_n_examples, self.runtime_args.batch_size)
+    n_examples = min(self.runtime_args.plot_n_examples,
+                     self.runtime_args.batch_size)
     metas, images, images_aug, images_clean, images_clean_aug, Y_target = data
     Yr_noisy = outputs['Yr_mu']
     Yr_clean = outputs['Yr_mu_clean']
     prop_cycle = plt.rcParams['axes.prop_cycle']
     default_colours = prop_cycle.by_key()['color']
     n_rows = int(self.dataset_args.train_zingg) \
-             + int(self.dataset_args.train_distances) \
-             + int(self.dataset_args.train_transformation) \
-             + int(self.dataset_args.train_material and len(self.ds.labels_material_active) > 0) \
-             + int(self.dataset_args.train_light)
+        + int(self.dataset_args.train_distances) \
+        + int(self.dataset_args.train_transformation) \
+        + int(self.dataset_args.train_material and len(self.ds.labels_material_active) > 0) \
+        + int(self.dataset_args.train_light)
 
     # Plot properties
     bar_width = 0.3
@@ -1137,9 +1170,12 @@ def _plot_vaetc_examples(
         z_noisy = to_numpy(Yr_noisy['zingg'][idx_])
         z_clean = to_numpy(Yr_clean['zingg'][idx_])
         z_target = to_numpy(params['zingg'][idx_])
-        ax_.scatter(z_target[0], z_target[1], c=default_colours[0], marker='o', s=100, label='Target')
-        ax_.scatter(z_noisy[0], z_noisy[1], c=default_colours[1], marker='+', s=100, label='Sample')
-        ax_.scatter(z_noisy[0], z_clean[1], c=default_colours[2], marker='x', s=100, label='Clean')
+        ax_.scatter(z_target[0], z_target[1], c=default_colours[0],
+                    marker='o', s=100, label='Target')
+        ax_.scatter(z_noisy[0], z_noisy[1], c=default_colours[1],
+                    marker='+', s=100, label='Sample')
+        ax_.scatter(z_noisy[0], z_clean[1], c=default_colours[2],
+                    marker='x', s=100, label='Clean')
         ax_.set_title('Zingg')
         ax_.set_xlabel('S/I', labelpad=-5)
         ax_.set_xlim(0, 1)
@@ -1176,8 +1212,10 @@ def _plot_vaetc_examples(
 
     def plot_distances(ax_, idx_):
         ax_pos = ax_.get_position()
-        ax_.set_position([ax_pos.x0, ax_pos.y0 + 0.02, ax_pos.width, ax_pos.height - 0.02])
-        _plot_bar_chart('distances', idx_, ax_, self.ds.labels_distances_active, 'Distances')
+        ax_.set_position([ax_pos.x0, ax_pos.y0 + 0.02,
+                         ax_pos.width, ax_pos.height - 0.02])
+        _plot_bar_chart('distances', idx_, ax_,
+                        self.ds.labels_distances_active, 'Distances')
         ax_.tick_params(axis='x', rotation=270)
 
         if self.dataset_args.use_distance_switches:
@@ -1188,29 +1226,36 @@ def _plot_vaetc_examples(
             colours = []
             for i, (sn, sc, st) in enumerate(zip(s_noisy, s_clean, s_target)):
                 if st > 0.5:
-                    ax_.axvspan(i - 3 / 2 * bar_width, i - 1 / 2 * bar_width, alpha=0.1, color='blue')
+                    ax_.axvspan(i - 3 / 2 * bar_width, i - 1 / 2 *
+                                bar_width, alpha=0.1, color='blue')
                 if sn > 0.5:
                     ax_.axvspan(i - 1 / 2 * bar_width, i + 1 / 2 * bar_width, alpha=0.1,
                                 color='red' if sn < 0.5 else 'green')
                 if sc > 0.5:
                     ax_.axvspan(i + 1 / 2 * bar_width, i + 3 / 2 * bar_width, alpha=0.1,
                                 color='red' if st < 0.5 else 'green')
-                colours.append('red' if (st < 0.5 < sc) or (st > 0.5 > sc) else 'green')
-            ax_.scatter(locs, s_noisy, color=colours, marker='+', s=30, label='Switches')
-            ax_.scatter(locs + bar_width, s_clean, color=colours, marker='+', s=30)
+                colours.append('red' if (st < 0.5 < sc)
+                               or (st > 0.5 > sc) else 'green')
+            ax_.scatter(locs, s_noisy, color=colours,
+                        marker='+', s=30, label='Switches')
+            ax_.scatter(locs + bar_width, s_clean,
+                        color=colours, marker='+', s=30)
 
     def plot_transformation(ax_, idx_):
         xlabels = self.ds.labels_transformation_active.copy()
         _plot_bar_chart('transformation', idx_, ax_, xlabels, 'Transformation')
         locs = np.arange(len(xlabels))
         offset = 1.6 * bar_width
-        ax_.axvspan(locs[0] - offset, locs[2] + offset, alpha=0.1, color='green')
+        ax_.axvspan(locs[0] - offset, locs[2] +
+                    offset, alpha=0.1, color='green')
         if self.ds.dataset_args.train_scale:
-            ax_.axvspan(locs[3] - offset, locs[3] + offset, alpha=0.1, color='red')
+            ax_.axvspan(locs[3] - offset, locs[3] +
+                        offset, alpha=0.1, color='red')
             r_idx = 4
         else:
             r_idx = 3
-        ax_.axvspan(locs[r_idx] - offset, locs[-1] + offset, alpha=0.1, color='blue')
+        ax_.axvspan(locs[r_idx] - offset, locs[-1] +
+                    offset, alpha=0.1, color='blue')
 
     def plot_material(ax_, idx_):
         labels = []
@@ -1222,16 +1267,20 @@ def _plot_vaetc_examples(
             labels.append('Roughness')
         locs = _plot_bar_chart('material', idx_, ax_, labels, 'Material')
         for i in range(len(locs) - 1):
-            ax_.axvline(locs[i] + .5, color='black', linestyle='--', linewidth=1)
+            ax_.axvline(locs[i] + .5, color='black',
+                        linestyle='--', linewidth=1)
 
     def plot_light(ax_, idx_):
         xlabels = self.ds.labels_light.copy()
         locs = _plot_bar_chart('light', idx_, ax_, xlabels, 'Light')
         if not self.ds.dataset_args.transmission_mode:
             offset = 1.6 * bar_width
-            ax_.axvspan(locs[0] - offset, locs[2] + offset, alpha=0.1, color='green')
-            ax_.axvspan(locs[3] - offset, locs[3] + offset, alpha=0.1, color='red')
-            ax_.axvspan(locs[4] - offset, locs[-1] + offset, alpha=0.1, color='blue')
+            ax_.axvspan(locs[0] - offset, locs[2] +
+                        offset, alpha=0.1, color='green')
+            ax_.axvspan(locs[3] - offset, locs[3] +
+                        offset, alpha=0.1, color='red')
+            ax_.axvspan(locs[4] - offset, locs[-1] +
+                        offset, alpha=0.1, color='blue')
 
     for i, idx in enumerate(idxs):
         row_idx = 0
@@ -1253,54 +1302,6 @@ def _plot_vaetc_examples(
     self._save_plot(fig, 'vaetc', train_or_test)
 
 
-# not sure if this is used.
-def plot_2d_points(points_list, plot_normals=False, ax=None):
-    """
-    Plots 2D points from a PyTorch tensor or a list of tensors.
-    
-    Args:
-    points (torch.Tensor or list of torch.Tensor): A tensor of 2D points or a list of tensors of 2D points.
-    """
-    if not isinstance(points_list, List):
-        points_list = [points_list]  # Convert to list for uniform processing
-
-    # Define a color map
-    colours = plt.get_cmap('Set1')
-
-    for i, points in enumerate(points_list):
-
-        if points.dim() != 3 or points.size(1) != 2:
-            pointx = points[:, 0].detach().cpu().numpy()
-            pointy = points[:, 1].detach().cpu().numpy()
-            # raise ValueError("Each tensor must be of shape (N, 2, 2) where N is the number of points.")
-        else:
-            pointx = points[:, 0, 0].detach().cpu().numpy()
-            pointy = points[:, 0, 1].detach().cpu().numpy()
-            normalx = points[:, 1, 0].detach().cpu().numpy()
-            normaly = points[:, 1, 1].detach().cpu().numpy()
-            # Plot the points # plot_2d_projection.counter % 20
-        if ax == None:
-            plt.scatter(pointx, pointy, color=colours(i), label=f'Tensor {i + 1}', s=2)
-            plt.xlabel('X')
-            plt.ylabel('Y')
-            plt.legend()
-            plt.show()
-        else:
-            ax.scatter(pointx, pointy, color=colours(i), label=f'Tensor {i + 1}', s=2)
-
-        if plot_normals:
-            scale = 0.2
-            for px, py, nx, ny in zip(pointx, pointy, normalx, normaly):
-                if ax == None:
-                    plt.arrow(px, py, nx * scale, ny * scale, head_width=0.1, head_length=0.1, fc=colours(i),
-                              ec=colours(i))
-                else:
-                    ax.arrow(px, py, nx * scale, ny * scale, head_width=0.1, head_length=0.1, fc=colours(i),
-                             ec=colours(i))
-
-    ### this is broken now that the points are generated in the projector
-
-
 def plot_coutour_loss(
         ax: Axes,
         title: str,
@@ -1319,10 +1320,13 @@ def plot_coutour_loss(
 
             if np.array_equal(distance, [0, 0]):
                 # If the distance is [0, 0], plot a point with a different color
-                ax.plot(x, y, 'go', markersize=2)  # 'ro' is red circle for stationary points
+                # 'ro' is red circle for stationary points
+                ax.plot(x, y, 'go', markersize=2)
             else:
                 # Otherwise, draw a line from the point to the point + distance
-                ax.arrow(x, y, dx, dy, head_width=0.1, head_length=0.1, fc='blue', ec='blue')
-                ax.plot(x, y, 'ro', markersize=2)  # 'ro' is red circle for stationary points
+                ax.arrow(x, y, dx, dy, head_width=0.1,
+                         head_length=0.1, fc='blue', ec='blue')
+                # 'ro' is red circle for stationary points
+                ax.plot(x, y, 'ro', markersize=2)
     else:
         ax.scatter(points[:, 0], points[:, 1], c='blue', s=3)
