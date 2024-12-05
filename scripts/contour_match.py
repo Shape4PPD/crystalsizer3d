@@ -7,7 +7,7 @@ from crystalsizer3d.util.utils import to_numpy, init_tensor
 from crystalsizer3d.refiner.edge_matcher import EdgeMatcher
 import torchvision.transforms as transforms
 import matplotlib.pyplot as plt
-from crystalsizer3d.util.plots import plot_image, plot_3d, plot_coutour_loss
+from crystalsizer3d.util.plots import plot_image, plot_contour_loss
 import torch.optim as optim
 from crystalsizer3d.scene_components.scene import Scene
 from crystalsizer3d.scene_components.utils import project_to_image
@@ -273,14 +273,12 @@ def run():
     crystal_dir.mkdir(parents=True, exist_ok=True)
     writer = SummaryWriter(log_dir=str(save_dir / 'tensorboard_logs'))
 
-    # crystal_tar = Crystal(**TEST_CRYSTALS['cube'])
     crystal_tar = Crystal(**TEST_CRYSTALS['alpha'])
     crystal_tar.scale.data = init_tensor(1.2, device=crystal_tar.scale.device)
     crystal_tar.origin.data[:2] = torch.tensor(
         [0, 0], device=crystal_tar.origin.device)
     crystal_tar.origin.data[2] -= crystal_tar.vertices[:, 2].min()
     v, f = crystal_tar.build_mesh()
-    # crystal_tar.to(device)
 
     # generate a synthetic crystal to compare too
     f_map, dist_map, img, img_overlay, zoom = generate_synthetic_crystal(
@@ -309,8 +307,6 @@ def run():
     # projector_tar.to(device)
     projector_tar.project()
 
-    # crystal_opt = Crystal(**TEST_CRYSTALS['cube_test'])
-    # crystal_opt = Crystal(**TEST_CRYSTALS['alpha_test'])
     crystal_opt = crystal_tar.clone()
     crystal_opt.scale.data = init_tensor(1.2, device=crystal_opt.scale.device)
     crystal_opt.origin.data[:2] = torch.tensor(
@@ -326,18 +322,14 @@ def run():
     modified_distances = crystal_tar_distances * (1 + random_factors)
     crystal_opt.distances.data = init_tensor(
         modified_distances, device=crystal_opt.scale.device)
-    # crystal_opt.distances = modified_distances
     v, f = crystal_opt.build_mesh(distances=crystal_opt.distances)
-    # crystal_opt.to(device)
 
     projector_opt = Projector(crystal_opt,
                               external_ior=1.333,
                               zoom=zoom,
                               image_size=f_map.shape[-2:],
                               transparent_background=True)
-    # projector_opt.to(device)
     projector_opt.project()
-    # points_opt = projector_opt.edge_points
     params = {
         'distances': [crystal_opt.distances],
     }
@@ -352,20 +344,15 @@ def run():
     plot_image(ax, title, img_int)
     img_ten = projector_opt.generate_image()
     plot_image(ax, title, tensor_to_image(img_ten))
-    # plot_coutour_loss(ax,title,img_int,points_opt.squeeze().detach().cpu().numpy(),np.zeros(1),False)
     plt.savefig(save_dir / f'{title}.png')
     plt.close()
     optimizer = optim.Adam(params['distances'], lr=1e-2)
-    target_dist = crystal_tar.distances
-    # prev_dist = crystal_opt.distances
+
     # Training loop
-    # with torch.autograd.detect_anomaly(False):
     for step in range(100):  # Run for 100 iterations
         print(f"Step {step}")
-        # step.to(device)
         optimizer.zero_grad()  # Zero the gradients
 
-        # Convert polar to Cartesian coordinates
         v, f = crystal_opt.build_mesh()
 
         projector_opt = Projector(crystal_opt,
@@ -374,30 +361,10 @@ def run():
                                   external_ior=1.333,
                                   transparent_background=True)
         projector_opt.project()
-        # points_opt = projector_opt.edge_points
-        # normals_opt = projector_opt.edge_normals
 
-        dist = crystal_opt.distances
-        # a = points_opt.get_all_points_tensor()
-        # print(f"points tensor {a}")
-        # Forward pass: get the pixel value at the current point (x, y)
-        # Call model's forward method with Cartesian coordinates
         loss, distances = model(projector_opt.edge_segments_rel, img_tensor)
-        # Perform backpropagation (minimize the pixel value)
 
-        # Clone grid to avoid inadvertently retaining the graph in subsequent usage
-        loss.backward()  # retain_graph=True)
-
-        # Check if the gradients for r and theta are non-zero
-        print(f"Step {step}: {projector_opt.distances}")
-
-        # Check if gradients are non-zero before optimizer step
-        # if dist.grad.abs() < 1e-6:
-        #     print(f"Warning: One of the gradients is very small at step {step}")
-
-        # Update the radial parameters
-        for group in optimizer.param_groups:
-            print(group)
+        loss.backward()
 
         if step % 1 == 0:
             fig, ax = plt.subplots()
@@ -405,7 +372,8 @@ def run():
             plot_image(ax, title, img_int)
             img_ten = projector_opt.generate_image()
             plot_image(ax, title, tensor_to_image(img_ten))
-            plt.savefig(save_dir / f'{title}.png')
+            plot_contour_loss(ax, title, model.edge_points.detach(
+            ).cpu().numpy(), distances.detach().cpu().numpy())
             plt.savefig(save_dir / f'{title}.png')
             crystal_opt.to_json(
                 crystal_dir / f"crystal_{str(step).zfill(3)}.json")
@@ -415,7 +383,6 @@ def run():
 
         # Log the loss value
         writer.add_scalar('Loss', loss.item(), step)
-        # Print the updated polar coordinates and the current loss
         print(f"Step {step}: loss: {loss}")
 
 
