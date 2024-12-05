@@ -1,6 +1,7 @@
 import torch
 import torch.nn.functional as F
 from torch import Tensor, nn
+from typing import Tuple
 
 
 def to_absolute_coordinates(coords: Tensor, image_size: Tensor) -> Tensor:
