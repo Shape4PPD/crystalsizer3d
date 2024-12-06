@@ -1,28 +1,25 @@
-import torch
-import numpy as np
+import io
 from pathlib import Path
-from crystalsizer3d.crystal import Crystal
-from crystalsizer3d import LOGS_PATH, ROOT_PATH, START_TIMESTAMP, USE_CUDA, logger
-from crystalsizer3d.util.utils import to_numpy, init_tensor
-from crystalsizer3d.refiner.edge_matcher import EdgeMatcher
-import torchvision.transforms as transforms
+
 import matplotlib.pyplot as plt
-from crystalsizer3d.util.plots import plot_image, plot_contour_loss
+import numpy as np
+import torch
 import torch.optim as optim
+import torchvision.transforms as transforms
+from kornia.utils import tensor_to_image
+from scipy.ndimage import distance_transform_edt, gaussian_filter
+from torch.utils.tensorboard import SummaryWriter
+from torchvision.transforms.functional import to_tensor
+
+from crystalsizer3d import LOGS_PATH, ROOT_PATH, START_TIMESTAMP, USE_CUDA, logger
+from crystalsizer3d.crystal import Crystal
+from crystalsizer3d.nn.models.rcf import RCF
+from crystalsizer3d.projector import Projector
+from crystalsizer3d.refiner.edge_matcher import EdgeMatcher
 from crystalsizer3d.scene_components.scene import Scene
 from crystalsizer3d.scene_components.utils import project_to_image
-from crystalsizer3d.projector import Projector
-from crystalsizer3d.nn.models.rcf import RCF
-# from edge_detection import load_rcf
-from scipy.ndimage import distance_transform_edt
-from torchvision.transforms.functional import to_tensor
-from scipy.ndimage import gaussian_filter
-from kornia.utils import tensor_to_image
-from torch.utils.tensorboard import SummaryWriter
-import io
-
-# import matplotlib.pyplot as plt
-from PIL import Image
+from crystalsizer3d.util.plots import plot_contour_loss, plot_image
+from crystalsizer3d.util.utils import init_tensor, to_numpy
 
 if USE_CUDA:
     device = torch.device('cuda')
@@ -60,8 +57,7 @@ TEST_CRYSTALS = {
         'lattice_unit_cell': [7.068, 10.277, 8.755],
         'lattice_angles': [np.pi / 2, np.pi / 2, np.pi / 2],
         'miller_indices': [(0, 0, 1), (0, 1, 1), (1, 1, 1), (-1, -1, -1), (1, 0, 0), (1, 1, 0), (0, 0, -1), (0, -1, -1),
-                           (0, 1, -1), (0, -1, 1), (1, -1, -1), (-1,
-                                                                 1, -1), (-1, -1, 1), (-1, 1, 1), (1, -1, 1),
+                           (0, 1, -1), (0, -1, 1), (1, -1, -1), (-1, 1, -1), (-1, -1, 1), (-1, 1, 1), (1, -1, 1),
                            (1, 1, -1), (-1, 0, 0), (1, -1, 0), (-1, 1, 0), (-1, -1, 0)],
         'distances': [0.3830717206001282, 0.8166847825050354, 0.8026739358901978, 0.9758344292640686,
                       0.9103631377220154, 1.0181487798690796, 0.3933243453502655, 0.7772741913795471,
@@ -108,9 +104,9 @@ def log_plot_to_tensorboard(writer, tag, figure, global_step):
 
 
 def generate_synthetic_crystal(
-    crystal,
-    save_dir,
-    res=400,
+        crystal,
+        save_dir,
+        res=400,
 ):
     # first generate mesh with cube
 
@@ -192,7 +188,7 @@ def generate_synthetic_crystal(
     for i, feature_map in enumerate(feature_maps):
         feature_map = to_numpy(feature_map).squeeze()
         feature_map = (feature_map - feature_map.min()) / \
-            (feature_map.max() - feature_map.min())
+                      (feature_map.max() - feature_map.min())
         if i == len(feature_maps) - 1:
             name = 'fused'
         else:
@@ -203,17 +199,16 @@ def generate_synthetic_crystal(
         # Save the distance transform
         # feature_map[feature_map < 0.2] = 0
         # img = img.resize((200, 200))
-        img = np.array(img).astype(np.float32)/255
+        img = np.array(img).astype(np.float32) / 255
         img = (img - img.min()) / (img.max() - img.min())
         thresh = 0.5
         img[img < thresh] = 0
         img[img >= thresh] = 1
-        dist = distance_transform_edt(1-img)  # , metric='taxicab')
+        dist = distance_transform_edt(1 - img)  # , metric='taxicab')
         dist = dist.astype(np.float32)
         dist = (dist - dist.min()) / (dist.max() - dist.min())
         dist_maps_arr.append(to_tensor(dist))
-        Image.fromarray((dist * 255).astype(np.uint8)
-                        ).save(save_dir / 'rcf_featuremaps' / f'dists_{name}.png')
+        Image.fromarray((dist * 255).astype(np.uint8)).save(save_dir / 'rcf_featuremaps' / f'dists_{name}.png')
 
     dist_maps = torch.stack(dist_maps_arr)
     dist_map = dist_maps[5].unsqueeze(0)
@@ -243,19 +238,19 @@ def generate_line_crystal(img_overlay, save_dir):
     # Save the distance transform
     # feature_map[feature_map < 0.2] = 0
     # img = img.resize((200, 200))
-    img_inverted = np.array(img_inverted).astype(np.float32)/255
+    img_inverted = np.array(img_inverted).astype(np.float32) / 255
     img_inverted = gaussian_filter(img_inverted, sigma=2)
     img_inverted = (img_inverted - img_inverted.min()) / \
-        (img_inverted.max() - img_inverted.min())
-    image_pil = Image.fromarray((img_inverted*255).astype(np.uint8))
+                   (img_inverted.max() - img_inverted.min())
+    image_pil = Image.fromarray((img_inverted * 255).astype(np.uint8))
     image_pil.save(save_dir / 'inverted__step_image.png')
     thresh = 0.95
     img_inverted[img_inverted < thresh] = 0
     img_inverted[img_inverted >= thresh] = 1
-    dist = distance_transform_edt(1-img_inverted)  # , metric='taxicab')
+    dist = distance_transform_edt(1 - img_inverted)  # , metric='taxicab')
     dist = dist.astype(np.float32)
     dist = (dist - dist.min()) / (dist.max() - dist.min())
-    dist = 1-dist  # invert again
+    dist = 1 - dist  # invert again
     distance_map_tensor = to_tensor(dist).squeeze(0)
     Image.fromarray((dist * 255).astype(np.uint8)
                     ).save(save_dir / 'distance_map.png')
@@ -264,7 +259,6 @@ def generate_line_crystal(img_overlay, save_dir):
 
 
 def run():
-
     save_dir = LOGS_PATH / f'{START_TIMESTAMP}'  # _{args.image_path.name}'
     rcf_dir = save_dir / 'rcf_featuremaps'
     crystal_dir = save_dir / 'crystals'
