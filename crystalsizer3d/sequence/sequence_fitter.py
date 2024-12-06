@@ -94,6 +94,7 @@ class SequenceFitter:
 
         # Initialise the outputs
         self._init_initial_predictions()
+        self._init_initial_prediction_losses()
         self._init_fixed_parameters()
         self._init_scenes()
         self._init_parameters()
@@ -601,6 +602,96 @@ class SequenceFitter:
         self.plotter.wait_for_workers()
 
         return self._init_initial_predictions()
+
+    def _init_initial_prediction_losses(self):
+        """
+        Instantiate the initial prediction losses.
+        """
+        # Use the full predictor args to build the filename in order to calculate the
+        # correct losses even if the predictor batch size was 1
+        model_args = {k: getattr(self.refiner_args, k) for k in PREDICTOR_ARG_NAMES}
+        losses_path = self.cache_dirs['predictor'] / f'losses_{hash_data(model_args)}.json'
+        try:
+            with open(losses_path) as f:
+                self.losses_init = json_to_torch(json.load(f))
+            logger.info(f'Loaded initial prediction losses from {losses_path}.')
+            return
+        except Exception:
+            pass
+        logger.info('Calculating initial prediction losses.')
+
+        # Set up the data loader (adaptive sampler isn't used, just to get the dataset)
+        sampler = AdaptiveSampler(sequence_length=len(self))
+        self.dataloader = get_data_loader(
+            sequence_fitter=self,
+            adaptive_sampler=sampler,
+            batch_size=1,
+            n_workers=0,
+        )
+
+        # Load the initial scenes and parameters into the 'eval' space
+        scenes = []
+        parameters = {}
+        for i, scene_initial_path in enumerate(self.scenes_initial):
+            with open(scene_initial_path) as f:
+                scene_dict = yaml.load(f, Loader=yaml.FullLoader)
+            scenes.append({
+                'path': scene_initial_path,
+                'scene_dict': scene_dict,
+            })
+            for k in PARAMETER_KEYS:
+                if k not in parameters:
+                    parameters[k] = []
+                if k in scene_dict:
+                    v = scene_dict[k]
+                elif k in scene_dict['crystal']:
+                    v = scene_dict['crystal'][k]
+                else:
+                    raise RuntimeError(f'Parameter {k} not found in scene or crystal.')
+                parameters[k].append(v)
+        self.scenes = {'eval': scenes}
+        self.parameters = {'eval': {k: torch.tensor(v) for k, v in parameters.items()}}
+        self.fixed_parameters = {}
+
+        # Initialise the refiner pool
+        logger.info('Initialising refiner pool.')
+        self.refiner_pool = RefinerPool(
+            refiner_args=self.refiner_args,
+            output_dir=self.refiner.output_dir,
+            initial_scene_dict=scenes[0]['scene_dict'],
+            fixed_parameters={},
+            seed=self.sf_args.seed,
+            plotter=self.plotter,
+            n_workers=self.runtime_args.n_refiner_workers,
+            queue_size=self.runtime_args.refiner_queue_size,
+        )
+        self.refiner_pool.wait_for_workers()
+
+        # Calculate the losses
+        self.losses_init = {
+            'total': np.zeros(len(self), dtype=np.float32),
+            'measurement': np.zeros(len(self), dtype=np.float32),
+        }
+        self.calculate_losses(
+            save_annotations=False,
+            save_renders=False,
+            initial_or_eval='initial'
+        )
+        with open(losses_path, 'w') as f:
+            json.dump(self.losses_init, f, cls=FlexibleJSONEncoder)
+
+        # Remove the variables
+        self.refiner_pool.close()
+        logger.info('Removing temporary variables.')
+        del self.scenes
+        del self.parameters
+        del self.fixed_parameters
+        del self.losses_init
+        del self.refiner_pool
+        del self.dataloader
+        torch.cuda.empty_cache()
+
+        return self._init_initial_prediction_losses()
 
     def _init_fixed_parameters(self):
         """
@@ -1173,7 +1264,7 @@ class SequenceFitter:
 
             # Log learning rate and update
             self.tb_logger.add_scalar('lr', self.optimiser.param_groups[0]['lr'], step)
-            self.lr_scheduler.step(step + 1, seq_loss)
+            self.lr_scheduler.step(step + 1, seq_loss_ema)
 
             # Log network norm
             weights_cumulative_norm = calculate_model_norm(self.sequence_encoder, device=self.device)
@@ -1220,7 +1311,7 @@ class SequenceFitter:
                 self.update_parameters_from_encoder(save=False)
                 save_annotations = ra.eval_annotate_freq > 0 and (step + 1) % ra.eval_annotate_freq == 0
                 save_renders = ra.eval_render_freq > 0 and (step + 1) % ra.eval_render_freq == 0
-                self.calculate_evaluation_losses(
+                self.calculate_losses(
                     save_annotations=save_annotations,
                     save_renders=save_renders,
                 )
@@ -1258,17 +1349,30 @@ class SequenceFitter:
             self.save()
 
     @torch.no_grad()
-    def calculate_evaluation_losses(
+    def calculate_losses(
             self,
             save_annotations: bool = True,
-            save_renders: bool = True
+            save_renders: bool = True,
+            initial_or_eval: str = 'eval'
     ):
         """
         Calculate the evaluation losses.
         """
-        logger.info(f'Calculating evaluation losses.')
+        if initial_or_eval == 'eval':
+            logger.info(f'Calculating evaluation losses.')
+            step = self.refiner.step
+            losses = self.losses['eval']
+            X_preds = self.X_preds['eval']
+            X_targets_annotated = self.X_targets_annotated['eval']
+
+        else:
+            logger.info(f'Calculating initial prediction losses.')
+            step = 0
+            losses = self.losses_init
+            X_preds = self.X_preds_initial
+            X_targets_annotated = self.X_targets_annotated_initial
+
         ds = self.dataloader.dataset
-        step = self.refiner.step
 
         # Disable the cropping so the renders are generated at full size
         crop_renders = self.refiner_args.crop_render
@@ -1303,19 +1407,19 @@ class SequenceFitter:
                 calculate_grads=False,
                 save_annotations=save_annotations,
                 save_renders=save_renders,
-                X_preds_paths=[self.X_preds['eval'][idx] for idx in batch_idxs],
+                X_preds_paths=[X_preds[idx] for idx in batch_idxs],
                 X_targets_paths=[self.X_targets[idx] for idx in batch_idxs],
-                X_targets_annotated_paths=[self.X_targets_annotated['eval'][idx] for idx in batch_idxs],
+                X_targets_annotated_paths=[X_targets_annotated[idx] for idx in batch_idxs],
             )
 
             # Update scene and crystal parameters
             for j, idx in enumerate(batch_idxs):
-                self.losses['eval']['total'][idx] = losses_batch[j].item()
+                losses['total'][idx] = losses_batch[j].item()
                 for k, v in stats_batch.items():
                     k = k if k[:7] != 'losses/' else k[7:]
-                    if k not in self.losses['eval']:
-                        self.losses['eval'][k] = torch.zeros(len(self))
-                    self.losses['eval'][k][idx] = float(v[j])
+                    if k not in losses:
+                        losses[k] = torch.zeros(len(self))
+                    losses[k][idx] = float(v[j])
 
                 # Calculate the measurement loss
                 if self.measurements is not None and idx in self.measurements['idx']:
@@ -1323,18 +1427,19 @@ class SequenceFitter:
                     dists_m = self.measurements['distances'][idx_m] * self.measurements['scale'][idx_m]
                     dists_p = to_numpy(p_dict_batch['distances'][j] * p_dict_batch['scale'][j])
                     loss_m = np.sum((dists_m - dists_p)**2)
-                    self.losses['eval']['measurement'][idx] = loss_m.item()
+                    losses['measurement'][idx] = loss_m.item()
 
         # Restore the cropping setting
         self.refiner_args.crop_render = crop_renders
 
         # Log the total sequence loss
-        seq_loss = self.losses['eval']['total'].sum().item()
-        mes_loss = self.losses['eval']['measurement'].sum().item()
-        self.losses['log']['eval'] = torch.concatenate([self.losses['log']['eval'],
-                                                        torch.tensor(seq_loss)[None, ...]])
-        self.tb_logger.add_scalar('losses/seq_eval', seq_loss, step)
-        self.tb_logger.add_scalar('losses/measurement_eval', mes_loss, step)
+        if initial_or_eval == 'eval':
+            seq_loss = losses['total'].sum().item()
+            mes_loss = losses['measurement'].sum().item()
+            self.losses['log']['eval'] = torch.concatenate([self.losses['log']['eval'],
+                                                            torch.tensor(seq_loss)[None, ...]])
+            self.tb_logger.add_scalar('losses/seq_eval', seq_loss, step)
+            self.tb_logger.add_scalar('losses/measurement_eval', mes_loss, step)
 
     @torch.no_grad()
     def update_X_preds_from_parameters(

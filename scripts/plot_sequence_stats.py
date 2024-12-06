@@ -16,7 +16,7 @@ from mayavi import mlab
 from trimesh import Trimesh
 
 from crystalsizer3d import LOGS_PATH, START_TIMESTAMP, logger
-from crystalsizer3d.args.refiner_args import RefinerArgs
+from crystalsizer3d.args.refiner_args import PREDICTOR_ARG_NAMES, PREDICTOR_ARG_NAMES_BS1, RefinerArgs
 from crystalsizer3d.args.sequence_fitter_args import SequenceFitterArgs
 from crystalsizer3d.crystal import Crystal
 from crystalsizer3d.csd_proxy import CSDProxy
@@ -24,10 +24,11 @@ from crystalsizer3d.nn.manager import Manager
 from crystalsizer3d.scene_components.scene import Scene
 from crystalsizer3d.sequence.plots import get_colour_variations, get_face_group_colours, get_hkl_label, line_styles, \
     marker_styles
+from crystalsizer3d.sequence.sequence_fitter import SEQUENCE_DATA_PATH
 from crystalsizer3d.sequence.utils import get_image_paths, load_manual_measurements
 from crystalsizer3d.util.plots import make_3d_digital_crystal_image
-from crystalsizer3d.util.utils import get_crystal_face_groups, init_tensor, json_to_numpy, print_args, set_seed, \
-    to_dict, to_numpy, to_rgb
+from crystalsizer3d.util.utils import get_crystal_face_groups, hash_data, init_tensor, json_to_numpy, print_args, \
+    set_seed, to_dict, to_numpy, to_rgb
 
 # Off-screen rendering
 mlab.options.offscreen = True
@@ -172,33 +173,6 @@ def plot_3d_crystals():
             distance=4,
         )
         dig_pred.save(output_dir / f'digital_predicted_{idx:02d}.png')
-
-
-def plot_sequence_losses():
-    """
-    Plot the sequence losses.
-    """
-    args, output_dir = _init()
-
-    # Load the losses
-    with open(args.sf_path / 'losses.json', 'r') as f:
-        losses = json_to_numpy(json.load(f))
-    lm = losses['measurement']
-    l2 = losses['losses/l2']
-    lkp = losses['losses/keypoints']
-
-    fig, ax = plt.subplots(
-        1, 1,
-        figsize=(10, 5),
-        gridspec_kw={'left': 0.1, 'right': 0.9, 'top': 0.9, 'bottom': 0.1}
-    )
-    # fig = plt.figure(figsize=(5, 3))
-    ax.plot(losses)
-    ax.set_xticks([])
-    ax.set_yticks([])
-
-    # plt.savefig(output_dir / 'sequence_losses.svg')
-    plt.show()
 
 
 def plot_distances_and_areas():
@@ -657,12 +631,116 @@ def create_legend_plot():
     plt.show()
 
 
+def plot_sequence_errors():
+    """
+    Plot the sequence errors.
+    """
+    args, output_dir = _init()
+    N = 20
+
+    # Load the args
+    with open(args.sf_path / 'args_sequence_fitter.yml', 'r') as f:
+        sf_args = SequenceFitterArgs.from_args(yaml.load(f, Loader=yaml.FullLoader))
+    with open(args.sf_path / 'args_refiner.yml', 'r') as f:
+        ref_args = RefinerArgs.from_args(yaml.load(f, Loader=yaml.FullLoader))
+    with open(args.sf_path / 'args_runtime.yml', 'r') as f:
+        runtime_args = Namespace(**yaml.load(f, Loader=yaml.FullLoader))
+
+    # Instantiate a manager
+    manager = Manager.load(
+        model_path=ref_args.predictor_model_path,
+        args_changes={
+            'runtime_args': {
+                'use_gpu': False,
+                'batch_size': 1
+            },
+        },
+        save_dir=output_dir
+    )
+
+    # Load the initial prediction losses
+    base_path = SEQUENCE_DATA_PATH / f'{sf_args.images_dir.stem}_{hash_data(sf_args.images_dir.absolute())}'
+    pred_args = {k: getattr(ref_args, k) for k in PREDICTOR_ARG_NAMES}
+    if ref_args.initial_pred_batch_size == 1:
+        pred_hash = hash_data({k: getattr(ref_args, k) for k in PREDICTOR_ARG_NAMES_BS1})
+    else:
+        pred_hash = hash_data(pred_args)
+    model_id = pred_args['predictor_model_path'].stem[:4]
+    pred_cache_dir = base_path / 'predictor' / f'{model_id}_{pred_hash}'
+    losses_path = pred_cache_dir / f'losses_{hash_data(pred_args)}.json'
+    assert losses_path.exists(), f'Initial prediction losses file does not exist: {losses_path}'
+    with open(losses_path, 'r') as f:
+        losses_init = json_to_numpy(json.load(f))
+
+    # Load the refined losses
+    with open(args.sf_path / 'losses.json', 'r') as f:
+        losses = json_to_numpy(json.load(f))
+    losses = losses['eval']
+
+    # Load measurements
+    measurements = load_manual_measurements(
+        measurements_dir=Path(runtime_args.measurements_dir),
+        manager=manager
+    )
+    measurement_idxs = measurements['idx']
+
+    # Load the image paths and set up the x-values
+    image_paths = get_image_paths(sf_args, load_all=True)
+    x_vals = [idx for idx, _ in image_paths]
+    ts = _get_ts(x_vals, args.interval_mins)
+    m_idxs = np.concatenate([(x_vals == m_idx).nonzero()[0] for m_idx in measurement_idxs])
+    m_ts = [ts[m_idx] for m_idx in m_idxs]
+
+    # Plot the losses
+    fig, axes = plt.subplots(
+        3, 1,
+        figsize=(5, 3),
+        sharex=True,
+        gridspec_kw={'left': 0.1, 'right': 0.9, 'top': 0.9, 'bottom': 0.1}
+    )
+
+    c_init = '#0d58a1'
+    c_refined = '#6a35b5'
+
+    # Measurement errors
+    lm_init = losses_init['measurement'][m_idxs]
+    lm_refined = losses['measurement'][m_idxs]
+    ax = axes[0]
+    # ax.set_title('Measurement Errors')
+    ax.plot(m_ts, lm_init, c=c_init, label='Initial', marker='o', linestyle=':', markerfacecolor='none')
+    ax.plot(m_ts, lm_refined, c=c_refined, label='Refined', marker='o', linestyle=':', markerfacecolor='none')
+    ax.set_ylabel('Measurement Error')
+    ax.set_yscale('log')
+    # _format_xtime(ax, ts)
+
+    # L2 errors
+    ax = axes[1]
+    # ax.set_title('L2 Errors')
+    ax.plot(ts, losses_init['perceptual'], c=c_init, label='Initial')
+    ax.plot(ts, losses['perceptual'], c=c_refined, label='Refined')
+    ax.set_ylabel('L2 Error')
+    ax.set_yscale('log')
+    # _format_xtime(ax, ts)
+
+    # Keypoint errors
+    ax = axes[2]
+    # ax.set_title('Keypoint Errors')
+    ax.plot(ts, losses_init['keypoints'], c=c_init, label='Initial')
+    ax.plot(ts, losses['keypoints'], c=c_refined, label='Refined')
+    ax.set_ylabel('Keypoint Error')
+    ax.set_yscale('log')
+    _format_xtime(ax, ts, add_xlabel=True)
+
+    # plt.savefig(output_dir / 'sequence_errors.svg')
+    plt.show()
+
+
 if __name__ == '__main__':
     os.makedirs(LOGS_PATH, exist_ok=True)
     # plot_sequence_errors_for_sampler()
     # plot_3d_crystals()
-    # plot_sequence_losses()
-    plot_distances_and_areas()
+    # plot_distances_and_areas()
     # plot_3d_crystals_with_highlighted_faces()
     # plot_volume()
     # create_legend_plot()
+    plot_sequence_errors()

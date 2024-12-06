@@ -21,10 +21,11 @@ KEYPOINTS_ARG_NAMES = [
 PREDICTOR_ARG_NAMES = [
     'predictor_model_path', 'initial_pred_noise_min', 'initial_pred_noise_max', 'initial_pred_oversize_input',
     'initial_pred_max_img_size', 'multiscale', 'use_keypoints', 'rendering_size', 'spp', 'integrator_max_depth',
-    'integrator_rr_depth', 'n_patches', 'patch_size', 'w_img_l1', 'w_img_l2', 'w_perceptual', 'w_latent', 'w_rcf',
-    'w_overshoot', 'w_symmetry', 'w_z_pos', 'w_rotation_xy', 'w_patches', 'w_fullsize', 'w_switch_probs', 'w_keypoints',
-    'w_anchors', 'l_decay_l1', 'l_decay_l2', 'l_decay_perceptual', 'l_decay_latent', 'l_decay_rcf', 'perceptual_model',
-    'latents_model', 'mv2_config_path', 'mv2_checkpoint_path', 'rcf_model_path', 'rcf_loss_type', 'keypoints_loss_type'
+    'integrator_rr_depth', 'crop_render', 'crop_render_margin', 'n_patches', 'patch_size', 'w_img_l1', 'w_img_l2',
+    'w_perceptual', 'w_latent', 'w_rcf', 'w_overshoot', 'w_symmetry', 'w_z_pos', 'w_rotation_xy', 'w_patches',
+    'w_fullsize', 'w_switch_probs', 'w_keypoints', 'w_anchors', 'l_decay_l1', 'l_decay_l2', 'l_decay_perceptual',
+    'l_decay_latent', 'l_decay_rcf', 'perceptual_model', 'latents_model', 'mv2_config_path', 'mv2_checkpoint_path',
+    'rcf_model_path', 'rcf_loss_type', 'keypoints_loss_type'
 ]
 
 PREDICTOR_ARG_NAMES_BS1 = [

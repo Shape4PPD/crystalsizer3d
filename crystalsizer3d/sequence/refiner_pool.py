@@ -107,6 +107,7 @@ def refiner_worker(
             X_target_wis: Tensor,
             X_target_denoised_wis: Tensor,
             keypoints: Tensor | None,
+            add_noise: bool
     ):
         """
         Calculate losses for the given parameters and targets
@@ -131,7 +132,7 @@ def refiner_worker(
                 setattr(refiner.scene.crystal, k, v.to('cpu'))
 
         # Calculate losses
-        loss, stats = refiner.process_step(add_noise=False)
+        loss, stats = refiner.process_step(add_noise=add_noise)
 
         # Return the rendered image if it was generated
         X_pred = refiner.X_pred if refiner_args.use_inverse_rendering else None
@@ -168,7 +169,8 @@ def refiner_worker(
             X_target_denoised=job['X_target_denoised'],
             X_target_wis=init_tensor(job['X_target_wis']),
             X_target_denoised_wis=init_tensor(job['X_target_denoised_wis']),
-            keypoints=init_tensor(job['keypoints']) if job['keypoints'] is not None else None
+            keypoints=init_tensor(job['keypoints']) if job['keypoints'] is not None else None,
+            add_noise=job['calculate_grads']
         )
 
         # Calculate grads
@@ -189,6 +191,9 @@ def refiner_worker(
             'crystal': scene.crystal.to_dict(),
             'projector_zoom': orthographic_scale_factor(scene),
         })
+
+    # Mark as idle and exit
+    worker_status[worker_idx] = 0
 
 
 class RefinerPool:
@@ -264,6 +269,14 @@ class RefinerPool:
             while not self.all_workers_idle():
                 time.sleep(1)
             logger.info('Refiner workers ready.')
+
+    def close(self):
+        """
+        Close the worker processes.
+        """
+        logger.info('Closing refiner pool.')
+        self.stop_event.set()
+        self.wait_for_workers()
 
     def calculate_losses(
             self,
