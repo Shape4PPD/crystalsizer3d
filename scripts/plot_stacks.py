@@ -11,9 +11,11 @@ from PIL import Image, ImageDraw
 from matplotlib import pyplot as plt
 from scipy.ndimage import zoom
 
-from crystalsizer3d import LOGS_PATH, START_TIMESTAMP
+from crystalsizer3d import LOGS_PATH, START_TIMESTAMP, logger
+from crystalsizer3d.args.dataset_training_args import DatasetTrainingArgs
 from crystalsizer3d.nn.dataset import Dataset
 from crystalsizer3d.refiner.keypoint_detection import get_keypoint_coordinates
+from crystalsizer3d.sequence.utils import get_image_paths
 from crystalsizer3d.util.keypoints import generate_keypoints_heatmap
 from crystalsizer3d.util.utils import print_args, set_seed, to_dict, to_numpy
 
@@ -26,6 +28,12 @@ def get_args() -> Namespace:
     parser.add_argument('--seed', type=int, default=1,
                         help='Seed for the random number generator.')
 
+    # Image sequence
+    parser.add_argument('--images-dir', type=Path,
+                        help='Directory containing the sequence of images.')
+    parser.add_argument('--image-ext', type=str, default='jpg',
+                        help='Image extension.')
+
     # Dataset
     parser.add_argument('--dataset-path', type=Path, help='Path to the dataset.')
     parser.add_argument('--start-image', type=int, default=0,
@@ -36,9 +44,9 @@ def get_args() -> Namespace:
     # Stack args
     parser.add_argument('--res', type=int, default=2000,
                         help='Width and height of images in pixels.')
-    parser.add_argument('--border-size', type=int, default=1,
+    parser.add_argument('--border-size', type=int, default=2,
                         help='Size of the border in pixels.')
-    parser.add_argument('--border-colour', type=lambda s: (float(c) for c in s.split(',')), default=(0, 0, 0, 255),
+    parser.add_argument('--border-colour', type=lambda s: (float(c) for c in s.split(',')), default=(0, 0, 0, 200),
                         help='RGBA colour of the border.')
     parser.add_argument('--n-images', type=int, default=33,
                         help='Number of images to show.')
@@ -46,9 +54,9 @@ def get_args() -> Namespace:
                         help='Spacing between images in pixels.')
     parser.add_argument('--chunk-spacing', type=int, default=80,
                         help='Spacing between chunks of images in pixels.')
-    parser.add_argument('--show-first-n-images', type=int, default=3,
+    parser.add_argument('--show-first-n-images', type=int, default=4,
                         help='Number of images to show at the front.')
-    parser.add_argument('--show-last-n-images', type=int, default=1,
+    parser.add_argument('--show-last-n-images', type=int, default=2,
                         help='Number of images to show at the back.')
     parser.add_argument('--n-dots', type=int, default=3,
                         help='Number of dots to show.')
@@ -71,7 +79,7 @@ def get_args() -> Namespace:
     return args
 
 
-def _init() -> Tuple[Namespace, Dataset, Path]:
+def _init(load_ds: bool = True) -> Tuple[Namespace, Dataset | None, Path]:
     """
     Initialise the dataset and get the command line arguments.
     """
@@ -86,15 +94,17 @@ def _init() -> Tuple[Namespace, Dataset, Path]:
         spec['created'] = START_TIMESTAMP
         yaml.dump(spec, f)
 
-    # # Initialise the dataset
-    # dst_args = DatasetTrainingArgs(
-    #     dataset_path=args.dataset_path,
-    #     train_keypoint_detector=True,
-    #     wireframe_blur_variance=1.0,
-    #     heatmap_blob_variance=10.0,
-    # )
-    # ds = Dataset(dst_args)
-    ds = None
+    # Initialise the dataset
+    if load_ds:
+        dst_args = DatasetTrainingArgs(
+            dataset_path=args.dataset_path,
+            train_keypoint_detector=True,
+            wireframe_blur_variance=1.0,
+            heatmap_blob_variance=10.0,
+        )
+        ds = Dataset(dst_args)
+    else:
+        ds = None
 
     return args, ds, output_dir
 
@@ -229,11 +239,11 @@ def _make_image_stack(
             draw.ellipse((x - dot_size, y - dot_size, x + dot_size, y + dot_size), fill=dot_colour)
 
         if highlight_idx is None:
-            # # Top-right dots
-            # for i in range(n_dots):
-            #     x = w + img_spacing * (show_first_n_images - 1) + dot_offsets[i]
-            #     y = img_spacing * show_last_n_images + chunk_spacing - dot_offsets[i]
-            #     draw.ellipse((x - dot_size, y - dot_size, x + dot_size, y + dot_size), fill=dot_colour)
+            # Top-right dots
+            for i in range(n_dots):
+                x = w + img_spacing * (show_first_n_images - 1) + dot_offsets[i]
+                y = img_spacing * show_last_n_images + chunk_spacing - dot_offsets[i]
+                draw.ellipse((x - dot_size, y - dot_size, x + dot_size, y + dot_size), fill=dot_colour)
 
             # Bottom-right dots
             for i in range(n_dots):
@@ -244,7 +254,44 @@ def _make_image_stack(
     return img_stack
 
 
-def make_image_stacks():
+def make_real_image_stacks():
+    """
+    Draw a stack of images from a sequence.
+    """
+    args, _, output_dir = _init(load_ds=False)
+    image_paths = get_image_paths(args, load_all=True)
+    img0 = Image.open(image_paths[0][1])
+    w, h = img0.size
+    crop_size = int(w * 0.5)
+    out_size = (400, 400)
+
+    # Calculate cropping box
+    left = (w - crop_size) / 2
+    top = (h - crop_size) / 2
+    right = (w + crop_size) / 2
+    bottom = (h + crop_size) / 2
+
+    # Load the images and keypoint heatmaps
+    logger.info(f'Loading images {args.start_image} to {len(image_paths) if args.end_image == -1 else args.end_image}.')
+    idxs = list(range(args.start_image, len(image_paths) if args.end_image == -1 else args.end_image))
+    images = []
+    for idx in idxs:
+        image = Image.open(image_paths[idx][1])
+        image = image.crop((left, top, right, bottom))
+        image = image.resize(out_size, Image.Resampling.LANCZOS)
+        images.append(image)
+    images = np.stack(images)
+
+    # Add alpha channels to images
+    alpha = (np.ones(images.shape[:3] + (1,)) * 255).astype(np.uint8)
+    images = np.concatenate([images, alpha], axis=-1)
+
+    # Make image stacks
+    image_stack = _make_image_stack(images=images, **to_dict(args))
+    image_stack.save(output_dir / 'image_stack.png')
+
+
+def make_synthetic_image_stacks():
     """
     Draw a stack of images from the dataset.
     """
@@ -353,7 +400,7 @@ def make_parameter_vector_stack():
     """
     Make images of random parameter vectors.
     """
-    args, ds, output_dir = _init()
+    args, _, output_dir = _init(load_ds=False)
     n_params = 12
     img_height = 200
     p_vecs = []
@@ -380,7 +427,7 @@ def make_smooth_parameter_vector_images():
     """
     Make images of random parameter vectors smoothed from one end to the other
     """
-    args, ds, output_dir = _init()
+    args, _, output_dir = _init(load_ds=False)
     n_params = 12
     img_height = 200
     args.n_images = 12
@@ -412,7 +459,7 @@ def make_smooth_parameter_vector_stack():
     """
     Make an image stack of random parameter vectors smoothed from one end to the other
     """
-    args, ds, output_dir = _init()
+    args, _, output_dir = _init(load_ds=False)
     n_params = 12
     img_height = 200
 
@@ -443,7 +490,7 @@ def make_blank_stack(image_size: int = 100):
     """
     Draw a stack of blank images.
     """
-    args, ds, output_dir = _init()
+    args, _, output_dir = _init(load_ds=False)
     # colour = np.array([255, 212, 42, 255], dtype=np.uint8)
     colour = np.array([255, 255, 255, 255], dtype=np.uint8)
     images = np.ones((args.n_images, image_size, image_size * 2, 4), dtype=np.uint8) * colour
@@ -453,9 +500,10 @@ def make_blank_stack(image_size: int = 100):
 
 if __name__ == '__main__':
     os.makedirs(LOGS_PATH, exist_ok=True)
-    # make_image_stacks()
+    make_real_image_stacks()
+    # make_synthetic_image_stacks()
     # make_parameter_vector_image(n=5)
     # make_parameter_vector_stack()
-    make_smooth_parameter_vector_images()
+    # make_smooth_parameter_vector_images()
     # make_smooth_parameter_vector_stack()
     # make_blank_stack()

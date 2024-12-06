@@ -43,9 +43,15 @@ def plotter_worker(queue: mp.Queue, stop_event: mp.Event, worker_status: mp.Arra
 
 
 class SequencePlotter:
-    def __init__(self, n_workers: int = N_WORKERS, queue_size: int = 100):
+    def __init__(
+            self,
+            n_workers: int = N_WORKERS,
+            queue_size: int = 100,
+            measurements: Dict[str, Tensor] = None
+    ):
         self.workers = {}
         self.n_workers = n_workers
+        self.measurements = measurements
 
         if n_workers > 0:
             # Ensure that CUDA will work in subprocesses
@@ -222,7 +228,6 @@ class SequencePlotter:
             plot_dir: Path,
             step: int,
             parameters: Dict[str, Tensor],
-            measurements: Dict[str, Tensor],
             image_paths: List[Tuple[int, Path]],
             face_groups: List[List[int]]
     ):
@@ -234,7 +239,7 @@ class SequencePlotter:
             plot_dir=plot_dir,
             step=step,
             parameters=parameters,
-            measurements=measurements,
+            measurements=self.measurements,
             image_paths=image_paths,
             face_groups=face_groups,
             make_means_plot=False,
@@ -280,6 +285,7 @@ class SequencePlotter:
             'step': step,
             'losses': losses,
             'image_paths': image_paths,
+            'measurements': self.measurements,
         })
 
     @staticmethod
@@ -287,9 +293,10 @@ class SequencePlotter:
         """
         Plot the sequence losses.
         """
-        include_keys = ['total/train', 'losses/total', 'losses/l1', 'losses/l2', 'losses/perceptual',
-                        'losses/overshoot', 'losses/symmetry', 'losses/z_pos', 'losses/rotation_xy', 'losses/keypoints']
-        losses = {k: job['losses'][k] for k in include_keys if k in job['losses']}
+        include_keys = ['total', 'measurement', 'l1', 'l2', 'perceptual',
+                        'overshoot', 'symmetry', 'z_pos', 'rotation_xy', 'keypoints']
+        losses = {k: job['losses'][k] for k in include_keys if k in job['losses'] and job['losses'][k] is not None}
+        measurements = job['measurements']
         n = len(losses)
         n_rows = int(np.ceil(np.sqrt(n)))
         n_cols = int(np.ceil(n / n_rows))
@@ -302,7 +309,11 @@ class SequencePlotter:
         for i, (name, loss) in enumerate(losses.items()):
             ax = fig.add_subplot(gs[i])
             ax.set_title(name)
-            ax.plot(loss)
+            if name == 'measurement':
+                m_idxs = measurements['idx'][measurements['idx'] < len(loss)]
+                ax.plot(m_idxs, loss[m_idxs])
+            else:
+                ax.plot(loss)
             ax.set_xlabel('Image index')
             ax.grid()
         save_dir = job['plot_dir'] / 'losses'

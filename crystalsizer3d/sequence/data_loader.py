@@ -2,10 +2,8 @@ from pathlib import Path
 from typing import List, TYPE_CHECKING, Tuple
 
 import torch
-from PIL import Image
 from torch import Tensor
 from torch.utils.data import DataLoader, IterableDataset
-from torchvision.transforms.functional import to_tensor
 
 from crystalsizer3d.sequence.adaptive_sampler import AdaptiveSampler
 
@@ -31,9 +29,9 @@ class Dataset(IterableDataset):
         self.adaptive_sampler = adaptive_sampler
         self.batch_size = batch_size
 
-    def __getitem__(self, index: int) -> Tuple[Tensor, Tensor, Tensor, Tensor]:
-        return (to_tensor(Image.open(self.X_paths[index])),
-                to_tensor(Image.open(self.X_dn_paths[index])),
+    def __getitem__(self, index: int) -> tuple[Path, Path, Tensor, Tensor]:
+        return (self.X_paths[index],
+                self.X_dn_paths[index],
                 self.X_wis[index],
                 self.X_dn_wis[index])
 
@@ -51,7 +49,11 @@ def collate_fn(batch) -> Tuple[Tensor, List[Tensor]]:
     Collate function for the data loader.
     """
     indices, Xs = batch[0][0], batch[0][1]
-    images = [torch.stack(X).permute(0, 2, 3, 1) for X in zip(*Xs)]
+    X_paths = [X[0] for X in Xs]
+    X_dn_paths = [X[1] for X in Xs]
+    X_wis = torch.stack([X[2] for X in Xs]).permute(0, 2, 3, 1)
+    X_dn_wis = torch.stack([X[3] for X in Xs]).permute(0, 2, 3, 1)
+    images = [X_paths, X_dn_paths, X_wis, X_dn_wis]
     return indices, images
 
 

@@ -484,7 +484,8 @@ def plot_prediction(args: Optional[RuntimeArgs] = None):
     X_target2 = F.interpolate(X_target, size=img_size, **resize_args)
     Y_pred2 = manager.predict(X_target2)
     (save_dir / f'{img_size}').mkdir(parents=True, exist_ok=True)
-    _make_plots(args, save_dir / f'{img_size}', manager, X_target2, Y_pred2, Y_target, r_params_target, resize_res=full_res)
+    _make_plots(args, save_dir / f'{img_size}', manager, X_target2, Y_pred2, Y_target, r_params_target,
+                resize_res=full_res)
 
 
 def plot_prediction_noise_batch(args: Optional[RuntimeArgs] = None):
@@ -656,13 +657,40 @@ def plot_denoised_patches(args: Optional[RuntimeArgs] = None):
     Image.fromarray(img).save(save_dir / f'target_denoised_stitched.png')
 
 
+def benchmark_prediction_time(args: Optional[RuntimeArgs] = None):
+    """
+    Estimate the prediction time for a given image.
+    """
+    args, manager, save_dir, X_target, Y_target, r_params_target = _init(args, 'prediction')
+    resize_args = dict(mode='bilinear', align_corners=False)
+    img_size = manager.image_shape[-1]
+
+    start_time = time.time()
+
+    n_tests = 100
+    batch_size = 32
+    for _ in range(n_tests):
+        X_target2 = F.interpolate(X_target, size=img_size, **resize_args)
+        X_batch = X_target2.repeat(batch_size, 1, 1, 1)
+        X_batch = X_batch + torch.randn_like(X_batch) * 0.1
+        manager.predict(X_batch)
+
+    elapsed_time = time.time() - start_time
+    time_per_image = elapsed_time / n_tests / batch_size
+
+    logger.info(f'Elapsed time: {elapsed_time:.2f} s\n'
+                f'Time per image: {time_per_image:.2f} s\n'
+                f'Images per second: {1 / time_per_image:.2f}')
+
+
 if __name__ == '__main__':
     start_time = time.time()
 
-    plot_prediction()
+    # plot_prediction()
     # plot_prediction_noise_batch()
     # plot_denoised_prediction()
     # plot_denoised_patches()
+    benchmark_prediction_time()
 
     # # Iterate over all images in the image_path directory
     # args_ = parse_arguments()

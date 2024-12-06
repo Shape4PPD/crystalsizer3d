@@ -10,11 +10,11 @@ class SequenceFitterArgs(BaseArgs):
             self,
 
             # Target sequence
-            images_dir: Path,
+            images_dir: Path | str,
             image_ext: str = 'jpg',
             start_image: int = 0,
             end_image: int = -1,
-            initial_scene: Path | None = None,
+            initial_scene: Path | str | None = None,
             fix_parameters: List[str] | None = None,
 
             # Sequence encoder model parameters
@@ -52,6 +52,12 @@ class SequenceFitterArgs(BaseArgs):
 
             **kwargs
     ):
+        # Convert string paths to Path objects
+        if isinstance(images_dir, str):
+            images_dir = Path(images_dir)
+        if isinstance(initial_scene, str):
+            initial_scene = Path(initial_scene)
+
         # Target sequence
         self.images_dir = images_dir
         self.image_ext = image_ext
