@@ -23,9 +23,9 @@ PREDICTOR_ARG_NAMES = [
     'initial_pred_max_img_size', 'multiscale', 'use_keypoints', 'use_edge_matching', 'rendering_size', 'spp',
     'integrator_max_depth', 'integrator_rr_depth', 'crop_render', 'crop_render_margin', 'n_patches', 'patch_size',
     'w_img_l1', 'w_img_l2', 'w_perceptual', 'w_latent', 'w_rcf', 'w_overshoot', 'w_symmetry', 'w_z_pos',
-    'w_rotation_xy', 'w_patches', 'w_fullsize', 'w_switch_probs', 'w_keypoints', 'w_anchors', 'l_decay_l1',
-    'l_decay_l2', 'l_decay_perceptual', 'l_decay_latent', 'l_decay_rcf', 'perceptual_model', 'latents_model',
-    'mv2_config_path', 'mv2_checkpoint_path', 'rcf_model_path', 'rcf_loss_type', 'keypoints_loss_type',
+    'w_rotation_xy', 'w_patches', 'w_fullsize', 'w_switch_probs', 'w_keypoints', 'w_edge_matching', 'w_anchors',
+    'l_decay_l1', 'l_decay_l2', 'l_decay_perceptual', 'l_decay_latent', 'l_decay_rcf', 'perceptual_model',
+    'latents_model', 'mv2_config_path', 'mv2_checkpoint_path', 'rcf_model_path', 'rcf_loss_type', 'keypoints_loss_type',
     'edge_matching_points_per_unit', 'edge_matching_rcf_size', 'edge_matching_use_denoised',
 ]
 
@@ -182,9 +182,8 @@ class RefinerArgs(BaseArgs):
             perceptual_model: Optional[str] = None,
             latents_model: Optional[str] = None,
             latents_input_size: int = 0,
-            mv2_config_path: Optional[Path] = DATA_PATH / \
             mv2_config_path: Optional[Path] = DATA_PATH / 'MAGVIT2' / 'imagenet_lfqgan_256_B.yaml',
-            rcf_model_path: Optional[Path] = DATA_PATH / \
+            mv2_checkpoint_path: Optional[Path] = DATA_PATH / 'MAGVIT2' / 'imagenet_256_B.ckpt',
             rcf_model_path: Optional[Path] = DATA_PATH / 'bsds500_pascal_model.pth',
             rcf_loss_type: str = 'l2',
 
@@ -232,8 +231,7 @@ class RefinerArgs(BaseArgs):
 
         # Predictor model and target image
         if predictor_model_path is not None:
-            assert predictor_model_path.exists(
-            ), f'Predictor model path does not exist: {predictor_model_path}'
+            assert predictor_model_path.exists(), f'Predictor model path does not exist: {predictor_model_path}'
             assert predictor_model_path.suffix == '.json', f'Predictor model path must be a json file: {predictor_model_path}'
         self.predictor_model_path = predictor_model_path
         if image_path is not None:
@@ -244,8 +242,7 @@ class RefinerArgs(BaseArgs):
 
         # Denoising settings
         if denoiser_model_path is not None:
-            assert denoiser_model_path.exists(
-            ), f'DN model path does not exist: {denoiser_model_path}'
+            assert denoiser_model_path.exists(), f'DN model path does not exist: {denoiser_model_path}'
         self.denoiser_model_path = denoiser_model_path
         self.denoiser_n_tiles = denoiser_n_tiles
         self.denoiser_tile_overlap = denoiser_tile_overlap
@@ -262,8 +259,7 @@ class RefinerArgs(BaseArgs):
 
         # Keypoint detection settings
         if keypoints_model_path is not None:
-            assert keypoints_model_path.exists(
-            ), f'Keypoints model path does not exist: {keypoints_model_path}'
+            assert keypoints_model_path.exists(), f'Keypoints model path does not exist: {keypoints_model_path}'
         self.keypoints_model_path = keypoints_model_path
         self.keypoints_oversize_input = keypoints_oversize_input
         self.keypoints_max_img_size = keypoints_max_img_size
@@ -494,6 +490,14 @@ class RefinerArgs(BaseArgs):
         group.add_argument('--keypoints-loss-type', type=str, default='mindists',
                            choices=['mindists', 'sinkhorn', 'hausdorff'],
                            help='Type of loss to use for keypoints refinement.')
+
+        # Edge Matching settings
+        group.add_argument('--edge-matching-points-per-unit', type=float, default=0.05,
+                           help='Number of edge matching points per unit length of the crystal.')
+        group.add_argument('--edge-matching-rcf-size', type=int, default=400,
+                           help='Size of the edge matching RCF.')
+        group.add_argument('--edge-matching-use-denoised', type=str2bool, default=False,
+                           help='Use the denoised image for edge matching.')
 
         # Refining settings
         group.add_argument('--use-inverse-rendering', type=str2bool, default=True,
