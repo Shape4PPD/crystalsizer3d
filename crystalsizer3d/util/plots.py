@@ -1251,3 +1251,30 @@ def _plot_vaetc_examples(
             plot_light(fig.add_subplot(gs[row_idx, i]), idx)
 
     self._save_plot(fig, 'vaetc', train_or_test)
+
+
+def plot_contour_loss(
+        ax: Axes,
+        title: str,
+        points: np.ndarray,
+        distances: np.ndarray,
+        plot_loss_dist: bool = False
+):
+    ax.set_title(title)
+
+    for point, distance in zip(points, distances):
+        x, y = point
+        dx, dy = distance
+
+        if np.array_equal(distance, [0, 0]):
+            # If the distance is [0, 0], plot a point with a different color
+            # 'ro' is red circle for stationary points
+            ax.plot(x, y, 'go', markersize=2)
+        else:
+            # Otherwise, draw a line from the point to the point + distance
+            ax.arrow(x, y, dx, dy, head_width=0.1,
+                     head_length=0.1, fc='blue', ec='blue')
+            # 'ro' is red circle for stationary points
+            ax.plot(x, y, 'ro', markersize=2)
+    else:
+        ax.scatter(points[:, 0], points[:, 1], c='blue', s=3)

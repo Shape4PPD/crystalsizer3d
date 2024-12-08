@@ -107,6 +107,7 @@ def refiner_worker(
             X_target_wis: Tensor,
             X_target_denoised_wis: Tensor,
             keypoints: Tensor | None,
+            edges: Tensor | None,
             add_noise: bool
     ):
         """
@@ -122,6 +123,8 @@ def refiner_worker(
         refiner.X_target_denoised_wis = X_target_denoised_wis.to(refiner.device)
         if refiner_args.use_keypoints:
             refiner.keypoint_targets = keypoints
+        if refiner_args.use_edge_matching:
+            refiner.edge_map = edges
 
         # Update scene and crystal parameters
         p_dict = _parameter_vector_to_dict(p_vec)
@@ -170,6 +173,7 @@ def refiner_worker(
             X_target_wis=init_tensor(job['X_target_wis']),
             X_target_denoised_wis=init_tensor(job['X_target_denoised_wis']),
             keypoints=init_tensor(job['keypoints']) if job['keypoints'] is not None else None,
+            edges=init_tensor(job['edges']) if job['edges'] is not None else None,
             add_noise=job['calculate_grads']
         )
 
@@ -240,7 +244,6 @@ class RefinerPool:
             'output_dir': self.output_dir,
             'initial_scene_dict': self.initial_scene_dict,
             'fixed_parameters': self.fixed_parameters,
-            'seed': self.seed,
             'job_queue': self.job_queue,
             'response_queue': self.response_queue,
             'stop_event': self.stop_event,
@@ -250,7 +253,7 @@ class RefinerPool:
         for i in range(self.n_workers):
             process = mp.Process(
                 target=refiner_worker,
-                kwargs={**worker_args, 'worker_idx': i}
+                kwargs={**worker_args, 'worker_idx': i, 'seed': self.seed + i}
             )
             start_process(process)
 
@@ -288,6 +291,7 @@ class RefinerPool:
             X_target_wis: Tensor,
             X_target_denoised_wis: Tensor,
             keypoints: List[Tensor] | None,
+            edges: Tensor | None,
             calculate_grads: bool,
             save_annotations: bool,
             save_renders: bool,
@@ -311,7 +315,8 @@ class RefinerPool:
                 'X_target_denoised': X_target_denoised[idx],
                 'X_target_wis': to_numpy(X_target_wis[idx]),
                 'X_target_denoised_wis': to_numpy(X_target_denoised_wis[idx]),
-                'keypoints': keypoints[idx],
+                'keypoints': to_numpy(keypoints[idx]) if keypoints[idx] is not None else None,
+                'edges': to_numpy(edges[idx]) if edges[idx] is not None else None,
                 'calculate_grads': calculate_grads,
             }
             self.job_queue.put(job, block=True)

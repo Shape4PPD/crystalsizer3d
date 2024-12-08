@@ -23,11 +23,12 @@ from torch.utils.tensorboard import SummaryWriter
 from torchvision.transforms.functional import center_crop, to_tensor
 
 from crystalsizer3d import DATA_PATH, logger
-from crystalsizer3d.args.refiner_args import DENOISER_ARG_NAMES, KEYPOINTS_ARG_NAMES, PREDICTOR_ARG_NAMES, \
-    PREDICTOR_ARG_NAMES_BS1, RefinerArgs
+from crystalsizer3d.args.refiner_args import DENOISER_ARG_NAMES, EDGES_ARG_NAMES, KEYPOINTS_ARG_NAMES, \
+    PREDICTOR_ARG_NAMES, PREDICTOR_ARG_NAMES_BS1, RefinerArgs
 from crystalsizer3d.args.sequence_fitter_args import SequenceFitterArgs
 from crystalsizer3d.crystal import Crystal
 from crystalsizer3d.csd_proxy import CSDProxy
+from crystalsizer3d.nn.models.rcf import RCF
 from crystalsizer3d.refiner.denoising import denoise_image
 from crystalsizer3d.refiner.keypoint_detection import find_keypoints
 from crystalsizer3d.refiner.refiner import Refiner
@@ -42,17 +43,20 @@ from crystalsizer3d.sequence.utils import get_image_paths, load_manual_measureme
 from crystalsizer3d.util.utils import FlexibleJSONEncoder, calculate_model_norm, get_crystal_face_groups, hash_data, \
     init_tensor, is_bad, json_to_torch, set_seed, to_dict, to_numpy
 
+# Suppress mitsuba warning messages
+mi.set_log_level(mi.LogLevel.Error)
+
 PARAMETER_KEYS = ['scale', 'distances', 'origin', 'rotation', 'material_roughness', 'material_ior', 'light_radiance']
 SEQUENCE_DATA_PATH = DATA_PATH / 'sequences'
 
 ARG_NAMES = {
     'denoiser': DENOISER_ARG_NAMES,
     'keypoints': KEYPOINTS_ARG_NAMES,
+    'edges': EDGES_ARG_NAMES,
     'predictor': PREDICTOR_ARG_NAMES,
 }
 
-# Suppress mitsuba warning messages
-mi.set_log_level(mi.LogLevel.Error)
+resize_args = dict(mode='bilinear', align_corners=False)
 
 
 class SequenceFitter:
@@ -91,6 +95,7 @@ class SequenceFitter:
         self._init_X_targets_denoised()
         self._init_X_wis()
         self._init_keypoints()
+        self._init_edges()
 
         # Initialise the outputs
         self._init_initial_predictions()
@@ -116,7 +121,10 @@ class SequenceFitter:
             model_args = {k: getattr(self.refiner_args, k) for k in arg_names}
             if model_name == 'predictor' and self.refiner_args.initial_pred_batch_size == 1:
                 model_args = {k: getattr(self.refiner_args, k) for k in PREDICTOR_ARG_NAMES_BS1}
-            model_id = model_args[f'{model_name}_model_path'].stem[:4]
+            if model_name == 'edges':
+                model_id = 'rcf'
+            else:
+                model_id = model_args[f'{model_name}_model_path'].stem[:4]
             model_cache_dir = self.base_path / model_name / f'{model_id}_{hash_data(model_args)}'
             model_cache_dir.mkdir(parents=True, exist_ok=True)
             self.cache_dirs[model_name] = model_cache_dir
@@ -381,6 +389,60 @@ class SequenceFitter:
 
         return self._init_keypoints()
 
+    @torch.no_grad()
+    def _init_edges(self):
+        """
+        Instantiate the RCF edge maps.
+        """
+        ra = self.refiner_args
+        if not ra.use_edge_matching:
+            self.edges = None
+            return
+        edges_dir = self.cache_dirs['edges'] \
+                    / ('dn' if ra.edge_matching_use_denoised else 'og') / f'{ra.edge_matching_rcf_size}'
+        if edges_dir.exists():
+            try:
+                self.edges = []
+                for (idx, _) in self.image_paths:
+                    Xe_path = edges_dir / f'{idx:04d}.png'
+                    self.edges.append(to_tensor(Image.open(Xe_path)).squeeze())
+                logger.info(f'Loaded edges from {edges_dir}.')
+                return
+            except Exception:
+                pass
+        edges_dir.mkdir(parents=True, exist_ok=True)
+
+        # Load the edge detector
+        rcf_path = ra.rcf_model_path
+        assert rcf_path.exists(), 'RCF model path does not exist!'
+        rcf = RCF()
+        checkpoint = torch.load(rcf_path, weights_only=True)
+        rcf.load_state_dict(checkpoint, strict=False)
+        rcf.eval()
+        rcf.to(self.device)
+        rcf = torch.jit.script(rcf)
+        logger.info(f'Instantiated RCF network from {rcf_path}.')
+
+        # Find the edges for each image
+        logger.info('Finding edges across image sequence.')
+        X_targets = self.X_targets_denoised if ra.edge_matching_use_denoised else self.X_targets
+        for i, X_path in enumerate(X_targets):
+            if (i + 1) % 10 == 0:
+                logger.info(f'Finding edges for image {i + 1}/{len(self)}.')
+            X = to_tensor(Image.open(X_path))
+            X = F.interpolate(X[None, ...], size=ra.edge_matching_rcf_size, **resize_args)
+            rcf_feats = rcf(X.to(self.device), apply_sigmoid=True)
+            idx = self.image_paths[i][0]
+            self.plotter.save_image(rcf_feats[2].squeeze(), edges_dir / f'{idx:04d}.png')
+
+        # Destroy the edge detector to free up space
+        logger.info('Destroying edge detector to free up space.')
+        del rcf
+        torch.cuda.empty_cache()
+        gc.collect()
+
+        return self._init_edges()
+
     def _init_initial_predictions(self):
         """
         Instantiate the initial predictions.
@@ -407,6 +469,7 @@ class SequenceFitter:
                 pass
         logger.info('Generating initial predictions.')
         ds = self.refiner.manager.ds
+        ra = self.refiner_args
 
         # Make directories
         scenes_initial_dir.mkdir(parents=True, exist_ok=True)
@@ -414,18 +477,17 @@ class SequenceFitter:
         X_annotated_initial_dir.mkdir(parents=True, exist_ok=True)
 
         # Set up the resizing
-        resize_args = dict(mode='bilinear', align_corners=False)
         resize_input_old = self.manager.predictor.resize_input
         self.manager.predictor.resize_input = False
-        oversize_input = self.refiner_args.initial_pred_oversize_input
-        img_size = self.refiner_args.initial_pred_max_img_size if oversize_input else self.manager.image_shape[-1]
+        oversize_input = ra.initial_pred_oversize_input
+        img_size = ra.initial_pred_max_img_size if oversize_input else self.manager.image_shape[-1]
         render_size = ds.dataset_args.image_size  # Use the rendering size the predictor was trained on
 
         # If the batch size is 1 then we can simplify things significantly
-        if self.refiner_args.initial_pred_batch_size == 1:
+        if ra.initial_pred_batch_size == 1:
             scene_args = ds.dataset_args.to_dict()
-            scene_args['spp'] = self.refiner_args.spp
-            scene_args['res'] = self.refiner_args.rendering_size
+            scene_args['spp'] = ra.spp
+            scene_args['res'] = ra.rendering_size
 
             cs = CSDProxy().load(ds.dataset_args.crystal_id)
             crystal_args = dict(
@@ -486,29 +548,29 @@ class SequenceFitter:
             torch.set_grad_enabled(False)
 
             # Ensure the inverse rendering losses are turned on
-            use_inverse_rendering = self.refiner_args.use_inverse_rendering
-            self.refiner_args.use_inverse_rendering = True
-            use_latents_model = self.refiner_args.use_latents_model
-            self.refiner_args.use_latents_model = self.refiner_args.w_latent > 0
-            use_perceptual_model = self.refiner_args.use_perceptual_model
-            self.refiner_args.use_perceptual_model = self.refiner_args.w_perceptual > 0
+            use_inverse_rendering = ra.use_inverse_rendering
+            ra.use_inverse_rendering = True
+            use_latents_model = ra.use_latents_model
+            ra.use_latents_model = ra.w_latent > 0
+            use_perceptual_model = ra.use_perceptual_model
+            ra.use_perceptual_model = ra.w_perceptual > 0
 
             # Noise batch vars
-            bs = self.refiner_args.initial_pred_batch_size // 2
+            bs = ra.initial_pred_batch_size // 2
             noise_scale = torch.linspace(
-                self.refiner_args.initial_pred_noise_min,
-                self.refiner_args.initial_pred_noise_max,
+                ra.initial_pred_noise_min,
+                ra.initial_pred_noise_max,
                 bs,
                 device=self.device
             )
 
             def update_scene_parameters(scene_: Scene):
                 # Update the scene rendering parameters for optimisation
-                scene_.res = self.refiner_args.rendering_size
-                scene_.spp = self.refiner_args.spp
+                scene_.res = ra.rendering_size
+                scene_.spp = ra.spp
                 scene_.camera_type = 'perspective'  # thinlens doesn't work for inverse rendering
-                scene_.integrator_max_depth = self.refiner_args.integrator_max_depth
-                scene_.integrator_rr_depth = self.refiner_args.integrator_rr_depth
+                scene_.integrator_max_depth = ra.integrator_max_depth
+                scene_.integrator_rr_depth = ra.integrator_rr_depth
                 scene_.build_mi_scene()
                 scene_.crystal.to('cpu')
                 return scene_
@@ -532,8 +594,12 @@ class SequenceFitter:
                         or not oversize_input and X_target.shape[-1] != img_size:
                     X_target = F.interpolate(X_target, size=img_size, **resize_args)
 
-                # Set the target image for loss calculations
+                # Set the target image, keypoints and edge map for loss calculations
                 self.refiner.X_target_aug = self.refiner._resize(X_dn, render_size).permute(1, 2, 0)
+                if ra.use_keypoints:
+                    self.refiner.keypoint_targets = self.keypoints[i]['keypoints']
+                if ra.use_edge_matching:
+                    self.refiner.edge_map = self.edges[i]
 
                 # Create a noisy batch
                 X_target_batch = X_target[None, ...].repeat(bs, 1, 1, 1, 1)
@@ -564,10 +630,9 @@ class SequenceFitter:
                     self.refiner.crystal.to('cpu')
 
                     # Project the crystal mesh - reinitialise the projector for the new scene
-                    if self.refiner_args.use_keypoints:
+                    if ra.use_keypoints or ra.use_edge_matching:
                         self.refiner.init_projector()
                         self.refiner.projector.project(generate_image=False)
-                        self.refiner.keypoint_targets = self.keypoints[i]['keypoints']
 
                     # Calculate losses
                     loss_ij, _ = self.refiner._calculate_losses()
@@ -587,9 +652,9 @@ class SequenceFitter:
             # Restore the settings
             del self.refiner.projector
             self.manager.predictor.resize_input = resize_input_old
-            self.refiner_args.use_inverse_rendering = use_inverse_rendering
-            self.refiner_args.use_latents_model = use_latents_model
-            self.refiner_args.use_perceptual_model = use_perceptual_model
+            ra.use_inverse_rendering = use_inverse_rendering
+            ra.use_latents_model = use_latents_model
+            ra.use_perceptual_model = use_perceptual_model
             torch.set_grad_enabled(prev_grad_enabled)
 
         # Destroy the predictor to free up space
@@ -672,7 +737,7 @@ class SequenceFitter:
             'total': np.zeros(len(self), dtype=np.float32),
             'measurement': np.zeros(len(self), dtype=np.float32),
         }
-        self.calculate_losses(
+        self.calculate_evaluation_losses(
             save_annotations=False,
             save_renders=False,
             initial_or_eval='initial'
@@ -748,7 +813,7 @@ class SequenceFitter:
         if 'origin' in self.fixed_parameters:
             origin_new = init_tensor(self.fixed_parameters['origin'])
             ds = self.refiner.manager.ds
-            cs = ds.csd_proxy.load(ds.dataset_args.crystal_id)
+            cs = CSDProxy().load(ds.dataset_args.crystal_id)
             crystal = Crystal(
                 lattice_unit_cell=cs.lattice_unit_cell,
                 lattice_angles=cs.lattice_angles,
@@ -1159,7 +1224,8 @@ class SequenceFitter:
                     X_target_denoised=batch[1],
                     X_target_wis=batch[2],
                     X_target_denoised_wis=batch[3],
-                    keypoints=[self.keypoints[idx]['keypoints'] for idx in batch_idxs],
+                    keypoints=batch[4],
+                    edges=batch[5],
                     calculate_grads=True,
                     save_annotations=ra.save_annotations_freq > 0 and (step + 1) % ra.save_annotations_freq == 0,
                     save_renders=ra.save_renders_freq > 0 and (step + 1) % ra.save_renders_freq == 0,
@@ -1259,8 +1325,15 @@ class SequenceFitter:
                                                              torch.tensor(seq_loss)[None, ...]])
             self.tb_logger.add_scalar('losses/seq_train', seq_loss, step)
             self.tb_logger.add_scalar('losses/seq_train_ema', seq_loss_ema, step)
-            self.tb_logger.add_scalar('losses/step', loss, step)
+            self.tb_logger.add_scalar('losses/batch', loss, step)
             self.tb_logger.add_scalar('losses/measurement_train', mes_loss, step)
+            for k in stats_batch.keys():
+                if 'losses' not in k:
+                    continue
+                kk = k.split('/')[1]
+                seq_loss_k = self.losses['train'][kk]
+                seq_loss_k = (seq_loss_k[seq_loss_k > 0]).mean().item()
+                self.tb_logger.add_scalar(f'stats/{kk}', seq_loss_k, step)
 
             # Log learning rate and update
             self.tb_logger.add_scalar('lr', self.optimiser.param_groups[0]['lr'], step)
@@ -1311,7 +1384,7 @@ class SequenceFitter:
                 self.update_parameters_from_encoder(save=False)
                 save_annotations = ra.eval_annotate_freq > 0 and (step + 1) % ra.eval_annotate_freq == 0
                 save_renders = ra.eval_render_freq > 0 and (step + 1) % ra.eval_render_freq == 0
-                self.calculate_losses(
+                self.calculate_evaluation_losses(
                     save_annotations=save_annotations,
                     save_renders=save_renders,
                 )
@@ -1349,7 +1422,7 @@ class SequenceFitter:
             self.save()
 
     @torch.no_grad()
-    def calculate_losses(
+    def calculate_evaluation_losses(
             self,
             save_annotations: bool = True,
             save_renders: bool = True,
@@ -1392,18 +1465,19 @@ class SequenceFitter:
                 self.get_parameter_vector(idx) for idx in batch_idxs
             ]).to(self.device)
             p_dict_batch = self._parameter_vectors_to_dict(p_vec_batch)
-            X_batch = [ds[idx] for idx in batch_idxs]
+            batch = [ds[idx] for idx in batch_idxs]
 
             # Calculate losses and stats
             losses_batch, stats_batch, _ = self.refiner_pool.calculate_losses(
                 step=step,
                 refiner_args=self.refiner_args,
                 p_vec_batch=p_vec_batch,
-                X_target=[X[0] for X in X_batch],
-                X_target_denoised=[X[1] for X in X_batch],
-                X_target_wis=torch.stack([X[2] for X in X_batch]).permute(0, 2, 3, 1),
-                X_target_denoised_wis=torch.stack([X[3] for X in X_batch]).permute(0, 2, 3, 1),
-                keypoints=[self.keypoints[idx]['keypoints'] for idx in batch_idxs],
+                X_target=[X[0] for X in batch],
+                X_target_denoised=[X[1] for X in batch],
+                X_target_wis=torch.stack([X[2] for X in batch]).permute(0, 2, 3, 1),
+                X_target_denoised_wis=torch.stack([X[3] for X in batch]).permute(0, 2, 3, 1),
+                keypoints=[X[4] for X in batch] if batch[0][4] is not None else [None for _ in batch],
+                edges=torch.stack([X[5] for X in batch]) if batch[0][5] is not None else [None for _ in batch],
                 calculate_grads=False,
                 save_annotations=save_annotations,
                 save_renders=save_renders,
@@ -1440,6 +1514,13 @@ class SequenceFitter:
                                                             torch.tensor(seq_loss)[None, ...]])
             self.tb_logger.add_scalar('losses/seq_eval', seq_loss, step)
             self.tb_logger.add_scalar('losses/measurement_eval', mes_loss, step)
+            for k in stats_batch.keys():
+                if 'losses' not in k:
+                    continue
+                kk = k.split('/')[1]
+                seq_loss_k = self.losses['eval'][kk]
+                seq_loss_k = (seq_loss_k[seq_loss_k > 0]).mean().item()
+                self.tb_logger.add_scalar(f'stats_eval/{kk}', seq_loss_k, step)
 
     @torch.no_grad()
     def update_X_preds_from_parameters(

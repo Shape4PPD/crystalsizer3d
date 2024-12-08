@@ -18,14 +18,19 @@ KEYPOINTS_ARG_NAMES = [
     'keypoints_max_attenuation_factor', 'keypoints_low_res_catchment_distance', 'keypoints_loss_type'
 ]
 
+EDGES_ARG_NAMES = [
+    'rcf_model_path'
+]
+
 PREDICTOR_ARG_NAMES = [
     'predictor_model_path', 'initial_pred_noise_min', 'initial_pred_noise_max', 'initial_pred_oversize_input',
-    'initial_pred_max_img_size', 'multiscale', 'use_keypoints', 'rendering_size', 'spp', 'integrator_max_depth',
-    'integrator_rr_depth', 'crop_render', 'crop_render_margin', 'n_patches', 'patch_size', 'w_img_l1', 'w_img_l2',
-    'w_perceptual', 'w_latent', 'w_rcf', 'w_overshoot', 'w_symmetry', 'w_z_pos', 'w_rotation_xy', 'w_patches',
-    'w_fullsize', 'w_switch_probs', 'w_keypoints', 'w_anchors', 'l_decay_l1', 'l_decay_l2', 'l_decay_perceptual',
-    'l_decay_latent', 'l_decay_rcf', 'perceptual_model', 'latents_model', 'mv2_config_path', 'mv2_checkpoint_path',
-    'rcf_model_path', 'rcf_loss_type', 'keypoints_loss_type'
+    'initial_pred_max_img_size', 'multiscale', 'use_keypoints', 'use_edge_matching', 'rendering_size', 'spp',
+    'integrator_max_depth', 'integrator_rr_depth', 'crop_render', 'crop_render_margin', 'n_patches', 'patch_size',
+    'w_img_l1', 'w_img_l2', 'w_perceptual', 'w_latent', 'w_rcf', 'w_overshoot', 'w_symmetry', 'w_z_pos',
+    'w_rotation_xy', 'w_patches', 'w_fullsize', 'w_switch_probs', 'w_keypoints', 'w_edge_matching', 'w_anchors',
+    'l_decay_l1', 'l_decay_l2', 'l_decay_perceptual', 'l_decay_latent', 'l_decay_rcf', 'perceptual_model',
+    'latents_model', 'mv2_config_path', 'mv2_checkpoint_path', 'rcf_model_path', 'rcf_loss_type', 'keypoints_loss_type',
+    'edge_matching_points_per_unit', 'edge_matching_rcf_size', 'edge_matching_use_denoised',
 ]
 
 PREDICTOR_ARG_NAMES_BS1 = [
@@ -73,12 +78,19 @@ class RefinerArgs(BaseArgs):
             keypoints_low_res_catchment_distance: int = 100,
             keypoints_loss_type: str = 'mindists',
 
+            # Edge Matching settings
+            edge_matching_points_per_unit: float = 0.05,
+            edge_matching_rcf_size: int = 400,
+            edge_matching_use_denoised: bool = False,
+            edge_matching_wait_n_steps: int = 0,
+
             # Refining settings
             use_inverse_rendering: bool = True,
             use_perceptual_model: bool = True,
             use_latents_model: bool = True,
             use_rcf_model: bool = True,
             use_keypoints: bool = False,
+            use_edge_matching: bool = False,
 
             # Rendering settings
             ir_wait_n_steps: int = 0,
@@ -162,6 +174,7 @@ class RefinerArgs(BaseArgs):
             w_temporal: float = 1.0,
             w_keypoints: float = 1.0,
             w_anchors: float = 1.0,
+            w_edge_matching: float = 1.0,
 
             # Loss decay factors
             l_decay_l1: float = 1.0,
@@ -267,12 +280,19 @@ class RefinerArgs(BaseArgs):
         self.keypoints_low_res_catchment_distance = keypoints_low_res_catchment_distance
         self.keypoints_loss_type = keypoints_loss_type
 
+        # Edge matching settings:
+        self.edge_matching_points_per_unit = edge_matching_points_per_unit
+        self.edge_matching_rcf_size = edge_matching_rcf_size
+        self.edge_matching_use_denoised = edge_matching_use_denoised
+        self.edge_matching_wait_n_steps = edge_matching_wait_n_steps
+
         # Refining settings
         self.use_inverse_rendering = use_inverse_rendering
         self.use_perceptual_model = use_inverse_rendering & use_perceptual_model
         self.use_latents_model = use_inverse_rendering & use_latents_model
         self.use_rcf_model = use_inverse_rendering & use_rcf_model
         self.use_keypoints = use_keypoints
+        self.use_edge_matching = use_edge_matching
 
         # Rendering settings
         self.ir_wait_n_steps = ir_wait_n_steps
@@ -360,6 +380,7 @@ class RefinerArgs(BaseArgs):
         self.w_temporal = w_temporal
         self.w_keypoints = w_keypoints
         self.w_anchors = w_anchors
+        self.w_edge_matching = w_edge_matching
 
         # Loss decay factors
         self.l_decay_l1 = l_decay_l1
@@ -475,6 +496,17 @@ class RefinerArgs(BaseArgs):
                            choices=['mindists', 'sinkhorn', 'hausdorff'],
                            help='Type of loss to use for keypoints refinement.')
 
+        # Edge Matching settings
+        group.add_argument('--edge-matching-points-per-unit', type=float, default=0.05,
+                           help='Number of edge matching points per unit length of the crystal.')
+        group.add_argument('--edge-matching-rcf-size', type=int, default=400,
+                           help='Size of the edge matching RCF.')
+        group.add_argument('--edge-matching-use-denoised', type=str2bool, default=False,
+                           help='Use the denoised image for edge matching.')
+        group.add_argument('--edge-matching-wait-n-steps', type=int, default=0,
+                           help='Number of optimisation steps to wait before turning edge matching on '
+                                '(if --use-edge-matching=True).')
+
         # Refining settings
         group.add_argument('--use-inverse-rendering', type=str2bool, default=True,
                            help='Use inverse rendering.')
@@ -486,6 +518,8 @@ class RefinerArgs(BaseArgs):
                            help='Use the RCF model. Requires inverse rendering.')
         group.add_argument('--use-keypoints', type=str2bool, default=False,
                            help='Use the keypoints detection method.')
+        group.add_argument('--use-edge-matching', type=str2bool, default=False,
+                           help='Use the edge matching method.')
 
         # Rendering settings
         group.add_argument('--ir-wait-n-steps', type=int, default=0,
@@ -647,6 +681,8 @@ class RefinerArgs(BaseArgs):
                            help='Weight of the keypoints loss. Only used when using keypoints model.')
         group.add_argument('--w-anchors', type=float, default=1.,
                            help='Weight of the manually-defined anchors loss.')
+        group.add_argument('--w-edge-matching', type=float, default=1.,
+                           help='Weight of the edge matching loss.')
 
         # Loss decay factors
         group.add_argument('--l-decay-l1', type=float, default=0.5,

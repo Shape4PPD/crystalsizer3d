@@ -141,6 +141,7 @@ def json_to_numpy(data: Any) -> Any:
                 return np.array(data)
         return [json_to_numpy(v) for v in data]
 
+
 def json_to_torch(data: Any) -> Any:
     """
     Convert json data to torch tensors where possible.

@@ -44,6 +44,7 @@ from crystalsizer3d.projector import ProjectedVertexKey, Projector
 from crystalsizer3d.refiner.denoising import denoise_image
 from crystalsizer3d.refiner.keypoint_detection import find_keypoints, generate_attention_patches, \
     to_absolute_coordinates
+from crystalsizer3d.refiner.edge_matcher import EdgeMatcher
 from crystalsizer3d.scene_components.scene import Scene
 from crystalsizer3d.scene_components.utils import orthographic_scale_factor
 from crystalsizer3d.util.convergence_detector import ConvergenceDetector
@@ -158,6 +159,9 @@ class Refiner:
         elif name == 'latents_model':
             self._init_latents_model()
             return self.latents_model
+        elif name in ['edge_matcher', 'edge_map']:
+            self._init_edge_matcher()
+            return self.edge_matcher
         elif name in ['optimiser', 'lr_scheduler']:
             self._init_optimiser()
             return getattr(self, name)
@@ -383,11 +387,7 @@ class Refiner:
         Initialise the Richer Convolutional Features model for edge detection.
         """
         rcf_path = self.args.rcf_model_path
-        if self.args.use_rcf_model:
-            assert rcf_path.exists(), 'RCF model path does not exist!'
-        else:
-            self.rcf = None
-            return
+        assert rcf_path.exists(), 'RCF model path does not exist!'
 
         rcf = RCF()
         checkpoint = torch.load(rcf_path, weights_only=True)
@@ -408,8 +408,31 @@ class Refiner:
         if self.rcf is None:
             self.rcf_feats_og = None
         else:
-            model_input = self.X_target_wis[None, ...].permute(0, 3, 1, 2)
-            self.rcf_feats_og = self.rcf(model_input, apply_sigmoid=False)
+            if self.args.edge_matching_use_denoised:
+                model_input = self.X_target_denoised[None, ...].permute(0, 3, 1, 2)
+            else:
+                model_input = self.X_target[None, ...].permute(0, 3, 1, 2)
+            model_input_res = F.interpolate(model_input,
+                                            size=(self.args.edge_matching_rcf_size,
+                                                  self.args.edge_matching_rcf_size),
+                                            mode='bilinear',
+                                            align_corners=False)
+
+            logger.info(f'Calculating RCF on image size {self.args.edge_matching_rcf_size}.')
+            self.rcf_feats_og = self.rcf(model_input_res, apply_sigmoid=False)
+
+    def _init_edge_matcher(self):
+        """
+        Initialise the Edge Matcher for calculating the distance
+        from points on an edge to the detected edge found by the RCF model.
+        """
+        edge_matcher = EdgeMatcher(points_per_unit=self.args.edge_matching_points_per_unit)
+        edge_matcher.to(self.device)
+        self.edge_matcher = edge_matcher
+        try:
+            object.__getattribute__(self, 'edge_map')
+        except AttributeError:
+            self.edge_map = self.rcf_feats_og[2].detach().squeeze().cpu()
 
     def _init_convergence_detector(self):
         """
@@ -787,6 +810,8 @@ class Refiner:
                 metric_keys.append('losses/rcf')
         if self.args.use_keypoints:
             metric_keys.append('losses/keypoints')
+        if self.args.use_edge_matching:
+            metric_keys.append('losses/edge_matching')
 
         return metric_keys
 
@@ -959,7 +984,7 @@ class Refiner:
             self.crystal.to('cpu')
 
             # Project the crystal mesh - reinitialise the projector for the new scene
-            if self.args.use_keypoints and len(self.keypoint_targets) > 0:
+            if self.args.use_keypoints and len(self.keypoint_targets) > 0 or self.args.use_edge_matching:
                 self.init_projector()
                 self.projector.project(generate_image=False)
 
@@ -1032,6 +1057,7 @@ class Refiner:
         running_metrics = {k: 0. for k in self.metric_keys}
         running_tps = 0
         use_inverse_rendering = self.args.use_inverse_rendering  # Save the inverse rendering setting
+        use_edge_matching = self.args.use_edge_matching  # Save the edge matching setting
         self.distances_est = distances_est
         self.distances_min = distances_min
 
@@ -1047,8 +1073,9 @@ class Refiner:
             start_time = time.time()
             self.step = step
 
-            # Conditionally enable the inverse rendering
+            # Conditionally enable the inverse rendering and edge matching
             self.args.use_inverse_rendering = use_inverse_rendering and step >= self.args.ir_wait_n_steps
+            self.args.use_edge_matching = use_edge_matching and step >= self.args.edge_matching_wait_n_steps
 
             # Train for a single step
             loss, stats = self._train_step()
@@ -1131,8 +1158,9 @@ class Refiner:
         # Final plots
         self._make_plots(force=True)
 
-        # Restore the inverse rendering losses setting
+        # Restore the inverse rendering and edge matching settings
         self.args.use_inverse_rendering = use_inverse_rendering
+        self.args.use_edge_matching = use_edge_matching
 
         logger.info('Training complete.')
 
@@ -1246,6 +1274,7 @@ class Refiner:
 
         # Project the crystal mesh
         if (self.args.use_keypoints and len(self.keypoint_targets) > 0) or len(self.anchors) > 0 \
+                or self.args.use_edge_matching \
                 or (self.args.use_inverse_rendering and self.args.crop_render):
             self.projector.project(generate_image=False)
 
@@ -1274,8 +1303,8 @@ class Refiner:
                 exp_size = wis / region_size
                 self.scene_params[Scene.FILM_SIZE_KEY] = round(exp_size)
                 self.scene_params[Scene.FILM_CROP_SIZE_KEY] = wis
-                self.scene_params[Scene.FILM_CROP_OFFSET_KEY] = (
-                    ((cp - region_size / 2) * exp_size).round().int().tolist())
+                self.scene_params[Scene.FILM_CROP_OFFSET_KEY] = (((cp - region_size / 2) * exp_size)
+                                                                 .round().int().tolist())
                 is_cropped = True
 
             X_pred = self._render_image(v, f, eta, roughness, radiance, seed=self.step)
@@ -1382,8 +1411,9 @@ class Refiner:
             switch_loss, switch_stats = self._switch_loss()
             temporal_loss, temporal_stats = self._temporal_loss()
 
-            # Keypoints and anchors
+            # Keypoints, edge matching and anchors
             keypoints_loss, keypoints_stats = self._keypoints_loss()
+            edge_matching_loss, edge_matching_stats = self._edge_matching_loss()
             anchors_loss, anchors_stats = self._anchors_loss()
 
             # Combine losses
@@ -1395,6 +1425,7 @@ class Refiner:
                    + switch_loss * self.args.w_switch_probs \
                    + temporal_loss * self.args.w_temporal \
                    + keypoints_loss * self.args.w_keypoints \
+                   + edge_matching_loss * self.args.w_edge_matching \
                    + anchors_loss * self.args.w_anchors
 
             # Patches - recalculate the image losses for each patch
@@ -1405,9 +1436,8 @@ class Refiner:
             stats = {
                 'losses/total': loss.item(),
                 **l1_stats, **l2_stats, **percept_stats, **latent_stats, **rcf_stats, **overshoot_stats,
-                **symmetry_stats,
-                **z_pos_stats, **rxy_stats, **switch_stats, **temporal_stats, **keypoints_stats, **anchors_stats,
-                **patch_stats
+                **symmetry_stats, **z_pos_stats, **rxy_stats, **switch_stats, **temporal_stats, **keypoints_stats,
+                **edge_matching_stats, **anchors_stats, **patch_stats
             }
 
         else:
@@ -1811,6 +1841,21 @@ class Refiner:
 
         return loss, stats
 
+    def _edge_matching_loss(self):
+        """
+        Calculate the edge matching loss.
+        """
+        loss = torch.tensor(0.)
+        stats = {}
+        if not self.args.use_edge_matching:
+            return loss, stats
+        loss, distances = self.edge_matcher(
+            self.projector.edge_segments_rel,
+            self.edge_map
+        )
+        stats[f'losses/edge_matching'] = loss.item()
+        return loss, stats
+
     def _anchors_loss(self):
         """
         Calculate the loss for manual constraints.
@@ -1889,7 +1934,7 @@ class Refiner:
 
         n_rows = 3
         rcf_feats = None
-        if self.rcf_feats_og is not None:
+        if self.args.use_rcf_model and self.rcf_feats_og is not None:
             assert self.rcf_feats is not None, 'RCF features not available.'
             rcf_feats = [torch.cat([f0[:, 0], f1[:, 0]]) for f0, f1 in zip(self.rcf_feats_og, self.rcf_feats)]
             assert len(self.args.plot_rcf_feats) <= len(rcf_feats), \
@@ -1927,7 +1972,8 @@ class Refiner:
                            facecolors=(0, 0.7, 0, 0.2),
                            edgecolors=(0, 0.7, 0, 0.5),
                            linewidths=0.5, s=25)
-                ax.scatter(*kp_target_abs.T, marker='x', c='g', s=0.2, alpha=0.5)
+                ax.scatter(*kp_target_abs.T, marker='x',
+                           c='g', s=0.2, alpha=0.5)
                 ax.scatter(*kp_pred_abs.T,
                            facecolors=(1, 0, 0, 0.2),
                            edgecolors=(1, 0, 0, 0.5),
