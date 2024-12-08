@@ -159,9 +159,9 @@ class Refiner:
         elif name == 'latents_model':
             self._init_latents_model()
             return self.latents_model
-        elif name == 'edge_matching_loss':
-            self._init_edge_matching_loss()
-            return self.edge_matching_loss
+        elif name in ['edge_matcher', 'edge_map']:
+            self._init_edge_matcher()
+            return self.edge_matcher
         elif name in ['optimiser', 'lr_scheduler']:
             self._init_optimiser()
             return getattr(self, name)
@@ -418,18 +418,21 @@ class Refiner:
                                             mode='bilinear',
                                             align_corners=False)
 
-            logger.info(f'Calculating RCF on image size {model_input_res.shape}.')
+            logger.info(f'Calculating RCF on image size {self.args.edge_matching_rcf_size}.')
             self.rcf_feats_og = self.rcf(model_input_res, apply_sigmoid=False)
 
-    def _init_edge_matching_loss(self):
+    def _init_edge_matcher(self):
         """
-        Initialise the Edge Matching loss for calculating the distance
-        from points on an edge to the detected edge found by RCF
+        Initialise the Edge Matcher for calculating the distance
+        from points on an edge to the detected edge found by the RCF model.
         """
-        edge_matching_loss = EdgeMatcher(
-            points_per_unit=self.args.edge_matching_points_per_unit)
-        edge_matching_loss.to(self.device)
-        self.edge_matching_loss = edge_matching_loss
+        edge_matcher = EdgeMatcher(points_per_unit=self.args.edge_matching_points_per_unit)
+        edge_matcher.to(self.device)
+        self.edge_matcher = edge_matcher
+        try:
+            object.__getattribute__(self, 'edge_map')
+        except AttributeError:
+            self.edge_map = self.rcf_feats_og[2].detach().squeeze().cpu()
 
     def _init_convergence_detector(self):
         """
@@ -543,8 +546,7 @@ class Refiner:
                 logger.info('Loaded denoised target image.')
                 return
             except Exception as e:
-                logger.warning(
-                    f'Failed to load cached denoised target image: {e}')
+                logger.warning(f'Failed to load cached denoised target image: {e}')
                 cache_path.unlink()
         save_dir = self.save_dir / 'denoise_patches'
         save_dir.mkdir(parents=True, exist_ok=True)
@@ -1055,6 +1057,7 @@ class Refiner:
         running_metrics = {k: 0. for k in self.metric_keys}
         running_tps = 0
         use_inverse_rendering = self.args.use_inverse_rendering  # Save the inverse rendering setting
+        use_edge_matching = self.args.use_edge_matching  # Save the edge matching setting
         self.distances_est = distances_est
         self.distances_min = distances_min
 
@@ -1070,8 +1073,9 @@ class Refiner:
             start_time = time.time()
             self.step = step
 
-            # Conditionally enable the inverse rendering
+            # Conditionally enable the inverse rendering and edge matching
             self.args.use_inverse_rendering = use_inverse_rendering and step >= self.args.ir_wait_n_steps
+            self.args.use_edge_matching = use_edge_matching and step >= self.args.edge_matching_wait_n_steps
 
             # Train for a single step
             loss, stats = self._train_step()
@@ -1154,8 +1158,9 @@ class Refiner:
         # Final plots
         self._make_plots(force=True)
 
-        # Restore the inverse rendering losses setting
+        # Restore the inverse rendering and edge matching settings
         self.args.use_inverse_rendering = use_inverse_rendering
+        self.args.use_edge_matching = use_edge_matching
 
         logger.info('Training complete.')
 
@@ -1269,6 +1274,7 @@ class Refiner:
 
         # Project the crystal mesh
         if (self.args.use_keypoints and len(self.keypoint_targets) > 0) or len(self.anchors) > 0 \
+                or self.args.use_edge_matching \
                 or (self.args.use_inverse_rendering and self.args.crop_render):
             self.projector.project(generate_image=False)
 
@@ -1297,8 +1303,8 @@ class Refiner:
                 exp_size = wis / region_size
                 self.scene_params[Scene.FILM_SIZE_KEY] = round(exp_size)
                 self.scene_params[Scene.FILM_CROP_SIZE_KEY] = wis
-                self.scene_params[Scene.FILM_CROP_OFFSET_KEY] = (
-                    ((cp - region_size / 2) * exp_size).round().int().tolist())
+                self.scene_params[Scene.FILM_CROP_OFFSET_KEY] = (((cp - region_size / 2) * exp_size)
+                                                                 .round().int().tolist())
                 is_cropped = True
 
             X_pred = self._render_image(v, f, eta, roughness, radiance, seed=self.step)
@@ -1835,6 +1841,21 @@ class Refiner:
 
         return loss, stats
 
+    def _edge_matching_loss(self):
+        """
+        Calculate the edge matching loss.
+        """
+        loss = torch.tensor(0.)
+        stats = {}
+        if not self.args.use_edge_matching:
+            return loss, stats
+        loss, distances = self.edge_matcher(
+            self.projector.edge_segments_rel,
+            self.edge_map
+        )
+        stats[f'losses/edge_matching'] = loss.item()
+        return loss, stats
+
     def _anchors_loss(self):
         """
         Calculate the loss for manual constraints.
@@ -1874,21 +1895,6 @@ class Refiner:
             loss = torch.stack(losses).mean()
         stats[f'losses/anchors'] = loss.item()
 
-        return loss, stats
-
-    def _edge_matching_loss(self):
-        """
-        Calculate the edge matching loss.
-        """
-        loss = torch.tensor(0.)
-        stats = {}
-        if not self.args.use_edge_matching:
-            return loss, stats
-        loss, distances = self.edge_matching_loss(
-            self.projector.edge_segments_rel,
-            1 - self.rcf_feats_og[2])
-
-        stats[f'losses/edge_matching'] = loss.item()
         return loss, stats
 
     @torch.no_grad()

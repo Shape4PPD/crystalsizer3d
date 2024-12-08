@@ -36,26 +36,38 @@ class SequenceEncoderFFN(BaseNet):
             act = nn.GELU()
         elif self.activation == 'relu':
             act = nn.ReLU()
+        elif self.activation == 'sigmoid':
+            act = nn.Sigmoid()
+        elif self.activation == 'tanh':
+            act = nn.Tanh()
         else:
             raise ValueError(f'Invalid activation function: {self.activation}')
-        self.model = nn.Sequential()
-        n_in = 1
+        self.activation_module = act
+        self.dropout_module = nn.Dropout(self.dropout) if self.dropout > 0 else None
+
+        self.layers = nn.ModuleList()
         for i in range(self.n_layers):
-            self.model.add_module(f'HiddenLayer{i}', nn.Linear(n_in, self.hidden_dim))
-            self.model.add_module(f'Activation{i}', act)
-            if self.dropout > 0:
-                self.model.add_module(f'Dropout{i}', nn.Dropout(self.dropout))
-            n_in = self.hidden_dim
-        self.model.add_module('OutputLayer', nn.Linear(n_in, self.param_dim))
+            # Each layer takes the current hidden state + time input
+            self.layers.append(nn.Linear(self.hidden_dim + 1 if i > 0 else 1, self.hidden_dim))
+        self.output_layer = nn.Linear(self.hidden_dim + 1, self.param_dim)
 
     def forward(self, time_points: Tensor):
         """
-        Encode continuous time points with Fourier features and pass through transformer encoder.
+        Encode continuous time points using a feedforward network.
         """
         if time_points.ndim == 1:
             time_points = time_points[:, None]
 
-        # Pass through encoder
-        x = self.model(time_points)
+        # Start with the time input and pass through the layers
+        x = time_points
+        for i in range(self.n_layers):
+            x = self.layers[i](x)
+            x = self.activation_module(x)
+            if self.dropout > 0:
+                x = self.dropout_module(x)
 
-        return x
+            # Concatenate the time input to the current hidden state
+            x = torch.cat([time_points, x], dim=-1)
+
+        # Final output layer
+        return self.output_layer(x)

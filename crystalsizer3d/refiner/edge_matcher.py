@@ -11,8 +11,8 @@ def to_absolute_coordinates(coords: Tensor, image_size: Tensor) -> Tensor:
     Convert relative coordinates to absolute coordinates.
     """
     return torch.stack([
-        (coords[:, 0] * 0.5 + 0.5) * image_size[2],
-        (0.5 - coords[:, 1] * 0.5) * image_size[3]
+        (coords[:, 0] * 0.5 + 0.5) * image_size[0],
+        (0.5 - coords[:, 1] * 0.5) * image_size[1]
     ], dim=1)
 
 
@@ -21,23 +21,26 @@ class EdgeMatcher(nn.Module):
         super(EdgeMatcher, self).__init__()
         self.points_per_unit = points_per_unit
 
-    def forward(self, edge_segments: Tensor, distance_image: Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+    def forward(self, edge_segments: Tensor, edge_image: Tensor) -> Tuple[Tensor, Tensor]:
+        assert edge_image.ndim == 2, 'Distance image must be 2D.'
 
-        self.edge_segments = {k: to_absolute_coordinates(v.to(distance_image.device), distance_image.shape)
+        # Invert the edge image, so we look for minima instead of maxima
+        edge_image = -edge_image
+
+        self.edge_segments = {k: to_absolute_coordinates(v.to(edge_image.device), edge_image.shape)
                               for k, v in edge_segments.items()}
 
         self._calculate_edge_points()
 
         # Sample points along lines for all reference points
         line_points = self.sample_points_along_line_full_image(self.edge_points, self.edge_normals, 1000,
-                                                               distance_image.shape[-2:])
+                                                               edge_image.shape)
 
         # Get reference values for all points
-        reference_values = self.points_in_image(
-            self.edge_points, distance_image)
+        reference_values = self.points_in_image(self.edge_points, edge_image)
 
         # Find nearest local minima for all line points
-        nearest_minima_positions, nearest_minima_values = self.find_closest_minima(distance_image, line_points,
+        nearest_minima_positions, nearest_minima_values = self.find_closest_minima(edge_image, line_points,
                                                                                    self.edge_points)
 
         # Filter out None values
@@ -47,7 +50,7 @@ class EdgeMatcher(nn.Module):
             return torch.tensor(0.0)  # Return zero if no valid minima found
 
         valid_indices = torch.tensor(
-            valid_indices, device=distance_image.device)
+            valid_indices, device=edge_image.device)
         valid_ref_points = self.edge_points[valid_indices]
         valid_reference_values = reference_values[:, :, valid_indices]
         valid_nearest_minima_positions = torch.stack(
@@ -171,9 +174,9 @@ class EdgeMatcher(nn.Module):
 
         return torch.stack([intersection_1, intersection_2])
 
-    def points_in_image(self, points, distance_image):
-        # Height and Width of the distance image
-        H, W = distance_image.shape[-2], distance_image.shape[-1]
+    def points_in_image(self, points, edge_image):
+        # Height and Width of the edge image
+        H, W = edge_image.shape
 
         # Normalize points to [-1, 1] range for grid_sample
         normalized_points = torch.stack([
@@ -188,7 +191,7 @@ class EdgeMatcher(nn.Module):
 
         # Interpolate values using bilinear sampling
         interpolated_values = F.grid_sample(
-            distance_image.detach(),
+            edge_image[None, None, ...],
             grid,
             mode='bilinear',
             align_corners=True
@@ -206,8 +209,7 @@ class EdgeMatcher(nn.Module):
         )
 
         # Calculate distances from reference points to all sampled points
-        dist = torch.norm(
-            sampled_points - reference_points.unsqueeze(1), dim=2)
+        dist = torch.norm(sampled_points - reference_points.unsqueeze(1), dim=2)
         ref_inds = torch.argmin(dist, dim=1)
 
         # Find local minima for each set of sampled points

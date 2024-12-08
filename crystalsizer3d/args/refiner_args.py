@@ -18,6 +18,10 @@ KEYPOINTS_ARG_NAMES = [
     'keypoints_max_attenuation_factor', 'keypoints_low_res_catchment_distance', 'keypoints_loss_type'
 ]
 
+EDGES_ARG_NAMES = [
+    'rcf_model_path'
+]
+
 PREDICTOR_ARG_NAMES = [
     'predictor_model_path', 'initial_pred_noise_min', 'initial_pred_noise_max', 'initial_pred_oversize_input',
     'initial_pred_max_img_size', 'multiscale', 'use_keypoints', 'use_edge_matching', 'rendering_size', 'spp',
@@ -78,6 +82,7 @@ class RefinerArgs(BaseArgs):
             edge_matching_points_per_unit: float = 0.05,
             edge_matching_rcf_size: int = 400,
             edge_matching_use_denoised: bool = False,
+            edge_matching_wait_n_steps: int = 0,
 
             # Refining settings
             use_inverse_rendering: bool = True,
@@ -235,8 +240,7 @@ class RefinerArgs(BaseArgs):
             assert predictor_model_path.suffix == '.json', f'Predictor model path must be a json file: {predictor_model_path}'
         self.predictor_model_path = predictor_model_path
         if image_path is not None:
-            assert image_path.exists(
-            ), f'Image path does not exist: {image_path}'
+            assert image_path.exists(), f'Image path does not exist: {image_path}'
         self.image_path = image_path
         self.ds_idx = ds_idx
 
@@ -280,6 +284,7 @@ class RefinerArgs(BaseArgs):
         self.edge_matching_points_per_unit = edge_matching_points_per_unit
         self.edge_matching_rcf_size = edge_matching_rcf_size
         self.edge_matching_use_denoised = edge_matching_use_denoised
+        self.edge_matching_wait_n_steps = edge_matching_wait_n_steps
 
         # Refining settings
         self.use_inverse_rendering = use_inverse_rendering
@@ -498,6 +503,9 @@ class RefinerArgs(BaseArgs):
                            help='Size of the edge matching RCF.')
         group.add_argument('--edge-matching-use-denoised', type=str2bool, default=False,
                            help='Use the denoised image for edge matching.')
+        group.add_argument('--edge-matching-wait-n-steps', type=int, default=0,
+                           help='Number of optimisation steps to wait before turning edge matching on '
+                                '(if --use-edge-matching=True).')
 
         # Refining settings
         group.add_argument('--use-inverse-rendering', type=str2bool, default=True,
@@ -510,6 +518,8 @@ class RefinerArgs(BaseArgs):
                            help='Use the RCF model. Requires inverse rendering.')
         group.add_argument('--use-keypoints', type=str2bool, default=False,
                            help='Use the keypoints detection method.')
+        group.add_argument('--use-edge-matching', type=str2bool, default=False,
+                           help='Use the edge matching method.')
 
         # Rendering settings
         group.add_argument('--ir-wait-n-steps', type=int, default=0,
