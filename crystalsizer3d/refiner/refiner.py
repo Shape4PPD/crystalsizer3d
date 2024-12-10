@@ -1972,8 +1972,7 @@ class Refiner:
                            facecolors=(0, 0.7, 0, 0.2),
                            edgecolors=(0, 0.7, 0, 0.5),
                            linewidths=0.5, s=25)
-                ax.scatter(*kp_target_abs.T, marker='x',
-                           c='g', s=0.2, alpha=0.5)
+                ax.scatter(*kp_target_abs.T, marker='x', c='g', s=0.2, alpha=0.5)
                 ax.scatter(*kp_pred_abs.T,
                            facecolors=(1, 0, 0, 0.2),
                            edgecolors=(1, 0, 0, 0.5),
