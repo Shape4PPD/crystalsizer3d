@@ -16,13 +16,14 @@ class SequenceFitterArgs(BaseArgs):
             end_image: int = -1,
             initial_scene: Path | str | None = None,
             fix_parameters: List[str] | None = None,
+            stationary_parameters: List[str] | None = None,
 
             # Sequence encoder model parameters
             seq_encoder_model: str = 'transformer',
             hidden_dim: int = 256,
             n_layers: int = 4,
             n_heads: int = 8,
-            max_freq: float = 10.0,
+            n_exponents: int = 1,
             dropout: float = 0.1,
             activation: str = 'gelu',
 
@@ -69,15 +70,21 @@ class SequenceFitterArgs(BaseArgs):
         if fix_parameters is not None:
             assert initial_scene is not None, 'Must provide an initial scene file if fixing parameters.'
             from crystalsizer3d.sequence.sequence_fitter import PARAMETER_KEYS
-            assert all(param in PARAMETER_KEYS for param in fix_parameters), f'Invalid parameter key: {fix_parameters}.'
+            assert all(param in PARAMETER_KEYS for param in fix_parameters), \
+                f'Invalid parameter key: {fix_parameters}.'
         self.fix_parameters = fix_parameters
+        if stationary_parameters is not None:
+            from crystalsizer3d.sequence.sequence_fitter import PARAMETER_KEYS
+            assert all(param in PARAMETER_KEYS for param in stationary_parameters), \
+                f'Invalid parameter key: {stationary_parameters}.'
+        self.stationary_parameters = stationary_parameters
 
         # Sequence encoder model parameters
         self.seq_encoder_model = seq_encoder_model
         self.hidden_dim = hidden_dim
         self.n_layers = n_layers
         self.n_heads = n_heads
-        self.max_freq = max_freq
+        self.n_exponents = n_exponents
         self.dropout = dropout
         self.activation = activation
 
@@ -125,6 +132,8 @@ class SequenceFitterArgs(BaseArgs):
                             help='Path to the initial scene file. Will be used for any fixed parameters.')
         parser.add_argument('--fix-parameters', type=lambda s: s.split(','), default=[],
                             help='Fix these parameters to the values set in the initial scene file.')
+        parser.add_argument('--stationary-parameters', type=lambda s: s.split(','), default=[],
+                            help='Stationary parameters that do not change over time but still need to be trained.')
 
         # Sequence encoder model parameters
         group.add_argument('--seq-encoder-model', type=str, default='transformer', choices=['transformer', 'ffn'],
@@ -135,8 +144,9 @@ class SequenceFitterArgs(BaseArgs):
                            help='Number of transformer encoder layers.')
         group.add_argument('--n-heads', type=int, default=8,
                            help='Number of attention heads in the transformer encoder.')
-        group.add_argument('--max-freq', type=float, default=10.0,
-                           help='Maximum frequency for Fourier features.')
+        group.add_argument('--n-exponents', type=int, default=1,
+                           help='Number of exponents to apply to the input time point when expanding it '
+                                'across the hidden dim for input to the transformer.')
         group.add_argument('--dropout', type=float, default=0.1,
                            help='Dropout probability in the transformer encoder.')
         group.add_argument('--activation', type=str, default='gelu',

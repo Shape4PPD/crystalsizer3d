@@ -1026,11 +1026,12 @@ class SequenceFitter:
         sa = self.sf_args
         if sa.seq_encoder_model == 'transformer':
             self.sequence_encoder = SequenceEncoder(
-                param_dim=self.n_parameters,
+                scene_dict=self.scenes['train'][0]['scene_dict'],
+                fixed_parameters=self.fixed_parameters,
+                stationary_parameters=sa.stationary_parameters,
                 hidden_dim=sa.hidden_dim,
                 n_layers=sa.n_layers,
                 n_heads=sa.n_heads,
-                max_freq=sa.max_freq,
                 dropout=sa.dropout,
                 activation=sa.activation,
             )
