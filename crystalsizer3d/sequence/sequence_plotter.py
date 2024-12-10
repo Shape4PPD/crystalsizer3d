@@ -294,7 +294,8 @@ class SequencePlotter:
         Plot the sequence losses.
         """
         include_keys = ['total', 'measurement', 'l1', 'l2', 'perceptual', 'latents',
-                        'overshoot', 'symmetry', 'z_pos', 'rotation_xy', 'keypoints', 'edge_matching']
+                        'overshoot', 'symmetry', 'z_pos', 'rotation_xy', 'keypoints', 'edge_matching',
+                        'negative_growth']
         losses = {k: job['losses'][k] for k in include_keys if k in job['losses'] and job['losses'][k] is not None}
         measurements = job['measurements']
         n = len(losses)

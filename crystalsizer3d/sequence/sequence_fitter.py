@@ -155,16 +155,17 @@ class SequenceFitter:
         if self.runtime_args.resume_from is not None:
             assert self.runtime_args.resume_from.exists(), f'Resume from path does not exist: {self.runtime_args.resume_from}'
             logger.info(f'Copying files from previous run at {self.runtime_args.resume_from}.')
-            shutil.copytree(self.runtime_args.resume_from, self.path, dirs_exist_ok=True)
+            shutil.copytree(self.runtime_args.resume_from, self.path, dirs_exist_ok=True,
+                            ignore=shutil.ignore_patterns('parent_*'))
 
             # Copy all yml, json and pt files and any parent directory from the previous run to preserve a record
-            parent_dir = self.path / 'parent'
+            parent_dir = self.path / f'parent_{self.runtime_args.resume_from.name}'
             parent_dir.mkdir(exist_ok=True)
             for file_path in self.runtime_args.resume_from.iterdir():
                 if file_path.suffix in ['.yml', '.json', '.pt']:
                     shutil.copy2(file_path, parent_dir)
-                elif file_path.name == 'parent':
-                    shutil.copytree(file_path, parent_dir, dirs_exist_ok=True)
+                elif file_path.name[:6] == 'parent':
+                    shutil.copytree(file_path, parent_dir / file_path.name, dirs_exist_ok=True)
 
         # Save the args into the sequence directory
         with open(self.path / 'args_runtime.yml', 'w') as f:
@@ -1257,10 +1258,27 @@ class SequenceFitter:
                     X_targets_annotated_paths=[self.X_targets_annotated['train'][idx] for idx in batch_idxs],
                 )
                 p_grads = p_grads.to(self.device)
+                p_dict = self._parameter_vectors_to_dict(parameters_pred)
+
+                # Compute the negative growth penalty loss
+                if self.sf_args.w_negative_growth > 0:
+                    d = p_dict['distances']
+                    t_order = ts.argsort()
+                    d_sorted = d[t_order]
+                    neg_growth = (d_sorted[1:] - d_sorted[:-1]).clamp(max=0)**2
+                    l_neg = neg_growth.sum()
+                    reg_grads = torch.autograd.grad(l_neg * self.sf_args.w_negative_growth, parameters_pred)[0]
+                    p_grads = p_grads + reg_grads
+
+                    # Spread out the negative growth loss between neighbouring frames for logging
+                    neg_growth_batch = torch.zeros_like(d)
+                    neg_growth_batch[1:] += neg_growth.detach() / 2
+                    neg_growth_batch[:-1] += neg_growth.detach() / 2
+                    neg_growth_batch = neg_growth_batch[t_order.argsort()]  # reorder back to the batch ordering
+                    stats_batch['losses/negative_growth'] = neg_growth_batch.sum(dim=1).tolist()
 
                 # Update scene and crystal parameters
                 with torch.no_grad():
-                    p_dict = self._parameter_vectors_to_dict(parameters_pred)
                     for i, idx in enumerate(batch_idxs):
                         self.frame_counts[idx] += 1
                         self.losses['train']['total'][idx] = losses_batch[i].item()
@@ -1508,6 +1526,15 @@ class SequenceFitter:
                 X_targets_paths=[self.X_targets[idx] for idx in batch_idxs],
                 X_targets_annotated_paths=[X_targets_annotated[idx] for idx in batch_idxs],
             )
+
+            # Compute the negative growth penalty loss
+            if self.sf_args.w_negative_growth > 0:
+                d = p_dict_batch['distances']
+                neg_growth = (d[1:] - d[:-1]).clamp(max=0)**2
+                neg_growth_batch = torch.zeros_like(d)
+                neg_growth_batch[1:] += neg_growth.detach() / 2
+                neg_growth_batch[:-1] += neg_growth.detach() / 2
+                stats_batch['losses/negative_growth'] = neg_growth_batch.sum(dim=1).tolist()
 
             # Update scene and crystal parameters
             for j, idx in enumerate(batch_idxs):

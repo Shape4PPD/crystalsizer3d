@@ -47,6 +47,7 @@ class SequenceFitterArgs(BaseArgs):
             lr_min: float = 1e-6,
             lr_patience_steps: int = 10,
             lr_decay_rate: float = 0.1,
+            w_negative_growth: float = 0.0,
 
             # Evaluation settings
             eval_batch_size: int = 32,
@@ -108,6 +109,7 @@ class SequenceFitterArgs(BaseArgs):
         self.lr_min = lr_min
         self.lr_patience_steps = lr_patience_steps
         self.lr_decay_rate = lr_decay_rate
+        self.w_negative_growth = w_negative_growth
 
         # Evaluation settings
         self.eval_batch_size = eval_batch_size
@@ -187,6 +189,8 @@ class SequenceFitterArgs(BaseArgs):
                            help='Number of steps before learning rate patience.')
         group.add_argument('--lr-decay-rate', type=float, default=0.5,
                            help='Learning rate decay rate.')
+        group.add_argument('--w-negative-growth', type=float, default=0.,
+                           help='Regularisation weight to penalise negative growth of the crystal distances across a batch.')
 
         # Evaluation settings
         group.add_argument('--eval-batch-size', type=int, default=32,
