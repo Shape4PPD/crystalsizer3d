@@ -81,7 +81,6 @@ class SequenceFitter:
         # Initialise the output directories
         self.base_path = SEQUENCE_DATA_PATH / f'{sf_args.images_dir.stem}_{hash_data(sf_args.images_dir.absolute())}'
         self.path = self.base_path / 'sf' / hash_data([sf_args.to_dict(), refiner_args.to_dict()])
-        self.path.mkdir(parents=True, exist_ok=True)
         self._init_output_dirs()
 
         # Initialise the refiner and the asynchronous plotter
@@ -140,9 +139,32 @@ class SequenceFitter:
             yaml.dump(to_dict(self.refiner_args), f)
 
         # Clear the sequence directory if it already exists and we're not resuming
-        if not self.runtime_args.resume and self.path.exists():
+        if self.path.exists() and not self.runtime_args.resume:
             shutil.rmtree(self.path)
             self.path.mkdir(parents=True, exist_ok=True)
+
+        # If the sequence directory exists, but we're asked to resume from a different checkpoint, abort
+        elif self.path.exists() and self.runtime_args.resume_from is not None:
+            raise RuntimeError('Resuming from a different run will remove the current run\'s data. '
+                               f'Please remove the current run\'s data manually from {self.path} and try again.')
+
+        # Create the sequence directory
+        self.path.mkdir(parents=True, exist_ok=True)
+
+        # Initialise from a previous checkpoint
+        if self.runtime_args.resume_from is not None:
+            assert self.runtime_args.resume_from.exists(), f'Resume from path does not exist: {self.runtime_args.resume_from}'
+            logger.info(f'Copying files from previous run at {self.runtime_args.resume_from}.')
+            shutil.copytree(self.runtime_args.resume_from, self.path, dirs_exist_ok=True)
+
+            # Copy all yml, json and pt files and any parent directory from the previous run to preserve a record
+            parent_dir = self.path / 'parent'
+            parent_dir.mkdir(exist_ok=True)
+            for file_path in self.runtime_args.resume_from.iterdir():
+                if file_path.suffix in ['.yml', '.json', '.pt']:
+                    shutil.copy2(file_path, parent_dir)
+                elif file_path.name == 'parent':
+                    shutil.copytree(file_path, parent_dir, dirs_exist_ok=True)
 
         # Save the args into the sequence directory
         with open(self.path / 'args_runtime.yml', 'w') as f:

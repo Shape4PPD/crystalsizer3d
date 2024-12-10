@@ -25,6 +25,8 @@ def get_args(printout: bool = True) -> Tuple[Namespace, SequenceFitterArgs, Refi
                            help='Load refiner arguments from this path, any arguments set on the command-line will take preference.')
     rt_parser.add_argument('--resume', type=str2bool, default=True,
                            help='Resume training from a previous checkpoint.')
+    rt_parser.add_argument('--resume-from', type=Path,
+                           help='Resume training from a different configuration, only really for debug.')
     rt_parser.add_argument('--make-videos', type=str2bool, default=True,
                            help='Make video of the annotated masks/images (whatever was generated).')
     rt_parser.add_argument('--log-freq-pretrain', type=int, default=10,
