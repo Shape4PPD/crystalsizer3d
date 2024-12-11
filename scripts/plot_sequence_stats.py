@@ -759,7 +759,7 @@ def plot_sequence_errors():
 
 def plot_test_cube():
     """
-    Plot a test cube with distances of 1 between origin and each facefor scale matching
+    Plot a test cube with distances of 1mm between origin and each facefor scale matching
     """
     args, output_dir = _init()
     show_n = 5000
