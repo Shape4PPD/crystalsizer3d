@@ -1096,7 +1096,8 @@ class SequenceFitter:
             logger.info(f'Loading sequence encoder state from {state_path}.')
             state = torch.load(state_path, weights_only=True)
             self.sequence_encoder.load_state_dict(state['model'])
-            self.optimiser.load_state_dict(state['optimiser'])
+            if not self.runtime_args.reset_lrs:
+                self.optimiser.load_state_dict(state['optimiser'])
             loaded = True
         self.sequence_encoder.eval()
         if loaded:
