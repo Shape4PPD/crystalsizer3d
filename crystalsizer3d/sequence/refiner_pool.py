@@ -187,6 +187,13 @@ def refiner_worker(
             p_grads = None
             torch.set_grad_enabled(grad_enabled)  # Reset the gradient tracking
 
+        if refiner_args.use_edge_matching:
+            edge_points = to_numpy(refiner.edge_matcher.edge_points_rel)
+            edge_point_deltas = to_numpy(refiner.edge_matcher.deltas_rel)
+        else:
+            edge_points = None
+            edge_point_deltas = None
+
         # Return the result through the response queue
         response_queue.put({
             'batch_idx': job['batch_idx'],
@@ -196,6 +203,8 @@ def refiner_worker(
             'X_pred': to_numpy(X_pred) if X_pred is not None else None,
             'crystal': scene.crystal.to_dict(),
             'projector_zoom': orthographic_scale_factor(scene),
+            'edge_points': edge_points,
+            'edge_point_deltas': edge_point_deltas
         })
 
     # Mark as idle and exit
@@ -349,7 +358,10 @@ class RefinerPool:
                         edges_fullsize_paths[idx],
                         edges_annotated_paths[idx],
                         zoom=result['projector_zoom'],
-                        crystal=result['crystal']
+                        crystal=result['crystal'],
+                        keypoints=to_numpy(keypoints[idx]) if keypoints[idx] is not None else None,
+                        edge_points=result['edge_points'],
+                        edge_point_deltas=result['edge_point_deltas']
                     )
 
                 # Break if we have all the results

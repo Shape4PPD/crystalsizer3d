@@ -32,7 +32,8 @@ PREDICTOR_ARG_NAMES = [
     'w_rotation_xy', 'w_patches', 'w_fullsize', 'w_switch_probs', 'w_keypoints', 'w_edge_matching', 'w_anchors',
     'l_decay_l1', 'l_decay_l2', 'l_decay_perceptual', 'l_decay_latent', 'l_decay_rcf', 'perceptual_model',
     'latents_model', 'mv2_config_path', 'mv2_checkpoint_path', 'rcf_model_path', 'rcf_loss_type', 'keypoints_loss_type',
-    'edge_matching_points_per_unit', 'edge_matching_rcf_size', 'edge_matching_use_denoised',
+    'edge_matching_points_per_unit', 'edge_matching_n_samples_per_point', 'edge_matching_reach',
+    'edge_matching_image_size', 'edge_matching_use_denoised',
 ]
 
 PREDICTOR_ARG_NAMES_BS1 = [
@@ -95,7 +96,9 @@ class RefinerArgs(BaseArgs):
 
             # Edge Matching settings
             edge_matching_points_per_unit: float = 0.05,
-            edge_matching_rcf_size: int = 400,
+            edge_matching_n_samples_per_point: int = 1000,
+            edge_matching_reach: float = 10.,
+            edge_matching_image_size: int = 400,
             edge_matching_use_denoised: bool = False,
             edge_matching_wait_n_steps: int = 0,
 
@@ -314,7 +317,9 @@ class RefinerArgs(BaseArgs):
 
         # Edge matching settings:
         self.edge_matching_points_per_unit = edge_matching_points_per_unit
-        self.edge_matching_rcf_size = edge_matching_rcf_size
+        self.edge_matching_n_samples_per_point = edge_matching_n_samples_per_point
+        self.edge_matching_reach = edge_matching_reach
+        self.edge_matching_image_size = edge_matching_image_size
         self.edge_matching_use_denoised = edge_matching_use_denoised
         self.edge_matching_wait_n_steps = edge_matching_wait_n_steps
 
@@ -555,7 +560,11 @@ class RefinerArgs(BaseArgs):
         # Edge matching settings
         group.add_argument('--edge-matching-points-per-unit', type=float, default=0.05,
                            help='Number of edge matching points per unit length of the crystal.')
-        group.add_argument('--edge-matching-rcf-size', type=int, default=400,
+        group.add_argument('--edge-matching-n-samples-per-point', type=int, default=1000,
+                           help='Number of samples to use per edge point.')
+        group.add_argument('--edge-matching-reach', type=float, default=10.,
+                           help='Reach parameter for preferring nearby minima to the edge points.')
+        group.add_argument('--edge-matching-image-size', type=int, default=400,
                            help='Size of the edge matching image size.')
         group.add_argument('--edge-matching-use-denoised', type=str2bool, default=False,
                            help='Use the denoised image for edge matching.')

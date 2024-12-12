@@ -143,7 +143,10 @@ class SequencePlotter:
             X_annotated_path: Path,
             scene: Scene | None = None,
             zoom: float | None = None,
-            crystal: Crystal | Dict[str, Any] | None = None
+            crystal: Crystal | Dict[str, Any] | None = None,
+            keypoints: np.ndarray | None = None,
+            edge_points: np.ndarray | None = None,
+            edge_point_deltas: np.ndarray | None = None
     ):
         """
         Annotate an image with the wireframe overlay of the crystal.
@@ -162,7 +165,10 @@ class SequencePlotter:
             'X_path': X_path,
             'X_annotated_path': X_annotated_path,
             'zoom': zoom,
-            'crystal': crystal
+            'crystal': crystal,
+            'keypoints': keypoints,
+            'edge_points': edge_points,
+            'edge_point_deltas': edge_point_deltas,
         })
 
     @staticmethod
@@ -174,6 +180,9 @@ class SequencePlotter:
             image_path=job['X_path'],
             crystal=Crystal.from_dict(job['crystal']),
             zoom=job['zoom'],
+            keypoints=job['keypoints'],
+            edge_points=job['edge_points'],
+            edge_point_deltas=job['edge_point_deltas'],
         ).save(job['X_annotated_path'])
 
     def render_scene(self, scene: Scene, save_path: Path):

@@ -95,6 +95,7 @@ class SequenceFitter:
         self._init_X_wis()
         self._init_keypoints()
         self._init_edges()
+        self._init_edges_annotated()
 
         # Initialise the outputs
         self._init_initial_predictions()
@@ -106,7 +107,6 @@ class SequenceFitter:
         self._init_frame_counts()
         self._init_X_preds()
         self._init_X_targets_annotated()
-        self._init_edges_annotated()
         self._init_tb_logger()
 
         # Initialise the sequence encoder
@@ -437,7 +437,7 @@ class SequenceFitter:
         # If these were loaded, try to load the target size images
         if edges_fullsize is not None:
             self.edges_fullsize = edges_fullsize
-            size = str(ra.edge_matching_rcf_size)
+            size = str(ra.edge_matching_image_size)
             edges_dir = self.cache_dirs['edges'] / size
             edges = load_edges(edges_dir)
 
@@ -1547,6 +1547,7 @@ class SequenceFitter:
             losses = self.losses_init
             X_preds = self.X_preds_initial
             X_targets_annotated = self.X_targets_annotated_initial
+            save_edge_annotations = False
 
         ds = self.dataloader.dataset
 
@@ -1590,7 +1591,7 @@ class SequenceFitter:
                 X_targets_annotated_paths=[X_targets_annotated[idx] for idx in batch_idxs],
                 edges_fullsize_paths=[self.edges_fullsize[idx] for idx in
                                       batch_idxs] if self.edges_fullsize is not None else None,
-                edges_annotated_paths=[self.edges_annotated[initial_or_eval][idx] for idx in
+                edges_annotated_paths=[self.edges_annotated['eval'][idx] for idx in
                                        batch_idxs] if self.edges_annotated is not None else None,
             )
 

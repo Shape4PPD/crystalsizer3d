@@ -27,14 +27,20 @@ def to_relative_coordinates(coords: Tensor, image_size: int) -> Tensor:
     ], dim=1)
 
 
-def to_absolute_coordinates(coords: Tensor, image_size: int) -> Tensor:
+def to_absolute_coordinates(coords: Tensor | np.ndarray, image_size: int) -> Tensor | np.ndarray:
     """
     Convert relative coordinates to absolute coordinates.
     """
-    return torch.stack([
-        (coords[:, 0] * 0.5 + 0.5) * image_size,
-        (0.5 - coords[:, 1] * 0.5) * image_size
-    ], dim=1)
+    if isinstance(coords, Tensor):
+        return torch.stack([
+            (coords[:, 0] * 0.5 + 0.5) * image_size,
+            (0.5 - coords[:, 1] * 0.5) * image_size
+        ], dim=1)
+    else:
+        return np.stack([
+            (coords[:, 0] * 0.5 + 0.5) * image_size,
+            (0.5 - coords[:, 1] * 0.5) * image_size
+        ], axis=1)
 
 
 def calculate_keypoint_heatmaps(

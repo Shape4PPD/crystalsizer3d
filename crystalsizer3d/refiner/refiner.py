@@ -413,12 +413,12 @@ class Refiner:
             else:
                 model_input = self.X_target[None, ...].permute(0, 3, 1, 2)
             model_input_res = F.interpolate(model_input,
-                                            size=(self.args.edge_matching_rcf_size,
-                                                  self.args.edge_matching_rcf_size),
+                                            size=(self.args.edge_matching_image_size,
+                                                  self.args.edge_matching_image_size),
                                             mode='bilinear',
                                             align_corners=False)
 
-            logger.info(f'Calculating RCF on image size {self.args.edge_matching_rcf_size}.')
+            logger.info(f'Calculating RCF on image size {self.args.edge_matching_image_size}.')
             self.rcf_feats_og = self.rcf(model_input_res, apply_sigmoid=False)
 
     def _init_edge_matcher(self):
@@ -426,7 +426,11 @@ class Refiner:
         Initialise the Edge Matcher for calculating the distance
         from points on an edge to the detected edge found by the RCF model.
         """
-        edge_matcher = EdgeMatcher(points_per_unit=self.args.edge_matching_points_per_unit)
+        edge_matcher = EdgeMatcher(
+            points_per_unit=self.args.edge_matching_points_per_unit,
+            n_samples_per_point=self.args.edge_matching_n_samples_per_point,
+            reach=self.args.edge_matching_reach,
+        )
         edge_matcher.to(self.device)
         self.edge_matcher = edge_matcher
         try:
