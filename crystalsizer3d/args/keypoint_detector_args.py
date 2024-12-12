@@ -14,7 +14,7 @@ class KeypointDetectorArgs(BaseArgs):
             kd_mv2_checkpoint_path: Path = DATA_PATH / 'MAGVIT2' / 'imagenet_256_B.ckpt',
             kd_resize_input: bool = True,
             kd_train_keypoints: bool = False,
-            kd_train_edges: bool = False,
+            kd_train_wireframe: bool = False,
             kd_use_clean_images: bool = True,
             kd_focal_loss_alpha: float = 0.75,
             kd_focal_loss_gamma: float = 2.0,
@@ -25,7 +25,7 @@ class KeypointDetectorArgs(BaseArgs):
         self.kd_mv2_checkpoint_path = kd_mv2_checkpoint_path
         self.kd_resize_input = kd_resize_input
         self.kd_train_keypoints = kd_train_keypoints
-        self.kd_train_wireframe = kd_train_edges
+        self.kd_train_wireframe = kd_train_wireframe
         self.kd_use_clean_images = kd_use_clean_images
         self.kd_focal_loss_alpha = kd_focal_loss_alpha
         self.kd_focal_loss_gamma = kd_focal_loss_gamma
@@ -47,7 +47,7 @@ class KeypointDetectorArgs(BaseArgs):
                            help='Resize the input image to the pretrained model input size.')
         group.add_argument('--kd-train-keypoints', type=str2bool, default=True,
                            help='Train the keypoint detector.')
-        group.add_argument('--kd-train-edges', type=str2bool, default=True,
+        group.add_argument('--kd-train-wireframe', type=str2bool, default=True,
                            help='Train the edge detector.')
         group.add_argument('--kd-use-clean-images', type=str2bool, default=True,
                            help='Use clean images for training.')

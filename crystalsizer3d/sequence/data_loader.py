@@ -19,7 +19,7 @@ class Dataset(IterableDataset):
             X_wis: List[Tensor],
             X_dn_wis: List[Tensor],
             keypoints: List[Tensor] | None,
-            edges: List[Tensor] | None,
+            edges: List[Path] | None,
             adaptive_sampler: AdaptiveSampler,
             batch_size: int = 1,
     ):
@@ -64,7 +64,7 @@ def collate_fn(batch) -> Tuple[Tensor, List[Tensor | None]]:
     X_wis = torch.stack([X[2] for X in Xs]).permute(0, 2, 3, 1)
     X_dn_wis = torch.stack([X[3] for X in Xs]).permute(0, 2, 3, 1)
     keypoints = [X[4] for X in Xs] if Xs[0][4] is not None else [None for _ in Xs]
-    edges = torch.stack([X[5] for X in Xs]) if Xs[0][5] is not None else [None for _ in Xs]
+    edges = [X[5] for X in Xs] if Xs[0][5] is not None else [None for _ in Xs]
     targets = [X_paths, X_dn_paths, X_wis, X_dn_wis, keypoints, edges]
     return indices, targets
 

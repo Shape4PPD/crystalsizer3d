@@ -19,7 +19,9 @@ KEYPOINTS_ARG_NAMES = [
 ]
 
 EDGES_ARG_NAMES = [
-    'rcf_model_path'
+    'edges_model_path', 'edges_oversize_input', 'edges_max_img_size', 'edges_batch_size', 'edges_threshold',
+    'edges_exclude_border', 'edges_n_patches', 'edges_patch_size', 'edges_patch_search_res', 'edges_attenuation_sigma',
+    'edges_max_attenuation_factor',
 ]
 
 PREDICTOR_ARG_NAMES = [
@@ -77,6 +79,19 @@ class RefinerArgs(BaseArgs):
             keypoints_max_attenuation_factor: float = 1.5,
             keypoints_low_res_catchment_distance: int = 100,
             keypoints_loss_type: str = 'mindists',
+
+            # Edge detection settings
+            edges_model_path: Optional[Path] = None,
+            edges_oversize_input: bool = False,
+            edges_max_img_size: int = 1024,
+            edges_batch_size: int = 4,
+            edges_threshold: float = 0.2,
+            edges_exclude_border: float = 0.05,
+            edges_n_patches: int = 16,
+            edges_patch_size: int = 700,
+            edges_patch_search_res: int = 256,
+            edges_attenuation_sigma: float = 0.5,
+            edges_max_attenuation_factor: float = 1.5,
 
             # Edge Matching settings
             edge_matching_points_per_unit: float = 0.05,
@@ -227,6 +242,8 @@ class RefinerArgs(BaseArgs):
             denoiser_model_path = Path(denoiser_model_path)
         if isinstance(keypoints_model_path, str):
             keypoints_model_path = Path(keypoints_model_path)
+        if isinstance(edges_model_path, str):
+            edges_model_path = Path(edges_model_path)
         if isinstance(mv2_config_path, str):
             mv2_config_path = Path(mv2_config_path)
         if isinstance(mv2_checkpoint_path, str):
@@ -279,6 +296,21 @@ class RefinerArgs(BaseArgs):
         self.keypoints_max_attenuation_factor = keypoints_max_attenuation_factor
         self.keypoints_low_res_catchment_distance = keypoints_low_res_catchment_distance
         self.keypoints_loss_type = keypoints_loss_type
+
+        # Edge detection settings
+        if edges_model_path is not None:
+            assert edges_model_path.exists(), f'Edges model path does not exist: {edges_model_path}'
+        self.edges_model_path = edges_model_path
+        self.edges_oversize_input = edges_oversize_input
+        self.edges_max_img_size = edges_max_img_size
+        self.edges_batch_size = edges_batch_size
+        self.edges_threshold = edges_threshold
+        self.edges_exclude_border = edges_exclude_border
+        self.edges_n_patches = edges_n_patches
+        self.edges_patch_size = edges_patch_size
+        self.edges_patch_search_res = edges_patch_search_res
+        self.edges_attenuation_sigma = edges_attenuation_sigma
+        self.edges_max_attenuation_factor = edges_max_attenuation_factor
 
         # Edge matching settings:
         self.edge_matching_points_per_unit = edge_matching_points_per_unit
@@ -496,11 +528,35 @@ class RefinerArgs(BaseArgs):
                            choices=['mindists', 'sinkhorn', 'hausdorff'],
                            help='Type of loss to use for keypoints refinement.')
 
-        # Edge Matching settings
+        # Edge detection settings
+        group.add_argument('--edges-model-path', type=Path,
+                           help='Path to the edges model checkpoint.')
+        group.add_argument('--edges-oversize-input', type=str2bool, default=False,
+                           help='Whether to resize the input images to the training dataset image size.')
+        group.add_argument('--edges-max-img-size', type=int, default=1024,
+                           help='Maximum image size for edge detection.')
+        group.add_argument('--edges-batch-size', type=int, default=3,
+                           help='Number of tiles to detect edges at a time.')
+        group.add_argument('--edges-threshold', type=float, default=0.5,
+                           help='Threshold for edges detection.')
+        group.add_argument('--edges-exclude-border', type=float, default=0.05,
+                           help='Exclude edges within this ratio of the border.')
+        group.add_argument('--edges-n-patches', type=int, default=16,
+                           help='Number of patches to crop from the image for high res edges detection.')
+        group.add_argument('--edges-patch-size', type=int, default=700,
+                           help='Size of the crop patches.')
+        group.add_argument('--edges-patch-search-res', type=int, default=256,
+                           help='Resolution of the low-res edges heatmap to use for determining where to crop the patches.')
+        group.add_argument('--edges-attenuation-sigma', type=float, default=0.5,
+                           help='Sigma parameter for the Gaussian blob used to iteratively attenuate the edges heatmap.')
+        group.add_argument('--edges-max-attenuation-factor', type=float, default=1.5,
+                           help='Maximum Gaussian peak height used for the attenuation function.')
+
+        # Edge matching settings
         group.add_argument('--edge-matching-points-per-unit', type=float, default=0.05,
                            help='Number of edge matching points per unit length of the crystal.')
         group.add_argument('--edge-matching-rcf-size', type=int, default=400,
-                           help='Size of the edge matching RCF.')
+                           help='Size of the edge matching image size.')
         group.add_argument('--edge-matching-use-denoised', type=str2bool, default=False,
                            help='Use the denoised image for edge matching.')
         group.add_argument('--edge-matching-wait-n-steps', type=int, default=0,

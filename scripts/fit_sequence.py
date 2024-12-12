@@ -39,6 +39,8 @@ def get_args(printout: bool = True) -> Tuple[Namespace, SequenceFitterArgs, Refi
                            help='Checkpoint every n steps during training.')
     rt_parser.add_argument('--save-annotations-freq', type=int, default=5,
                            help='Save annotated images every n steps during training.')
+    rt_parser.add_argument('--save-edge-annotations-freq', type=int, default=-1,
+                           help='Save annotated edge images every n steps during training.')
     rt_parser.add_argument('--save-renders-freq', type=int, default=5,
                            help='Save rendered images every n steps during training.')
     rt_parser.add_argument('--plot-freq', type=int, default=20,
@@ -47,6 +49,8 @@ def get_args(printout: bool = True) -> Tuple[Namespace, SequenceFitterArgs, Refi
                            help='Evaluate every n steps during training.')
     rt_parser.add_argument('--eval-annotate-freq', type=int, default=10,
                            help='Generate annotated images every n steps during training. (Must be a multiple of eval-freq).')
+    rt_parser.add_argument('--eval-edge-annotate-freq', type=int, default=-1,
+                           help='Generate annotated edge images every n steps during training. (Must be a multiple of eval-freq).')
     rt_parser.add_argument('--eval-render-freq', type=int, default=10,
                            help='Render the evaluated parameters every n steps during training. (Must be a multiple of eval-freq).')
     rt_parser.add_argument('--eval-video-freq', type=int, default=10,

@@ -8,7 +8,9 @@ from typing import Any, Dict, List, Tuple
 import mitsuba as mi
 import numpy as np
 import torch
+from PIL import Image
 from torch import Tensor
+from torchvision.transforms.functional import to_tensor
 
 from crystalsizer3d import N_WORKERS, logger
 from crystalsizer3d.args.refiner_args import RefinerArgs
@@ -107,7 +109,7 @@ def refiner_worker(
             X_target_wis: Tensor,
             X_target_denoised_wis: Tensor,
             keypoints: Tensor | None,
-            edges: Tensor | None,
+            edges: Path | None,
             add_noise: bool
     ):
         """
@@ -124,7 +126,7 @@ def refiner_worker(
         if refiner_args.use_keypoints:
             refiner.keypoint_targets = keypoints
         if refiner_args.use_edge_matching:
-            refiner.edge_map = edges
+            refiner.edge_map = to_tensor(Image.open(edges)).squeeze()
 
         # Update scene and crystal parameters
         p_dict = _parameter_vector_to_dict(p_vec)
@@ -173,7 +175,7 @@ def refiner_worker(
             X_target_wis=init_tensor(job['X_target_wis']),
             X_target_denoised_wis=init_tensor(job['X_target_denoised_wis']),
             keypoints=init_tensor(job['keypoints']) if job['keypoints'] is not None else None,
-            edges=init_tensor(job['edges']) if job['edges'] is not None else None,
+            edges=job['edges'],
             add_noise=job['calculate_grads']
         )
 
@@ -291,13 +293,16 @@ class RefinerPool:
             X_target_wis: Tensor,
             X_target_denoised_wis: Tensor,
             keypoints: List[Tensor] | None,
-            edges: Tensor | None,
+            edges: List[Path] | None,
             calculate_grads: bool,
             save_annotations: bool,
+            save_edge_annotations: bool,
             save_renders: bool,
             X_preds_paths: List[Path],
             X_targets_paths: List[Path],
             X_targets_annotated_paths: List[Path],
+            edges_fullsize_paths: List[Path] | None,
+            edges_annotated_paths: List[Path] | None
     ) -> Tuple[Tensor, Dict[str, Any], Tensor]:
         """
         Calculate the loss and parameter gradients for a single example.
@@ -316,7 +321,7 @@ class RefinerPool:
                 'X_target_wis': to_numpy(X_target_wis[idx]),
                 'X_target_denoised_wis': to_numpy(X_target_denoised_wis[idx]),
                 'keypoints': to_numpy(keypoints[idx]) if keypoints[idx] is not None else None,
-                'edges': to_numpy(edges[idx]) if edges[idx] is not None else None,
+                'edges': edges[idx],
                 'calculate_grads': calculate_grads,
             }
             self.job_queue.put(job, block=True)
@@ -336,6 +341,13 @@ class RefinerPool:
                     self.plotter.annotate_image(
                         X_targets_paths[idx],
                         X_targets_annotated_paths[idx],
+                        zoom=result['projector_zoom'],
+                        crystal=result['crystal']
+                    )
+                if save_edge_annotations:
+                    self.plotter.annotate_image(
+                        edges_fullsize_paths[idx],
+                        edges_annotated_paths[idx],
                         zoom=result['projector_zoom'],
                         crystal=result['crystal']
                     )

@@ -468,6 +468,8 @@ def annotate_image(
 
     # Load the image
     img = Image.open(image_path)
+    if img.mode != 'RGB':
+        img = img.convert('RGB')
     image_size = min(img.size)
     if img.size[0] != img.size[1]:
         offset_l = (img.size[0] - image_size) // 2
