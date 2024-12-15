@@ -22,13 +22,17 @@ class EdgeMatcher(nn.Module):
     def __init__(
             self,
             points_per_unit: float = 0.05,
+            points_jitter: float = 0.25,
             n_samples_per_point: int = 1000,
-            reach: float = 10
+            reach: float = 10,
+            max_dist: float = 0.05
     ):
         super(EdgeMatcher, self).__init__()
         self.points_per_unit = points_per_unit
+        self.points_jitter = points_jitter
         self.n_samples_per_line = n_samples_per_point
         self.reach = reach
+        self.max_dist = max_dist
 
     def forward(self, edge_segments: Tensor, edge_image: Tensor) -> Tuple[Tensor, Tensor]:
         assert edge_image.ndim == 2, 'Distance image must be 2D.'
@@ -49,14 +53,22 @@ class EdgeMatcher(nn.Module):
         )
 
         # Find local minima for all line points
-        minima_positions = self.find_minima(edge_image, line_points, self.edge_points)
+        with torch.no_grad():
+            minima_positions, minima_values = self.find_minima(edge_image, line_points, self.edge_points)
         deltas = minima_positions - self.edge_points
 
-        # Put distances back into relative coordinates
-        self.deltas_rel = deltas / image_size * 2
+        # Put deltas into relative coordinates and calculate distances
+        deltas_rel = deltas / image_size * 2
+        distances = torch.norm(deltas_rel, dim=1)
 
-        # The loss is the average of the squared distances
-        loss = torch.mean(torch.norm(self.deltas_rel, dim=1)**2)
+        # Filter out points that are too far from the minima
+        mask = distances < self.max_dist
+        deltas = torch.where(mask[:, None], deltas, torch.zeros_like(deltas))
+        self.deltas_rel = torch.where(mask[:, None], deltas_rel, torch.zeros_like(deltas_rel))
+        distances = torch.where(mask, distances, torch.zeros_like(distances))
+
+        # The loss is the average point-to-minima distance
+        loss = torch.mean(distances)
 
         return loss, deltas
 
@@ -74,6 +86,12 @@ class EdgeMatcher(nn.Module):
         # Generate a linear space between 0 and 1
         # generate two more points for vertices and remove
         t = torch.linspace(0, 1, steps=num_points + 2, device=segment.device)
+        if self.points_jitter > 0:
+            noise = torch.randn_like(t) * self.points_jitter / num_points
+            noise[0] = noise[-1] = 0
+            t += noise
+            t = t.clamp(min=0, max=1)
+
         # Interpolate between start_point and end_point
         points = (1 - t).unsqueeze(1) * start_point + t.unsqueeze(1) * end_point
         # Compute the direction vector
@@ -199,11 +217,16 @@ class EdgeMatcher(nn.Module):
         # Calculate distances from reference points to all sampled points
         dist = torch.norm(sampled_points - reference_points.unsqueeze(1), dim=2)
 
+        # Reduce the values at the current points slightly to ensure there are always minima available
+        ref_inds = torch.argmin(dist, dim=1)
+        image_values[torch.arange(len(sampled_points)), ref_inds] -= 1e-6
+
         # Scale the intensity values by the distance from the reference points
         adjusted_values = image_values * torch.exp(-dist / self.reach)
 
         # Find the nearest (scaled) minima for each reference point
         minima_indices = torch.argmin(adjusted_values, dim=1)
         minima_positions = sampled_points[torch.arange(len(sampled_points)), minima_indices]
+        minima_values = adjusted_values[torch.arange(len(sampled_points)), minima_indices]
 
-        return minima_positions
+        return minima_positions, minima_values

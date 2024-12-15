@@ -353,7 +353,7 @@ class RefinerPool:
                         zoom=result['projector_zoom'],
                         crystal=result['crystal']
                     )
-                if save_edge_annotations:
+                if save_edge_annotations and self.refiner_args.use_edge_matching:
                     self.plotter.annotate_image(
                         edges_fullsize_paths[idx],
                         edges_annotated_paths[idx],
