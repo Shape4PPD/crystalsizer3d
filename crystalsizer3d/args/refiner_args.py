@@ -13,8 +13,8 @@ DENOISER_ARG_NAMES = [
 
 KEYPOINTS_ARG_NAMES = [
     'keypoints_model_path', 'keypoints_oversize_input', 'keypoints_max_img_size', 'keypoints_batch_size',
-    'keypoints_min_distance', 'keypoints_threshold', 'keypoints_exclude_border', 'keypoints_blur_kernel_relative_size',
-    'keypoints_n_patches', 'keypoints_patch_size', 'keypoints_patch_search_res', 'keypoints_attenuation_sigma',
+    'keypoints_min_distance', 'keypoints_threshold', 'keypoints_exclude_border', 'keypoints_n_patches',
+    'keypoints_patch_size', 'keypoints_patch_search_res', 'keypoints_attenuation_sigma',
     'keypoints_max_attenuation_factor', 'keypoints_low_res_catchment_distance', 'keypoints_loss_type'
 ]
 
@@ -72,7 +72,6 @@ class RefinerArgs(BaseArgs):
             keypoints_min_distance: int = 5,
             keypoints_threshold: float = 0.5,
             keypoints_exclude_border: float = 0.05,
-            keypoints_blur_kernel_relative_size: float = 0.01,
             keypoints_n_patches: int = 16,
             keypoints_patch_size: int = 700,
             keypoints_patch_search_res: int = 256,
@@ -291,7 +290,6 @@ class RefinerArgs(BaseArgs):
         self.keypoints_min_distance = keypoints_min_distance
         self.keypoints_threshold = keypoints_threshold
         self.keypoints_exclude_border = keypoints_exclude_border
-        self.keypoints_blur_kernel_relative_size = keypoints_blur_kernel_relative_size
         self.keypoints_n_patches = keypoints_n_patches
         self.keypoints_patch_size = keypoints_patch_size
         self.keypoints_patch_search_res = keypoints_patch_search_res
@@ -515,8 +513,6 @@ class RefinerArgs(BaseArgs):
                            help='Threshold for keypoints detection.')
         group.add_argument('--keypoints-exclude-border', type=float, default=0.05,
                            help='Exclude keypoints within this ratio of the border.')
-        group.add_argument('--keypoints-blur-kernel-relative-size', type=float, default=0.01,
-                           help='Relative size of the blur kernel for initial keypoints detection from low res, denoised image.')
         group.add_argument('--keypoints-n-patches', type=int, default=16,
                            help='Number of patches to crop from the image for high res keypoints detection.')
         group.add_argument('--keypoints-patch-size', type=int, default=700,

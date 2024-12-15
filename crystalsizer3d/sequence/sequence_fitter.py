@@ -355,6 +355,8 @@ class SequenceFitter:
                 for i, (idx, _) in enumerate(self.image_paths):
                     keypoints_path = keypoints_dir / f'{idx:04d}.json'
                     assert keypoints_path.exists()
+                    annotation_path = keypoints_dir / f'{idx:04d}.png'
+                    assert annotation_path.exists()
                     with open(keypoints_path) as f:
                         keypoints = json_to_torch(json.load(f))
                     self.keypoints.append({
@@ -387,7 +389,6 @@ class SequenceFitter:
                 min_distance=ra.keypoints_min_distance,
                 threshold=ra.keypoints_threshold,
                 exclude_border=ra.keypoints_exclude_border,
-                blur_kernel_relative_size=ra.keypoints_blur_kernel_relative_size,
                 n_patches=ra.keypoints_n_patches,
                 patch_size=ra.keypoints_patch_size,
                 patch_search_res=ra.keypoints_patch_search_res,
@@ -395,11 +396,13 @@ class SequenceFitter:
                 max_attenuation_factor=ra.keypoints_max_attenuation_factor,
                 low_res_catchment_distance=ra.keypoints_low_res_catchment_distance,
                 return_everything=False,
-                quiet=True
+                quiet=True,
+                n_workers=1
             )
             idx = self.image_paths[i][0]
             with open(keypoints_dir / f'{idx:04d}.json', 'w') as f:
                 json.dump(res, f, cls=FlexibleJSONEncoder)
+            self.plotter.annotate_image_with_keypoints(X_path, res, keypoints_dir / f'{idx:04d}.png')
 
         # Destroy the keypoint detector to free up space
         logger.info('Destroying keypoint detector to free up space.')
@@ -417,6 +420,7 @@ class SequenceFitter:
         ra = self.refiner_args
         if not ra.use_edge_matching:
             self.edges = None
+            self.edges_fullsize = None
             return
 
         def load_edges(edges_dir):
@@ -432,11 +436,10 @@ class SequenceFitter:
 
         # First, load the fullsize edge images
         edges_dir_fullsize = self.cache_dirs['edges'] / 'fullsize'
-        edges_fullsize = load_edges(edges_dir_fullsize)
+        self.edges_fullsize = load_edges(edges_dir_fullsize)
 
         # If these were loaded, try to load the target size images
-        if edges_fullsize is not None:
-            self.edges_fullsize = edges_fullsize
+        if self.edges_fullsize is not None:
             size = str(ra.edge_matching_image_size)
             edges_dir = self.cache_dirs['edges'] / size
             edges = load_edges(edges_dir)
@@ -1200,7 +1203,7 @@ class SequenceFitter:
         self.sequence_encoder.eval()
         self._save_encoder_state()
         self.update_parameters_from_encoder()
-        self.update_X_preds_from_parameters()
+        # self.update_X_preds_from_parameters()
 
     def fit(self):
         """

@@ -533,3 +533,32 @@ def annotate_image(
             draw.line([x, y, x + dx, y + dy], fill=epd_colour, width=keypoint_radius // 6)
 
     return img
+
+
+@torch.no_grad()
+def annotate_image_with_keypoints(
+        image_path: Path,
+        keypoints: np.ndarray | None = None,
+        keypoint_radius: int = 15,
+        kp_fill_colour: str = 'lightgreen',
+        kp_outline_colour: str = 'darkgreen',
+) -> Image:
+    """
+    Draw the keypoints onto an image.
+    """
+    # Load the image
+    img = Image.open(image_path)
+    if img.mode != 'RGB':
+        img = img.convert('RGB')
+    image_size = min(img.size)
+
+    # Draw the keypoints
+    draw = ImageDraw.Draw(img, 'RGBA')
+    keypoints = to_absolute_coordinates(keypoints, image_size)
+    kp_fill_colour = tuple((np.array(to_rgb(kp_fill_colour) + (0.3,)) * 255).astype(np.uint8).tolist())
+    kp_outline_colour = tuple((np.array(to_rgb(kp_outline_colour) + (1,)) * 255).astype(np.uint8).tolist())
+    for (x, y) in keypoints:
+        draw.circle((x, y), keypoint_radius, fill=kp_fill_colour, outline=kp_outline_colour,
+                    width=keypoint_radius // 6)
+
+    return img

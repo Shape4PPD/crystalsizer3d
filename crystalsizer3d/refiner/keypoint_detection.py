@@ -5,12 +5,11 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 from skimage.feature import peak_local_max
+from sklearn.cluster import AgglomerativeClustering
 from torch import Tensor
-from torchvision.transforms.functional import gaussian_blur
 
 from crystalsizer3d import N_WORKERS, logger
 from crystalsizer3d.nn.manager import Manager
-from crystalsizer3d.util.geometry import merge_vertices
 from crystalsizer3d.util.utils import to_numpy
 
 # Resize arguments used for interpolation
@@ -210,7 +209,6 @@ def find_keypoints(
         min_distance: int = 1,
         threshold: float = 0,
         exclude_border: float = 0,
-        blur_kernel_relative_size: float = 0.01,
         n_patches: int = 16,
         patch_size: int = 512,
         patch_search_res: int = 256,
@@ -219,10 +217,13 @@ def find_keypoints(
         low_res_catchment_distance: int = 100,
         return_everything: bool = False,
         quiet: bool = False,
+        n_workers: int = N_WORKERS
 ) -> Tensor | Dict[str, Tensor]:
     """
     Find the keypoints using a targeted approach.
     """
+    X_target = X_target.cpu()
+    X_target_denoised = X_target_denoised.cpu()
     heatmap_args = dict(
         manager=manager,
         oversize_input=oversize_input,
@@ -233,6 +234,7 @@ def find_keypoints(
         min_distance=min_distance,
         threshold=threshold,
         exclude_border=exclude_border,
+        n_workers=n_workers
     )
     patch_args = dict(
         patch_search_res=patch_search_res,
@@ -246,6 +248,14 @@ def find_keypoints(
         if not quiet:
             logger.info(msg)
 
+    def zero_border(X_):
+        if exclude_border > 0:
+            exclude_border_px = round(exclude_border * image_size)
+            X_[:exclude_border_px] = 0
+            X_[-exclude_border_px:] = 0
+            X_[:, :exclude_border_px] = 0
+            X_[:, -exclude_border_px:] = 0
+
     # Check the input shapes and ensure (C, H, W) format
     assert X_target.ndim == 3 and X_target_denoised.ndim == 3, 'Input images must have 3 dimensions.'
     if X_target.shape[-1] == 3:
@@ -255,13 +265,10 @@ def find_keypoints(
     assert X_target.shape == X_target_denoised.shape, 'Input images must have the same shape.'
     image_size = X_target.shape[-1]
 
-    # First we take the denoised image, blur it and detect keypoints
-    quiet_log('Detecting initial keypoints in the blurred denoised image.')
-    ks = round(image_size * blur_kernel_relative_size)
-    if ks % 2 == 0:
-        ks += 1
-    X_lr = gaussian_blur(X_target_denoised, kernel_size=[ks, ks])
-    X_lr_kp = calculate_keypoint_heatmaps(X=X_lr, **heatmap_args)
+    # First we detect keypoints on the full size original
+    quiet_log('Detecting keypoints in the original image.')
+    X_lr_kp = calculate_keypoint_heatmaps(X=X_target, **heatmap_args)
+    zero_border(X_lr_kp)
     Y_lr = get_keypoint_coordinates(X_lr_kp, **coords_args)
 
     # Combine the original and denoised images into a batch
@@ -295,12 +302,29 @@ def find_keypoints(
     for Yp, pc in zip(Y_patches_dn, patch_centres):
         Y_candidates_all.append(Yp + pc[None, :] - patch_size // 2)
     Y_candidates_all = torch.cat(Y_candidates_all, axis=0)
+    Y_candidates_all = Y_candidates_all.to(torch.float32)
+
+    # Discard any too close to the border
+    if exclude_border > 0:
+        exclude_border_px = round(exclude_border * image_size)
+        mask = ((Y_candidates_all[:, 0] > exclude_border_px)
+                & (Y_candidates_all[:, 0] < image_size - exclude_border_px)
+                & (Y_candidates_all[:, 1] > exclude_border_px)
+                & (Y_candidates_all[:, 1] < image_size - exclude_border_px))
+        Y_candidates_all = Y_candidates_all[mask]
 
     # Merge nearby keypoints
     quiet_log('Merging nearby keypoints.')
-    Y_candidates_merged, _ = merge_vertices(
-        Y_candidates_all.to(torch.float32), epsilon=min_distance
+    clustering = AgglomerativeClustering(
+        n_clusters=None,
+        distance_threshold=min_distance,
+        linkage='complete'  # Use complete linkage to prevent chaining
     )
+    labels = clustering.fit_predict(to_numpy(Y_candidates_all))
+    centroids = []
+    for lbl in np.unique(labels):
+        centroids.append(Y_candidates_all[labels == lbl].mean(dim=0))
+    Y_candidates_merged = torch.stack(centroids)
 
     # Discard any keypoints which are too far from any detected in the low-res image
     quiet_log('Discarding keypoints which are too far from the low-res keypoints.')
@@ -310,7 +334,6 @@ def find_keypoints(
 
     if return_everything:
         return {
-            'X_lr': X_lr,
             'X_lr_kp': X_lr_kp,
             'Y_lr': Y_lr,
             'X_patches': X_patches,
