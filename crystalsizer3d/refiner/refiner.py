@@ -332,10 +332,11 @@ class Refiner:
         percept.to(self.device)
 
         data_config = timm.data.resolve_model_data_config(percept)
+        self.perceptual_config = data_config
         transforms = timm.data.create_transform(**data_config, is_training=False)
         transforms = Compose([
-            transforms.transforms[0],
-            transforms.transforms[1],
+            # transforms.transforms[0],
+            # transforms.transforms[1],
             transforms.transforms[3],
         ])
 
@@ -1532,6 +1533,19 @@ class Refiner:
             X_pred = X_pred[None, ...]
         assert len(X_target) == len(X_pred)
         model_input = torch.cat([X_target, X_pred]).permute(0, 3, 1, 2)
+
+        # Resize images for input
+        if self.args.perceptual_input_size == 0:
+            input_size = self.perceptual_config['input_size'][-1]
+        elif self.args.perceptual_input_size == -1:
+            input_size = model_input.shape[-1]
+        else:
+            input_size = self.args.perceptual_input_size
+        if model_input.shape[-1] != input_size:
+            model_input = F.interpolate(model_input, size=(input_size, input_size), mode='bilinear',
+                                        align_corners=False)
+
+        # Calculate features
         img_feats = self.perceptual_model(model_input)
         for i, f in enumerate(img_feats):
             f_target, f_pred = f.chunk(2)

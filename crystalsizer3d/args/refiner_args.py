@@ -31,9 +31,10 @@ PREDICTOR_ARG_NAMES = [
     'w_img_l1', 'w_img_l2', 'w_perceptual', 'w_latent', 'w_rcf', 'w_overshoot', 'w_symmetry', 'w_z_pos',
     'w_rotation_xy', 'w_patches', 'w_fullsize', 'w_switch_probs', 'w_keypoints', 'w_edge_matching', 'w_anchors',
     'l_decay_l1', 'l_decay_l2', 'l_decay_perceptual', 'l_decay_latent', 'l_decay_rcf', 'perceptual_model',
-    'latents_model', 'mv2_config_path', 'mv2_checkpoint_path', 'rcf_model_path', 'rcf_loss_type', 'keypoints_loss_type',
-    'edge_matching_points_per_unit', 'edge_matching_n_samples_per_point', 'edge_matching_reach',
-    'edge_matching_image_size', 'edge_matching_use_denoised',
+    'perceptual_input_size', 'latents_model', 'latents_input_size', 'mv2_config_path', 'mv2_checkpoint_path',
+    'rcf_model_path', 'rcf_loss_type', 'keypoints_loss_type', 'edge_matching_points_per_unit',
+    'edge_matching_n_samples_per_point', 'edge_matching_reach', 'edge_matching_image_size',
+    'edge_matching_use_denoised',
 ]
 
 PREDICTOR_ARG_NAMES_BS1 = [
@@ -202,6 +203,7 @@ class RefinerArgs(BaseArgs):
 
             # Helper models
             perceptual_model: Optional[str] = None,
+            perceptual_input_size: int = 0,
             latents_model: Optional[str] = None,
             latents_input_size: int = 0,
             mv2_config_path: Optional[Path] = DATA_PATH / 'MAGVIT2' / 'imagenet_lfqgan_256_B.yaml',
@@ -426,6 +428,7 @@ class RefinerArgs(BaseArgs):
 
         # Helper models
         self.perceptual_model = perceptual_model
+        self.perceptual_input_size = perceptual_input_size
         self.latents_model = latents_model
         self.latents_input_size = latents_input_size
         self.mv2_config_path = mv2_config_path
@@ -760,6 +763,9 @@ class RefinerArgs(BaseArgs):
         # Helper models
         group.add_argument('--perceptual-model', type=str, default='timm/regnetz_d8.ra3_in1k',
                            help='Perceptual model to use. Must start with "timm/".')
+        group.add_argument('--perceptual-input-size', type=int, default=0,
+                           help='Size of the input images to the perceptual model. '
+                                '0: resize to training image size (256). -1: use rendered image size.')
         group.add_argument('--latents-model', type=str, default='MAGVIT2',
                            help='Latent encoder model to use. Only MAGVIT2 supported.')
         group.add_argument('--latents-input-size', type=int, default=0,
