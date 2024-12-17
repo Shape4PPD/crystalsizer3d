@@ -277,6 +277,7 @@ def find_keypoints(
     # Use the keypoint heatmap from the low-res image to select patches to focus on
     quiet_log('Generating patches to focus in on the low-res keypoints.')
     X_patches_combined, patch_centres = generate_attention_patches(X_combined, X_lr_kp, **patch_args)
+    patch_size = X_patches_combined.shape[-1]  # Update the patch size in case it was reduced
     X_patches, X_patches_dn = X_patches_combined
 
     # Calculate keypoint heatmaps in the high-res patches
@@ -314,23 +315,33 @@ def find_keypoints(
         Y_candidates_all = Y_candidates_all[mask]
 
     # Merge nearby keypoints
-    quiet_log('Merging nearby keypoints.')
-    clustering = AgglomerativeClustering(
-        n_clusters=None,
-        distance_threshold=min_distance,
-        linkage='complete'  # Use complete linkage to prevent chaining
-    )
-    labels = clustering.fit_predict(to_numpy(Y_candidates_all))
-    centroids = []
-    for lbl in np.unique(labels):
-        centroids.append(Y_candidates_all[labels == lbl].mean(dim=0))
-    Y_candidates_merged = torch.stack(centroids)
+    if len(Y_candidates_all) > 0:
+        quiet_log('Merging nearby keypoints.')
+        clustering = AgglomerativeClustering(
+            n_clusters=None,
+            distance_threshold=min_distance,
+            linkage='complete'  # Use complete linkage to prevent chaining
+        )
+        labels = clustering.fit_predict(to_numpy(Y_candidates_all))
+        centroids = []
+        for lbl in np.unique(labels):
+            centroids.append(Y_candidates_all[labels == lbl].mean(dim=0))
+        Y_candidates_merged = torch.stack(centroids)
+    else:
+        Y_candidates_merged = torch.zeros(0, 2)
 
     # Discard any keypoints which are too far from any detected in the low-res image
-    quiet_log('Discarding keypoints which are too far from the low-res keypoints.')
-    Ylr_Yc_dist = torch.cdist(Y_lr.to(torch.float32), Y_candidates_merged)
-    Y_candidates_final = Y_candidates_merged[Ylr_Yc_dist.amin(dim=0) < low_res_catchment_distance]
-    Y_candidates_final_rel = to_relative_coordinates(Y_candidates_final, image_size)
+    if len(Y_lr) > 0:
+        quiet_log('Discarding keypoints which are too far from the low-res keypoints.')
+        Ylr_Yc_dist = torch.cdist(Y_lr.to(torch.float32), Y_candidates_merged)
+        Y_candidates_final = Y_candidates_merged[Ylr_Yc_dist.amin(dim=0) < low_res_catchment_distance]
+    else:
+        Y_candidates_final = Y_candidates_merged
+
+    if len(Y_candidates_final) > 0:
+        Y_candidates_final_rel = to_relative_coordinates(Y_candidates_final, image_size)
+    else:
+        Y_candidates_final_rel = torch.zeros(0, 2)
 
     if return_everything:
         return {

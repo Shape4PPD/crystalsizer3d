@@ -1305,6 +1305,8 @@ class SequenceFitter:
                     X_target_denoised_wis=batch[3],
                     keypoints=batch[4],
                     edges=batch[5],
+                    distances_target=None,
+                    vertices_target=None,
                     calculate_grads=True,
                     save_annotations=(ra.save_annotations_freq > 0
                                       and (step + 1) % ra.save_annotations_freq == 0),
@@ -1468,7 +1470,7 @@ class SequenceFitter:
                 self._save_encoder_state()
 
             # Plot every X steps
-            if (step + 1) % ra.plot_freq == 0:
+            if ra.plot_freq > 0 and (step + 1) % ra.plot_freq == 0:
                 logger.info('Making training plots.')
                 if self.refiner_pool is None:  # Needs fixing for refiner pool
                     image_idx = self.image_idxs[idx].item()
@@ -1585,6 +1587,8 @@ class SequenceFitter:
                 X_target_denoised_wis=torch.stack([X[3] for X in batch]).permute(0, 2, 3, 1),
                 keypoints=[X[4] for X in batch] if batch[0][4] is not None else [None for _ in batch],
                 edges=[X[5] for X in batch] if batch[0][5] is not None else [None for _ in batch],
+                distances_target=None,
+                vertices_target=None,
                 calculate_grads=False,
                 save_annotations=save_annotations,
                 save_edge_annotations=save_edge_annotations,

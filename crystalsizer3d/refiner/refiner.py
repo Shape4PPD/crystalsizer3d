@@ -91,6 +91,9 @@ class Refiner:
     distances_est: Optional[Tensor] = None
     distances_min: Optional[Tensor] = None
 
+    distances_target: Optional[Tensor] = None
+    vertices_target: Optional[Tensor] = None
+
     rcf_feats_og: Optional[List[Tensor]]
     rcf_feats: Optional[List[Tensor]]
 
@@ -733,11 +736,12 @@ class Refiner:
         self.keypoint_targets = res['Y_candidates_final_rel']
         logger.info(f'Found {len(self.keypoint_targets)} keypoints in image.')
 
-    def _init_optimiser(self):
+    def _init_optimiser(self, quiet: bool = False):
         """
         Set up the optimiser and learning rate scheduler.
         """
-        logger.info('Initialising optimiser.')
+        if not quiet:
+            logger.info('Initialising optimiser.')
 
         param_groups = []
         self.param_group_keys = []
@@ -1169,7 +1173,7 @@ class Refiner:
 
         logger.info('Training complete.')
 
-    def _train_step(self) -> Tuple[Tensor, Dict[str, float]]:
+    def _train_step(self, log_to_tb: bool = True) -> Tuple[Tensor, Dict[str, float]]:
         """
         Train for a single step.
         """
@@ -1217,12 +1221,13 @@ class Refiner:
                             self.conj_switch_probs.data[i] = 1 - self.conj_switch_probs[i]
 
         # Log losses
-        for key, val in stats.items():
-            self.tb_logger.add_scalar(key, float(val), self.step)
+        if log_to_tb:
+            for key, val in stats.items():
+                self.tb_logger.add_scalar(key, float(val), self.step)
 
         return loss, stats
 
-    def process_step(self, add_noise: bool = True) -> Tuple[Tensor, Dict[str, float]]:
+    def process_step(self, add_noise: bool = True, no_crop_render: bool = False) -> Tuple[Tensor, Dict[str, float]]:
         """
         Process a single step.
         """
@@ -1293,16 +1298,18 @@ class Refiner:
             radiance = radiance.to(device).clone()
 
             # If the crystal is projected, render just the area where the predicted crystal is
-            if self.args.crop_render:
+            if self.args.crop_render and not no_crop_render:
                 wis = self.args.rendering_size
                 margin = self.args.crop_render_margin
                 kp = (self.projector.keypoints_rel.detach() + 1) / 2
+                kp[:, 1] = 1 - kp[:, 1]  # Flip the y-axis
                 tl = torch.clamp(kp.amin(dim=0) - margin, min=0)
                 br = torch.clamp(kp.amax(dim=0) + margin, max=1)
                 region_w = (br[0] - tl[0]).item()
                 region_h = (br[1] - tl[1]).item()
                 region_size = max(region_w, region_h)
                 cp = (tl + br) / 2
+                cp = cp.clamp(min=region_size / 2, max=1 - region_size / 2)
 
                 # Update the film parameters to only render the crystal region
                 exp_size = wis / region_size
@@ -1437,12 +1444,15 @@ class Refiner:
             patch_loss, patch_stats = self._patches_loss()
             loss = loss * self.args.w_fullsize + patch_loss * self.args.w_patches
 
+            # Verification losses - not for optimisation
+            verification_stats = self._verification_losses()
+
             # Combine stats
             stats = {
                 'losses/total': loss.item(),
                 **l1_stats, **l2_stats, **percept_stats, **latent_stats, **rcf_stats, **overshoot_stats,
                 **symmetry_stats, **z_pos_stats, **rxy_stats, **switch_stats, **temporal_stats, **keypoints_stats,
-                **edge_matching_stats, **anchors_stats, **patch_stats
+                **edge_matching_stats, **anchors_stats, **patch_stats, **verification_stats
             }
 
         else:
@@ -1830,7 +1840,10 @@ class Refiner:
         """
         loss = torch.tensor(0.)
         stats = {}
-        if not self.args.use_keypoints or self.keypoint_targets is None or len(self.keypoint_targets) == 0:
+        if not self.args.use_keypoints or self.keypoint_targets is None:
+            return loss, stats
+        if len(self.keypoint_targets) == 0:
+            stats[f'losses/keypoints'] = 0.
             return loss, stats
 
         # Calculate the closest distances between the projected keypoints and the detected targets
@@ -1916,6 +1929,30 @@ class Refiner:
         return loss, stats
 
     @torch.no_grad()
+    def _verification_losses(self):
+        """
+        Calculate the verification losses (not for optimisation).
+        """
+        stats = {}
+        if self.distances_target is None and self.vertices_target is None:
+            return stats
+
+        if self.distances_target is not None:
+            d_pred = self.crystal.distances * self.crystal.scale
+            loss_d = ((d_pred - self.distances_target)**2).mean()
+            stats['losses/distances'] = loss_d.item()
+
+        if self.vertices_target is not None:
+            v_pred = self.crystal.vertices
+            dists = torch.cdist(v_pred, self.vertices_target)
+            dists_min_ab = dists.amin(dim=0)
+            dists_min_ba = dists.amin(dim=1)
+            loss_v = torch.cat([dists_min_ab, dists_min_ba]).mean()
+            stats['losses/vertices'] = loss_v.item()
+
+        return stats
+
+    @torch.no_grad()
     def _make_plots(
             self,
             force: bool = False
@@ -1983,7 +2020,8 @@ class Refiner:
                     ax.add_patch(rect)
 
             # Show the target and predicted keypoints
-            if self.args.use_keypoints and i == len(Xs) - 1 and self.keypoint_targets is not None:
+            if self.args.use_keypoints and i == len(Xs) - 1 and self.keypoint_targets is not None \
+                    and len(self.keypoint_targets) > 0:
                 kp_target_abs = to_numpy(to_absolute_coordinates(self.keypoint_targets, img.shape[0]))
                 kp_pred_abs = to_numpy(to_absolute_coordinates(self.projector.keypoints_rel, img.shape[0]))
                 ax.scatter(*kp_target_abs.T,
