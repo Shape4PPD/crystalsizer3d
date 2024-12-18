@@ -14,6 +14,7 @@ from crystalsizer3d.crystal import Crystal
 from crystalsizer3d.csd_proxy import CSDProxy
 from crystalsizer3d.nn.manager import Manager
 from crystalsizer3d.projector import Projector
+from crystalsizer3d.refiner.keypoint_detection import to_absolute_coordinates
 from crystalsizer3d.scene_components.scene import Scene
 from crystalsizer3d.scene_components.utils import orthographic_scale_factor
 from crystalsizer3d.util.utils import get_crystal_face_groups, init_tensor, smooth_signal, to_numpy, to_rgb
@@ -452,7 +453,15 @@ def annotate_image(
         scene: Scene | None = None,
         crystal: Crystal | None = None,
         zoom: float | None = None,
-        wf_line_width: int = 3
+        keypoints: np.ndarray | None = None,
+        edge_points: np.ndarray | None = None,
+        edge_point_deltas: np.ndarray | None = None,
+        wf_line_width: int = 3,
+        keypoint_radius: int = 15,
+        kp_fill_colour: str = 'lightgreen',
+        kp_outline_colour: str = 'darkgreen',
+        ep_colour: str = 'yellow',
+        epd_colour: str = 'orange',
 ) -> Image:
     """
     Draw the projected wireframe onto an image.
@@ -468,6 +477,8 @@ def annotate_image(
 
     # Load the image
     img = Image.open(image_path)
+    if img.mode != 'RGB':
+        img = img.convert('RGB')
     image_size = min(img.size)
     if img.size[0] != img.size[1]:
         offset_l = (img.size[0] - image_size) // 2
@@ -486,6 +497,7 @@ def annotate_image(
         rtol=1e-2
     )
 
+    # Draw the wireframe
     draw = ImageDraw.Draw(img, 'RGB')
     for ref_face_idx, face_segments in projector.edge_segments.items():
         if len(face_segments) == 0:
@@ -498,5 +510,56 @@ def annotate_image(
             l[:, 1] = torch.clamp(l[:, 1], 1, projector.image_size[0] - 2) + offset_t
             draw.line(xy=[tuple(l[0].int().tolist()), tuple(l[1].int().tolist())],
                       fill=colour, width=wf_line_width)
+
+    # Add the keypoints
+    if keypoints is not None:
+        draw = ImageDraw.Draw(img, 'RGBA')
+        keypoints = to_absolute_coordinates(keypoints, image_size)
+        kp_fill_colour = tuple((np.array(to_rgb(kp_fill_colour) + (0.3,)) * 255).astype(np.uint8).tolist())
+        kp_outline_colour = tuple((np.array(to_rgb(kp_outline_colour) + (1,)) * 255).astype(np.uint8).tolist())
+        for (x, y) in keypoints:
+            draw.circle((x, y), keypoint_radius, fill=kp_fill_colour, outline=kp_outline_colour,
+                        width=keypoint_radius // 6)
+
+    # Add the edge points
+    if edge_points is not None:
+        draw = ImageDraw.Draw(img, 'RGBA')
+        edge_points = to_absolute_coordinates(edge_points, image_size)
+        edge_point_deltas = edge_point_deltas / 2 * image_size
+        ep_colour = tuple((np.array(to_rgb(ep_colour) + (0.3,)) * 255).astype(np.uint8).tolist())
+        epd_colour = tuple((np.array(to_rgb(epd_colour) + (1,)) * 255).astype(np.uint8).tolist())
+        for i, ((x, y), (dx, dy)) in enumerate(zip(edge_points, edge_point_deltas)):
+            draw.circle((x, y), 5, fill=ep_colour, outline=epd_colour)
+            draw.line([x, y, x + dx, y + dy], fill=epd_colour, width=keypoint_radius // 6)
+
+    return img
+
+
+@torch.no_grad()
+def annotate_image_with_keypoints(
+        image_path: Path,
+        keypoints: np.ndarray | None = None,
+        keypoint_radius: int = 15,
+        kp_fill_colour: str = 'lightgreen',
+        kp_outline_colour: str = 'darkgreen',
+) -> Image:
+    """
+    Draw the keypoints onto an image.
+    """
+    # Load the image
+    img = Image.open(image_path)
+    if img.mode != 'RGB':
+        img = img.convert('RGB')
+    image_size = min(img.size)
+
+    # Draw the keypoints
+    if len(keypoints) > 0:
+        draw = ImageDraw.Draw(img, 'RGBA')
+        keypoints = to_absolute_coordinates(keypoints, image_size)
+        kp_fill_colour = tuple((np.array(to_rgb(kp_fill_colour) + (0.3,)) * 255).astype(np.uint8).tolist())
+        kp_outline_colour = tuple((np.array(to_rgb(kp_outline_colour) + (1,)) * 255).astype(np.uint8).tolist())
+        for (x, y) in keypoints:
+            draw.circle((x, y), keypoint_radius, fill=kp_fill_colour, outline=kp_outline_colour,
+                        width=keypoint_radius // 6)
 
     return img

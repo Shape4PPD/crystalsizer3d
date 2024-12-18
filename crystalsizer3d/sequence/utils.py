@@ -12,6 +12,8 @@ from crystalsizer3d.csd_proxy import CSDProxy
 from crystalsizer3d.nn.manager import Manager
 from crystalsizer3d.util.utils import init_tensor, to_numpy
 
+measurements_cache = {}
+
 
 def get_image_paths(args: Namespace | SequenceFitterArgs, load_all: bool = False) -> List[Tuple[int, Path]]:
     """
@@ -36,6 +38,8 @@ def load_manual_measurements(
     """
     from crystalsizer3d.sequence.sequence_fitter import PARAMETER_KEYS
     assert measurements_dir.exists(), f'Measurements directory {measurements_dir} does not exist.'
+    if measurements_dir in measurements_cache:
+        return measurements_cache[measurements_dir]
     mi_ref = manager.crystal.all_miller_indices
 
     # Expect measurements dir to contain files like XXXX.json
@@ -43,6 +47,8 @@ def load_manual_measurements(
     measurements = {k: [] for k in keys}
     for file_path in measurements_dir.iterdir():
         if file_path.suffix != '.json':
+            continue
+        if file_path.name == 'volumes.json':
             continue
         crystal = Crystal.from_json(file_path)
         idx = int(file_path.stem)
@@ -88,5 +94,8 @@ def load_manual_measurements(
     if len(np.unique(measurements['origin'], axis=0)) != 1:
         measurements['distances'] = adjust_distances(measurements['distances'], measurements['origin'])
         measurements['origin'] = np.repeat(origin0[None, ...], len(measurements['origin']), axis=0)
+
+    # Cache result for future use
+    measurements_cache[measurements_dir] = measurements
 
     return measurements

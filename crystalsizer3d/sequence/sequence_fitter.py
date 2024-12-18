@@ -28,8 +28,8 @@ from crystalsizer3d.args.refiner_args import DENOISER_ARG_NAMES, EDGES_ARG_NAMES
 from crystalsizer3d.args.sequence_fitter_args import SequenceFitterArgs
 from crystalsizer3d.crystal import Crystal
 from crystalsizer3d.csd_proxy import CSDProxy
-from crystalsizer3d.nn.models.rcf import RCF
 from crystalsizer3d.refiner.denoising import denoise_image
+from crystalsizer3d.refiner.edge_detection import find_edges
 from crystalsizer3d.refiner.keypoint_detection import find_keypoints
 from crystalsizer3d.refiner.refiner import Refiner
 from crystalsizer3d.scene_components.scene import Scene
@@ -81,7 +81,6 @@ class SequenceFitter:
         # Initialise the output directories
         self.base_path = SEQUENCE_DATA_PATH / f'{sf_args.images_dir.stem}_{hash_data(sf_args.images_dir.absolute())}'
         self.path = self.base_path / 'sf' / hash_data([sf_args.to_dict(), refiner_args.to_dict()])
-        self.path.mkdir(parents=True, exist_ok=True)
         self._init_output_dirs()
 
         # Initialise the refiner and the asynchronous plotter
@@ -96,6 +95,7 @@ class SequenceFitter:
         self._init_X_wis()
         self._init_keypoints()
         self._init_edges()
+        self._init_edges_annotated()
 
         # Initialise the outputs
         self._init_initial_predictions()
@@ -121,10 +121,7 @@ class SequenceFitter:
             model_args = {k: getattr(self.refiner_args, k) for k in arg_names}
             if model_name == 'predictor' and self.refiner_args.initial_pred_batch_size == 1:
                 model_args = {k: getattr(self.refiner_args, k) for k in PREDICTOR_ARG_NAMES_BS1}
-            if model_name == 'edges':
-                model_id = 'rcf'
-            else:
-                model_id = model_args[f'{model_name}_model_path'].stem[:4]
+            model_id = model_args[f'{model_name}_model_path'].stem[:4]
             model_cache_dir = self.base_path / model_name / f'{model_id}_{hash_data(model_args)}'
             model_cache_dir.mkdir(parents=True, exist_ok=True)
             self.cache_dirs[model_name] = model_cache_dir
@@ -140,9 +137,32 @@ class SequenceFitter:
             yaml.dump(to_dict(self.refiner_args), f)
 
         # Clear the sequence directory if it already exists and we're not resuming
-        if not self.runtime_args.resume and self.path.exists():
+        if self.path.exists() and not self.runtime_args.resume:
             shutil.rmtree(self.path)
-            self.path.mkdir(parents=True, exist_ok=True)
+
+        # If the sequence directory exists, but we're asked to resume from a different checkpoint, abort
+        elif self.path.exists() and self.runtime_args.resume_from is not None:
+            raise RuntimeError('Resuming from a different run will remove the current run\'s data. '
+                               f'Please remove the current run\'s data manually from {self.path} and try again.')
+
+        # Create the sequence directory
+        self.path.mkdir(parents=True, exist_ok=True)
+
+        # Initialise from a previous checkpoint
+        if self.runtime_args.resume_from is not None:
+            assert self.runtime_args.resume_from.exists(), f'Resume from path does not exist: {self.runtime_args.resume_from}'
+            logger.info(f'Copying files from previous run at {self.runtime_args.resume_from}.')
+            shutil.copytree(self.runtime_args.resume_from, self.path, dirs_exist_ok=True,
+                            ignore=shutil.ignore_patterns('parent_*'))
+
+            # Copy all yml, json and pt files and any parent directory from the previous run to preserve a record
+            parent_dir = self.path / f'parent_{self.runtime_args.resume_from.name}'
+            parent_dir.mkdir(exist_ok=True)
+            for file_path in self.runtime_args.resume_from.iterdir():
+                if file_path.suffix in ['.yml', '.json', '.pt']:
+                    shutil.copy2(file_path, parent_dir)
+                elif file_path.name[:6] == 'parent':
+                    shutil.copytree(file_path, parent_dir / file_path.name, dirs_exist_ok=True)
 
         # Save the args into the sequence directory
         with open(self.path / 'args_runtime.yml', 'w') as f:
@@ -335,6 +355,8 @@ class SequenceFitter:
                 for i, (idx, _) in enumerate(self.image_paths):
                     keypoints_path = keypoints_dir / f'{idx:04d}.json'
                     assert keypoints_path.exists()
+                    annotation_path = keypoints_dir / f'{idx:04d}.png'
+                    assert annotation_path.exists()
                     with open(keypoints_path) as f:
                         keypoints = json_to_torch(json.load(f))
                     self.keypoints.append({
@@ -367,7 +389,6 @@ class SequenceFitter:
                 min_distance=ra.keypoints_min_distance,
                 threshold=ra.keypoints_threshold,
                 exclude_border=ra.keypoints_exclude_border,
-                blur_kernel_relative_size=ra.keypoints_blur_kernel_relative_size,
                 n_patches=ra.keypoints_n_patches,
                 patch_size=ra.keypoints_patch_size,
                 patch_search_res=ra.keypoints_patch_search_res,
@@ -375,11 +396,13 @@ class SequenceFitter:
                 max_attenuation_factor=ra.keypoints_max_attenuation_factor,
                 low_res_catchment_distance=ra.keypoints_low_res_catchment_distance,
                 return_everything=False,
-                quiet=True
+                quiet=True,
+                n_workers=1
             )
             idx = self.image_paths[i][0]
             with open(keypoints_dir / f'{idx:04d}.json', 'w') as f:
                 json.dump(res, f, cls=FlexibleJSONEncoder)
+            self.plotter.annotate_image_with_keypoints(X_path, res, keypoints_dir / f'{idx:04d}.png')
 
         # Destroy the keypoint detector to free up space
         logger.info('Destroying keypoint detector to free up space.')
@@ -392,52 +415,90 @@ class SequenceFitter:
     @torch.no_grad()
     def _init_edges(self):
         """
-        Instantiate the RCF edge maps.
+        Instantiate the edges.
         """
         ra = self.refiner_args
         if not ra.use_edge_matching:
             self.edges = None
+            self.edges_fullsize = None
             return
-        edges_dir = self.cache_dirs['edges'] \
-                    / ('dn' if ra.edge_matching_use_denoised else 'og') / f'{ra.edge_matching_rcf_size}'
-        if edges_dir.exists():
+
+        def load_edges(edges_dir):
             try:
-                self.edges = []
+                edges = []
                 for (idx, _) in self.image_paths:
-                    Xe_path = edges_dir / f'{idx:04d}.png'
-                    self.edges.append(to_tensor(Image.open(Xe_path)).squeeze())
-                logger.info(f'Loaded edges from {edges_dir}.')
-                return
+                    edges_path = edges_dir / f'{idx:04d}.png'
+                    assert edges_path.exists()
+                    edges.append(edges_path)
+                return edges
             except Exception:
                 pass
-        edges_dir.mkdir(parents=True, exist_ok=True)
 
-        # Load the edge detector
-        rcf_path = ra.rcf_model_path
-        assert rcf_path.exists(), 'RCF model path does not exist!'
-        rcf = RCF()
-        checkpoint = torch.load(rcf_path, weights_only=True)
-        rcf.load_state_dict(checkpoint, strict=False)
-        rcf.eval()
-        rcf.to(self.device)
-        rcf = torch.jit.script(rcf)
-        logger.info(f'Instantiated RCF network from {rcf_path}.')
+        # First, load the fullsize edge images
+        edges_dir_fullsize = self.cache_dirs['edges'] / 'fullsize'
+        self.edges_fullsize = load_edges(edges_dir_fullsize)
+
+        # If these were loaded, try to load the target size images
+        if self.edges_fullsize is not None:
+            size = str(ra.edge_matching_image_size)
+            edges_dir = self.cache_dirs['edges'] / size
+            edges = load_edges(edges_dir)
+
+            # If these were also loaded, we're done
+            if edges is not None:
+                logger.info(f'Loaded edge images from {edges_dir}.')
+                self.edges = edges
+                return
+
+            # Otherwise, resize the fullsize images
+            edges_dir.mkdir(parents=True, exist_ok=True)
+            for i, (idx, _) in enumerate(self.image_paths):
+                if (i + 1) % 50 == 0:
+                    logger.info(f'Resizing edge images {i + 1}/{len(self)}.')
+                X = to_tensor(Image.open(self.edges_fullsize[i]))
+                X_rs = self.refiner._resize(X, size=int(size)).squeeze()
+                self.plotter.save_image(X_rs, edges_dir / f'{idx:04d}.png')
+
+            # Reload the resized images
+            return self._init_edges()
+
+        # Otherwise, generate the fullsize edge images
+        edges_dir_fullsize.mkdir(parents=True, exist_ok=True)
+        self.manager.load_network(ra.edges_model_path, 'keypointdetector')
+        assert self.manager.keypoint_detector is not None, 'No edge detector model loaded, so can\'t detect edges.'
 
         # Find the edges for each image
         logger.info('Finding edges across image sequence.')
-        X_targets = self.X_targets_denoised if ra.edge_matching_use_denoised else self.X_targets
-        for i, X_path in enumerate(X_targets):
+        for i, (X_path, X_denoised_path) in enumerate(zip(self.X_targets, self.X_targets_denoised)):
             if (i + 1) % 10 == 0:
                 logger.info(f'Finding edges for image {i + 1}/{len(self)}.')
-            X = to_tensor(Image.open(X_path))
-            X = F.interpolate(X[None, ...], size=ra.edge_matching_rcf_size, **resize_args)
-            rcf_feats = rcf(X.to(self.device), apply_sigmoid=True)
             idx = self.image_paths[i][0]
-            self.plotter.save_image(rcf_feats[2].squeeze(), edges_dir / f'{idx:04d}.png')
+            if (edges_dir_fullsize / f'{idx:04d}.png').exists():
+                continue
+            X = to_tensor(Image.open(X_path))
+            X_dn = to_tensor(Image.open(X_denoised_path))
+            X_wf = find_edges(
+                X_target=X,
+                X_target_denoised=X_dn,
+                manager=self.manager,
+                oversize_input=ra.edges_oversize_input,
+                max_img_size=ra.edges_max_img_size,
+                batch_size=ra.edges_batch_size,
+                threshold=ra.edges_threshold,
+                exclude_border=ra.edges_exclude_border,
+                n_patches=ra.edges_n_patches,
+                patch_size=ra.edges_patch_size,
+                patch_search_res=ra.edges_patch_search_res,
+                attenuation_sigma=ra.edges_attenuation_sigma,
+                max_attenuation_factor=ra.edges_max_attenuation_factor,
+                return_everything=False,
+                quiet=True
+            )
+            self.plotter.save_image(X_wf, edges_dir_fullsize / f'{idx:04d}.png')
 
         # Destroy the edge detector to free up space
         logger.info('Destroying edge detector to free up space.')
-        del rcf
+        self.manager.keypoint_detector = None
         torch.cuda.empty_cache()
         gc.collect()
 
@@ -599,7 +660,7 @@ class SequenceFitter:
                 if ra.use_keypoints:
                     self.refiner.keypoint_targets = self.keypoints[i]['keypoints']
                 if ra.use_edge_matching:
-                    self.refiner.edge_map = self.edges[i]
+                    self.refiner.edge_map = to_tensor(Image.open(self.edges[i]))
 
                 # Create a noisy batch
                 X_target_batch = X_target[None, ...].repeat(bs, 1, 1, 1, 1)
@@ -1011,6 +1072,22 @@ class SequenceFitter:
 
         return self._init_X_targets_annotated()
 
+    def _init_edges_annotated(self):
+        """
+        Instantiate the edge images with wireframe overlaid (paths only).
+        """
+        if not self.refiner_args.use_edge_matching:
+            self.edges_annotated = None
+            return
+        edges_annotated_dir = self.path / 'X_edges_annotated'
+        self.edges_annotated = {'train': [], 'eval': []}
+        for train_or_eval in ['train', 'eval']:
+            (edges_annotated_dir / train_or_eval).mkdir(parents=True, exist_ok=True)
+            for (idx, _) in self.image_paths:
+                edges_annotated_path = edges_annotated_dir / train_or_eval / f'{idx:04d}.png'
+                self.edges_annotated[train_or_eval].append(edges_annotated_path)
+        logger.info(f'Loaded annotated edge images from {edges_annotated_dir}.')
+
     def _init_tb_logger(self):
         """
         Instantiate the tensorboard logger.
@@ -1026,11 +1103,12 @@ class SequenceFitter:
         sa = self.sf_args
         if sa.seq_encoder_model == 'transformer':
             self.sequence_encoder = SequenceEncoder(
-                param_dim=self.n_parameters,
+                scene_dict=self.scenes['train'][0]['scene_dict'],
+                fixed_parameters=self.fixed_parameters,
+                stationary_parameters=sa.stationary_parameters,
                 hidden_dim=sa.hidden_dim,
                 n_layers=sa.n_layers,
                 n_heads=sa.n_heads,
-                max_freq=sa.max_freq,
                 dropout=sa.dropout,
                 activation=sa.activation,
             )
@@ -1072,7 +1150,8 @@ class SequenceFitter:
             logger.info(f'Loading sequence encoder state from {state_path}.')
             state = torch.load(state_path, weights_only=True)
             self.sequence_encoder.load_state_dict(state['model'])
-            self.optimiser.load_state_dict(state['optimiser'])
+            if not self.runtime_args.reset_lrs:
+                self.optimiser.load_state_dict(state['optimiser'])
             loaded = True
         self.sequence_encoder.eval()
         if loaded:
@@ -1124,7 +1203,7 @@ class SequenceFitter:
         self.sequence_encoder.eval()
         self._save_encoder_state()
         self.update_parameters_from_encoder()
-        self.update_X_preds_from_parameters()
+        # self.update_X_preds_from_parameters()
 
     def fit(self):
         """
@@ -1226,18 +1305,44 @@ class SequenceFitter:
                     X_target_denoised_wis=batch[3],
                     keypoints=batch[4],
                     edges=batch[5],
+                    distances_target=None,
+                    vertices_target=None,
                     calculate_grads=True,
-                    save_annotations=ra.save_annotations_freq > 0 and (step + 1) % ra.save_annotations_freq == 0,
+                    save_annotations=(ra.save_annotations_freq > 0
+                                      and (step + 1) % ra.save_annotations_freq == 0),
+                    save_edge_annotations=(ra.save_edge_annotations_freq > 0
+                                           and (step + 1) % ra.save_edge_annotations_freq == 0),
                     save_renders=ra.save_renders_freq > 0 and (step + 1) % ra.save_renders_freq == 0,
                     X_preds_paths=[self.X_preds['train'][idx] for idx in batch_idxs],
                     X_targets_paths=[self.X_targets[idx] for idx in batch_idxs],
                     X_targets_annotated_paths=[self.X_targets_annotated['train'][idx] for idx in batch_idxs],
+                    edges_fullsize_paths=[self.edges_fullsize[idx]
+                                          for idx in batch_idxs] if self.edges_fullsize is not None else None,
+                    edges_annotated_paths=[self.edges_annotated['train'][idx]
+                                           for idx in batch_idxs] if self.edges_annotated is not None else None,
                 )
                 p_grads = p_grads.to(self.device)
+                p_dict = self._parameter_vectors_to_dict(parameters_pred)
+
+                # Compute the negative growth penalty loss
+                if self.sf_args.w_negative_growth > 0:
+                    d = p_dict['distances']
+                    t_order = ts.argsort()
+                    d_sorted = d[t_order]
+                    neg_growth = (d_sorted[1:] - d_sorted[:-1]).clamp(max=0)**2
+                    l_neg = neg_growth.sum()
+                    reg_grads = torch.autograd.grad(l_neg * self.sf_args.w_negative_growth, parameters_pred)[0]
+                    p_grads = p_grads + reg_grads
+
+                    # Spread out the negative growth loss between neighbouring frames for logging
+                    neg_growth_batch = torch.zeros_like(d)
+                    neg_growth_batch[1:] += neg_growth.detach() / 2
+                    neg_growth_batch[:-1] += neg_growth.detach() / 2
+                    neg_growth_batch = neg_growth_batch[t_order.argsort()]  # reorder back to the batch ordering
+                    stats_batch['losses/negative_growth'] = neg_growth_batch.sum(dim=1).tolist()
 
                 # Update scene and crystal parameters
                 with torch.no_grad():
-                    p_dict = self._parameter_vectors_to_dict(parameters_pred)
                     for i, idx in enumerate(batch_idxs):
                         self.frame_counts[idx] += 1
                         self.losses['train']['total'][idx] = losses_batch[i].item()
@@ -1337,7 +1442,7 @@ class SequenceFitter:
 
             # Log learning rate and update
             self.tb_logger.add_scalar('lr', self.optimiser.param_groups[0]['lr'], step)
-            self.lr_scheduler.step(step + 1, seq_loss_ema)
+            self.lr_scheduler.step(step + 1, seq_loss_ema + self.refiner_args.ir_loss_placeholder)
 
             # Log network norm
             weights_cumulative_norm = calculate_model_norm(self.sequence_encoder, device=self.device)
@@ -1365,7 +1470,7 @@ class SequenceFitter:
                 self._save_encoder_state()
 
             # Plot every X steps
-            if (step + 1) % ra.plot_freq == 0:
+            if ra.plot_freq > 0 and (step + 1) % ra.plot_freq == 0:
                 logger.info('Making training plots.')
                 if self.refiner_pool is None:  # Needs fixing for refiner pool
                     image_idx = self.image_idxs[idx].item()
@@ -1383,9 +1488,11 @@ class SequenceFitter:
                 logger.info('Evaluating the sequence.')
                 self.update_parameters_from_encoder(save=False)
                 save_annotations = ra.eval_annotate_freq > 0 and (step + 1) % ra.eval_annotate_freq == 0
+                save_edge_annotations = ra.eval_edge_annotate_freq > 0 and (step + 1) % ra.eval_edge_annotate_freq == 0
                 save_renders = ra.eval_render_freq > 0 and (step + 1) % ra.eval_render_freq == 0
                 self.calculate_evaluation_losses(
                     save_annotations=save_annotations,
+                    save_edge_annotations=save_edge_annotations,
                     save_renders=save_renders,
                 )
                 self.save()
@@ -1425,6 +1532,7 @@ class SequenceFitter:
     def calculate_evaluation_losses(
             self,
             save_annotations: bool = True,
+            save_edge_annotations: bool = True,
             save_renders: bool = True,
             initial_or_eval: str = 'eval'
     ):
@@ -1444,6 +1552,7 @@ class SequenceFitter:
             losses = self.losses_init
             X_preds = self.X_preds_initial
             X_targets_annotated = self.X_targets_annotated_initial
+            save_edge_annotations = False
 
         ds = self.dataloader.dataset
 
@@ -1477,14 +1586,30 @@ class SequenceFitter:
                 X_target_wis=torch.stack([X[2] for X in batch]).permute(0, 2, 3, 1),
                 X_target_denoised_wis=torch.stack([X[3] for X in batch]).permute(0, 2, 3, 1),
                 keypoints=[X[4] for X in batch] if batch[0][4] is not None else [None for _ in batch],
-                edges=torch.stack([X[5] for X in batch]) if batch[0][5] is not None else [None for _ in batch],
+                edges=[X[5] for X in batch] if batch[0][5] is not None else [None for _ in batch],
+                distances_target=None,
+                vertices_target=None,
                 calculate_grads=False,
                 save_annotations=save_annotations,
+                save_edge_annotations=save_edge_annotations,
                 save_renders=save_renders,
                 X_preds_paths=[X_preds[idx] for idx in batch_idxs],
                 X_targets_paths=[self.X_targets[idx] for idx in batch_idxs],
                 X_targets_annotated_paths=[X_targets_annotated[idx] for idx in batch_idxs],
+                edges_fullsize_paths=[self.edges_fullsize[idx] for idx in
+                                      batch_idxs] if self.edges_fullsize is not None else None,
+                edges_annotated_paths=[self.edges_annotated['eval'][idx] for idx in
+                                       batch_idxs] if self.edges_annotated is not None else None,
             )
+
+            # Compute the negative growth penalty loss
+            if self.sf_args.w_negative_growth > 0:
+                d = p_dict_batch['distances']
+                neg_growth = (d[1:] - d[:-1]).clamp(max=0)**2
+                neg_growth_batch = torch.zeros_like(d)
+                neg_growth_batch[1:] += neg_growth.detach() / 2
+                neg_growth_batch[:-1] += neg_growth.detach() / 2
+                stats_batch['losses/negative_growth'] = neg_growth_batch.sum(dim=1).tolist()
 
             # Update scene and crystal parameters
             for j, idx in enumerate(batch_idxs):
@@ -1527,12 +1652,14 @@ class SequenceFitter:
             self,
             train_or_eval: str = 'eval',
             generate_renders: bool = True,
-            generate_annotations: bool = True
+            generate_annotations: bool = True,
+            generate_edge_annotations: bool = True,
     ):
         """
         Generate rendered and annotated images from the parameters.
         """
         logger.info('Generating predicted images from the parameters.')
+        generate_edge_annotations = generate_edge_annotations and self.edges_annotated is not None
         scene = Scene.from_yml(self.scenes[train_or_eval][0]['path'])
         crystal = scene.crystal
         crystal.to('cpu')
@@ -1547,9 +1674,12 @@ class SequenceFitter:
                     getattr(crystal, k).data = v
             if generate_renders:
                 self.plotter.render_scene(scene, self.X_preds[train_or_eval][i])
-            if generate_annotations:
+            if generate_annotations or generate_edge_annotations:
                 crystal.build_mesh()  # Required to update the buffers
+            if generate_annotations:
                 self.plotter.annotate_image(self.X_targets[i], self.X_targets_annotated[train_or_eval][i], scene)
+            if generate_edge_annotations:
+                self.plotter.annotate_image(self.edges_fullsize[i], self.edges_annotated[train_or_eval][i], scene)
 
     def _plot_parameters(self, train_or_eval: str):
         """

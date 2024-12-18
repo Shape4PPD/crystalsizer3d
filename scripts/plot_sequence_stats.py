@@ -13,7 +13,6 @@ import yaml
 from PIL import Image
 from matplotlib import pyplot as plt
 from mayavi import mlab
-from trimesh import Trimesh
 
 from crystalsizer3d import LOGS_PATH, START_TIMESTAMP, logger
 from crystalsizer3d.args.refiner_args import PREDICTOR_ARG_NAMES, PREDICTOR_ARG_NAMES_BS1, RefinerArgs
@@ -28,6 +27,7 @@ from crystalsizer3d.sequence.plots import annotate_image, get_colour_variations,
 from crystalsizer3d.sequence.sequence_fitter import SEQUENCE_DATA_PATH
 from crystalsizer3d.sequence.utils import get_image_paths, load_manual_measurements
 from crystalsizer3d.util.image_scale import calculate_distance
+from crystalsizer3d.sequence.volumes import generate_or_load_manual_measurement_volumes, generate_or_load_volumes
 from crystalsizer3d.util.plots import make_3d_digital_crystal_image
 from crystalsizer3d.util.utils import get_crystal_face_groups, hash_data, init_tensor, json_to_numpy, print_args, \
     set_seed, to_dict, to_numpy, to_rgb
@@ -510,6 +510,17 @@ def plot_volume():
     with open(args.sf_path / 'args_runtime.yml', 'r') as f:
         runtime_args = Namespace(**yaml.load(f, Loader=yaml.FullLoader))
 
+    # Load the volumes
+    volumes = generate_or_load_volumes(
+        sf_path=args.sf_path,
+        cache_only=False
+    )
+    volumes_m = generate_or_load_manual_measurement_volumes(
+        measurements_dir=Path(runtime_args.measurements_dir),
+        predictor_model_path=ref_args.predictor_model_path,
+        cache_only=False
+    )
+
     # Instantiate a manager
     manager = Manager.load(
         model_path=ref_args.predictor_model_path,
@@ -529,51 +540,6 @@ def plot_volume():
         manager=manager
     )
     measurement_idxs = measurements['idx']
-    distances_m = measurements['distances']
-    scales_m = measurements['scale']
-
-    # Get a crystal object
-    ds = manager.ds
-    cs = CSDProxy().load(ds.dataset_args.crystal_id)
-    crystal = Crystal(
-        lattice_unit_cell=cs.lattice_unit_cell,
-        lattice_angles=cs.lattice_angles,
-        miller_indices=ds.miller_indices,
-        point_group_symbol=cs.point_group_symbol,
-        dtype=torch.float64
-    )
-
-    # Load the parameters
-    param_path = args.sf_path / 'parameters.json'
-    logger.info(f'Loading parameters from {param_path}.')
-    with open(param_path, 'r') as f:
-        parameters = json_to_numpy(json.load(f))
-    distances = parameters['eval']['distances'][:show_n]
-    scales = parameters['eval']['scale'][:show_n]
-
-    # Calculate the volumes
-    logger.info('Calculating volumes.')
-    volumes = np.zeros(len(distances))
-    for i in range(len(distances)):
-        v, f = crystal.build_mesh(
-            scale=init_tensor(scales[i], dtype=torch.float64),
-            distances=init_tensor(distances[i], dtype=torch.float64)
-        )
-        v, f = to_numpy(v), to_numpy(f)
-        m = Trimesh(vertices=v, faces=f)
-        volumes[i] = m.volume
-
-    # Calculate the volumes for the manual measurements
-    logger.info('Calculating volumes for the manual measurements.')
-    volumes_m = np.zeros(len(distances_m))
-    for i in range(len(distances_m)):
-        v, f = crystal.build_mesh(
-            scale=init_tensor(scales_m[i], dtype=torch.float64),
-            distances=init_tensor(distances_m[i], dtype=torch.float64)
-        )
-        v, f = to_numpy(v), to_numpy(f)
-        m = Trimesh(vertices=v, faces=f)
-        volumes_m[i] = m.volume
 
     # Set up some variables
     logger.info('Setting up plot variables.')
@@ -613,6 +579,109 @@ def plot_volume():
     ax.plot(m_ts, volumes_m, c='grey', marker='o', linestyle='none',
             markersize=5, markerfacecolor='none')
     plt.savefig(output_dir / 'volumes.svg')
+    plt.show()
+
+
+def plot_concentration():
+    """
+    Plot the concentration.
+    """
+    args, output_dir = _init()
+    show_n = 5000
+
+    # Variables
+    initial_concentration = 16
+    crystal_density = 1.47
+    cuvette_volume = 0.5
+
+    # Load the args
+    with open(args.sf_path / 'args_sequence_fitter.yml', 'r') as f:
+        sf_args = SequenceFitterArgs.from_args(yaml.load(f, Loader=yaml.FullLoader))
+    with open(args.sf_path / 'args_refiner.yml', 'r') as f:
+        ref_args = RefinerArgs.from_args(yaml.load(f, Loader=yaml.FullLoader))
+    with open(args.sf_path / 'args_runtime.yml', 'r') as f:
+        runtime_args = Namespace(**yaml.load(f, Loader=yaml.FullLoader))
+
+    # Load the volumes
+    volumes = generate_or_load_volumes(
+        sf_path=args.sf_path,
+        cache_only=False
+    )
+    volumes_m = generate_or_load_manual_measurement_volumes(
+        measurements_dir=Path(runtime_args.measurements_dir),
+        predictor_model_path=ref_args.predictor_model_path,
+        cache_only=False
+    )
+
+    # Calculate the concentrations
+    concentrations = np.zeros(len(volumes))
+    concentrations[0] = initial_concentration
+    for i in range(1, len(volumes)):
+        concentrations[i] = concentrations[i - 1] - (volumes[i] - volumes[i - 1]) * crystal_density / cuvette_volume
+    concentrations_m = np.zeros(len(volumes_m))
+    concentrations_m[0] = initial_concentration
+    for i in range(1, len(volumes_m)):
+        concentrations_m[i] = concentrations_m[i - 1] - (
+                volumes_m[i] - volumes_m[i - 1]) * crystal_density / cuvette_volume
+
+    # Instantiate a manager
+    manager = Manager.load(
+        model_path=ref_args.predictor_model_path,
+        args_changes={
+            'runtime_args': {
+                'use_gpu': False,
+                'batch_size': 1
+            },
+        },
+        save_dir=output_dir
+    )
+
+    # Load the measurements
+    logger.info(f'Loading manual measurements from {runtime_args.measurements_dir}')
+    measurements = load_manual_measurements(
+        measurements_dir=Path(runtime_args.measurements_dir),
+        manager=manager
+    )
+    measurement_idxs = measurements['idx']
+
+    # Set up some variables
+    logger.info('Setting up plot variables.')
+    image_paths = get_image_paths(sf_args, load_all=True)[:show_n]
+    x_vals = [idx for idx, _ in image_paths]
+
+    # Restrict the measurements to within the range predicted
+    include_mask = np.array([x_vals[0] <= idx <= x_vals[-1] for idx in measurement_idxs])
+    measurement_idxs = measurement_idxs[include_mask]
+    concentrations_m = concentrations_m[include_mask]
+
+    # Set font sizes
+    plt.rc('axes', titlesize=7, titlepad=1)  # fontsize of the title
+    plt.rc('axes', labelsize=6, labelpad=2)  # fontsize of the x and y labels
+    plt.rc('xtick', labelsize=6)  # fontsize of the x tick labels
+    plt.rc('ytick', labelsize=6)  # fontsize of the y tick labels
+    plt.rc('xtick.major', pad=2, size=2)
+    plt.rc('xtick.minor', pad=2, size=1)
+    plt.rc('ytick.major', pad=1, size=2)
+    plt.rc('axes', linewidth=0.5)
+
+    # Make a single plot showing the values for each face group
+    fig, ax = plt.subplots(
+        1, 1,
+        figsize=(1.7, 1.5),
+        gridspec_kw=dict(
+            top=0.98, bottom=0.15, right=0.99, left=0.2,
+            hspace=0.1, wspace=0.4
+        ),
+    )
+    ax.set_ylabel('Concentration (mg/ml)')
+    ts = _get_ts(x_vals, args.interval_mins)
+    m_idxs = np.array([(x_vals == m_idx).nonzero()[0] for m_idx in measurement_idxs]).squeeze()
+    m_ts = [ts[m_idx] for m_idx in m_idxs]
+    _format_xtime(ax, ts)
+    ax.plot(ts, concentrations, c='black', linewidth=0.6)
+    ax.plot(m_ts, concentrations_m, c='grey', marker='o', linestyle='none',
+            markersize=5, markerfacecolor='none')
+    plt.savefig(output_dir / 'concentrations.svg')
     plt.show()
 
 
@@ -810,5 +879,6 @@ if __name__ == '__main__':
     plot_distances_and_areas()
     # plot_3d_crystals_with_highlighted_faces()
     # plot_volume()
+    plot_concentration()
     # create_legend_plot()
     # plot_sequence_errors()

@@ -7,16 +7,16 @@ import yaml
 
 from crystalsizer3d import logger
 from crystalsizer3d.args.refiner_args import RefinerArgs
-from crystalsizer3d.args.sequence_fitter_args import SequenceFitterArgs
-from crystalsizer3d.sequence.sequence_fitter import SequenceFitter
+from crystalsizer3d.args.synthetic_fitter_args import SyntheticFitterArgs
+from crystalsizer3d.synthetic.synthetic_fitter import SyntheticFitter
 from crystalsizer3d.util.utils import print_args, str2bool
 
 
-def get_args(printout: bool = True) -> Tuple[Namespace, SequenceFitterArgs, RefinerArgs]:
+def get_args(printout: bool = True) -> Tuple[Namespace, SyntheticFitterArgs, RefinerArgs]:
     """
     Parse command line arguments.
     """
-    rt_parser = ArgumentParser(description='CrystalSizer3D script to fit a crystal growth sequence.')
+    rt_parser = ArgumentParser(description='CrystalSizer3D script to fit a synthetic dataset.')
     sf_parser = ArgumentParser()
     ref_parser = ArgumentParser()
 
@@ -27,51 +27,19 @@ def get_args(printout: bool = True) -> Tuple[Namespace, SequenceFitterArgs, Refi
                            help='Resume training from a previous checkpoint.')
     rt_parser.add_argument('--resume-from', type=Path,
                            help='Resume training from a different configuration, only really for debug.')
-    rt_parser.add_argument('--reset-lrs', type=str2bool, default=False,
-                           help='When resuming, reset the learning rate and scheduler.')
-    rt_parser.add_argument('--make-videos', type=str2bool, default=True,
-                           help='Make video of the annotated masks/images (whatever was generated).')
-    rt_parser.add_argument('--log-freq-pretrain', type=int, default=10,
-                           help='Log every n batches during pretraining.')
-    rt_parser.add_argument('--log-freq-train', type=int, default=5,
-                           help='Log every n steps during training.')
-    rt_parser.add_argument('--checkpoint-freq', type=int, default=5,
-                           help='Checkpoint every n steps during training.')
-    rt_parser.add_argument('--save-annotations-freq', type=int, default=5,
-                           help='Save annotated images every n steps during training.')
-    rt_parser.add_argument('--save-edge-annotations-freq', type=int, default=-1,
-                           help='Save annotated edge images every n steps during training.')
     rt_parser.add_argument('--save-renders-freq', type=int, default=5,
                            help='Save rendered images every n steps during training.')
-    rt_parser.add_argument('--plot-freq', type=int, default=20,
-                           help='Make plots every n steps during training.')
-    rt_parser.add_argument('--eval-freq', type=int, default=10,
-                           help='Evaluate every n steps during training.')
-    rt_parser.add_argument('--eval-annotate-freq', type=int, default=10,
-                           help='Generate annotated images every n steps during training. (Must be a multiple of eval-freq).')
-    rt_parser.add_argument('--eval-edge-annotate-freq', type=int, default=-1,
-                           help='Generate annotated edge images every n steps during training. (Must be a multiple of eval-freq).')
-    rt_parser.add_argument('--eval-render-freq', type=int, default=10,
-                           help='Render the evaluated parameters every n steps during training. (Must be a multiple of eval-freq).')
-    rt_parser.add_argument('--eval-video-freq', type=int, default=10,
-                           help='Make a video of the evaluated parameters every n steps during training. (Must be a multiple of eval-freq).')
     rt_parser.add_argument('--n-plotting-workers', type=int, default=8,
                            help='Number of plotting workers.')
     rt_parser.add_argument('--plot-queue-size', type=int, default=100,
                            help='Size of the plotting queue.')
-    rt_parser.add_argument('--n-dataloader-workers', type=int, default=2,
-                           help='Number of data loader workers.')
-    rt_parser.add_argument('--prefetch-factor', type=int, default=1,
-                           help='Data loader prefetch factor.')
     rt_parser.add_argument('--n-refiner-workers', type=int, default=2,
                            help='Number of refiner workers.')
     rt_parser.add_argument('--refiner-queue-size', type=int, default=100,
                            help='Size of the refiner queue.')
-    rt_parser.add_argument('--measurements-dir', type=Path,
-                           help='Path to a directory containing manual measurements.')
 
-    # Sequence fitter and refiner args
-    SequenceFitterArgs.add_args(sf_parser)
+    # Synthetic fitter and refiner args
+    SyntheticFitterArgs.add_args(sf_parser)
     RefinerArgs.add_args(ref_parser)
 
     # Cache the args for each parser
@@ -106,11 +74,11 @@ def get_args(printout: bool = True) -> Tuple[Namespace, SequenceFitterArgs, Refi
         print_args(combined_args)
 
     # Instantiate the parameter holders
-    sf_args = SequenceFitterArgs.from_args(sf_args)
+    sf_args = SyntheticFitterArgs.from_args(sf_args)
     ref_args = RefinerArgs.from_args(ref_args)
 
-    # Check arguments are valid
-    assert sf_args.images_dir.exists(), f'Images directory {sf_args.images_dir} does not exist.'
+    # Check that the dataset path exists
+    assert sf_args.dataset_path.exists(), f'Dataset path {sf_args.dataset_path} does not exist.'
 
     # Remove the args_path argument as it is not needed
     delattr(rt_args, 'args_path')
@@ -118,19 +86,19 @@ def get_args(printout: bool = True) -> Tuple[Namespace, SequenceFitterArgs, Refi
     return rt_args, sf_args, ref_args
 
 
-def train_sequence():
+def fit_synthetic():
     """
-    Train a neural network to track a crystal growth sequence.
+    Make initial predictions and then refine the parameters for a synthetic dataset.
     """
     start_time = time.time()
     rt_args, sf_args, ref_args = get_args()
 
-    sequence = SequenceFitter(
+    fitter = SyntheticFitter(
         sf_args=sf_args,
         refiner_args=ref_args,
         runtime_args=rt_args,
     )
-    sequence.fit()
+    fitter.fit()
 
     # Print how long this took - split into hours, minutes, seconds
     elapsed_time = time.time() - start_time
@@ -140,4 +108,4 @@ def train_sequence():
 
 
 if __name__ == '__main__':
-    train_sequence()
+    fit_synthetic()

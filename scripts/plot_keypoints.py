@@ -3,6 +3,7 @@ from argparse import ArgumentParser, _ArgumentGroup
 from pathlib import Path
 from typing import Optional
 
+import numpy as np
 import torch
 import torch.nn.functional as F
 import yaml
@@ -330,6 +331,12 @@ def _init(args: Optional[RuntimeArgs], method: str):
             max_img_size=args.denoiser_max_img_size,
             batch_size=args.denoiser_batch_size
         )
+
+        # Save and reload as this is how we do it for the sequence, and does give different results
+        Image.fromarray((to_numpy(X_target_denoised).transpose(1, 2, 0) * 255).astype(np.uint8)).save(
+            save_dir / 'denoised.png')
+        X_target_denoised = to_tensor(Image.open(save_dir / 'denoised.png'))
+
     else:
         X_target_denoised = None
 
@@ -782,15 +789,13 @@ def plot_keypoints_targeted(args: Optional[RuntimeArgs] = None):
     Y_abs = to_absolute_coordinates(Y_rel, X_target.shape[-1])
     assert torch.allclose(Y_abs, res['Y_candidates_final']), 'Relative and absolute keypoints do not match.'
 
-    kp_img_args = dict(save_dir=save_dir, marker_type='o', suffix='')
+    kp_img_args = dict(save_dir=save_dir, marker_type='o', suffix='', keypoint_radius=15)
 
     # Save the images and heatmaps
     save_img(X_target, 'original', save_dir)
     save_img(X_target_denoised, 'denoised', save_dir)
-    save_img(res['X_lr'], 'denoised_lowres', save_dir)
     save_img(res['X_lr_kp'], 'kp_low_res', save_dir)
     save_img_with_keypoint_markers2(X_target, res['Y_lr'], lbl='original_lowres_markers', **kp_img_args)
-    save_img_with_keypoint_markers2(res['X_lr'], res['Y_lr'], lbl='denoised_lowres_markers', **kp_img_args)
 
     # Save the patches as a grid
     save_img_grid(res['X_patches'], 'patches_og', save_dir, coords=res['Y_patches'])

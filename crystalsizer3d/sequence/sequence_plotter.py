@@ -15,8 +15,8 @@ from crystalsizer3d import N_WORKERS, logger
 from crystalsizer3d.crystal import Crystal
 from crystalsizer3d.scene_components.scene import Scene
 from crystalsizer3d.scene_components.utils import orthographic_scale_factor
-from crystalsizer3d.sequence.plots import annotate_image, plot_distances, plot_light_radiance, plot_material_properties, \
-    plot_origin, plot_rotation
+from crystalsizer3d.sequence.plots import annotate_image, annotate_image_with_keypoints, plot_distances, \
+    plot_light_radiance, plot_material_properties, plot_origin, plot_rotation
 from crystalsizer3d.util.parallelism import start_process, stop_event as global_stop_event
 from crystalsizer3d.util.utils import to_numpy
 
@@ -143,7 +143,10 @@ class SequencePlotter:
             X_annotated_path: Path,
             scene: Scene | None = None,
             zoom: float | None = None,
-            crystal: Crystal | Dict[str, Any] | None = None
+            crystal: Crystal | Dict[str, Any] | None = None,
+            keypoints: np.ndarray | None = None,
+            edge_points: np.ndarray | None = None,
+            edge_point_deltas: np.ndarray | None = None
     ):
         """
         Annotate an image with the wireframe overlay of the crystal.
@@ -162,7 +165,10 @@ class SequencePlotter:
             'X_path': X_path,
             'X_annotated_path': X_annotated_path,
             'zoom': zoom,
-            'crystal': crystal
+            'crystal': crystal,
+            'keypoints': keypoints,
+            'edge_points': edge_points,
+            'edge_point_deltas': edge_point_deltas,
         })
 
     @staticmethod
@@ -174,7 +180,38 @@ class SequencePlotter:
             image_path=job['X_path'],
             crystal=Crystal.from_dict(job['crystal']),
             zoom=job['zoom'],
+            keypoints=job['keypoints'],
+            edge_points=job['edge_points'],
+            edge_point_deltas=job['edge_point_deltas'],
         ).save(job['X_annotated_path'])
+
+    def annotate_image_with_keypoints(
+            self,
+            X_path: Path,
+            keypoints: np.ndarray | Tensor,
+            save_path: Path
+    ):
+        """
+        Annotate an image with keypoints.
+        """
+        if isinstance(keypoints, Tensor):
+            keypoints = to_numpy(keypoints)
+        self.enqueue_job({
+            'type': 'annotate_image_with_keypoints',
+            'X_path': X_path,
+            'keypoints': keypoints,
+            'save_path': save_path
+        })
+
+    @staticmethod
+    def _annotate_image_with_keypoints(job: Dict[str, Any]):
+        """
+        Annotate an image with keypoints.
+        """
+        annotate_image_with_keypoints(
+            image_path=job['X_path'],
+            keypoints=job['keypoints'],
+        ).save(job['save_path'])
 
     def render_scene(self, scene: Scene, save_path: Path):
         """
@@ -294,7 +331,8 @@ class SequencePlotter:
         Plot the sequence losses.
         """
         include_keys = ['total', 'measurement', 'l1', 'l2', 'perceptual', 'latents',
-                        'overshoot', 'symmetry', 'z_pos', 'rotation_xy', 'keypoints', 'edge_matching']
+                        'overshoot', 'symmetry', 'z_pos', 'rotation_xy', 'keypoints', 'edge_matching',
+                        'negative_growth']
         losses = {k: job['losses'][k] for k in include_keys if k in job['losses'] and job['losses'][k] is not None}
         measurements = job['measurements']
         n = len(losses)

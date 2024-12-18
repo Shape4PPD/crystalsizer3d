@@ -135,6 +135,36 @@ def save_img_with_keypoint_markers2(
     return img
 
 
+def save_img_with_edge_overlay(
+        X: np.ndarray | Tensor,
+        X_wf: np.ndarray | Tensor,
+        lbl: str,
+        lbl2: str,
+        save_dir: Path,
+        alpha_max: float = 0.9
+):
+    if isinstance(X, Tensor):
+        X = to_numpy(X)
+    if isinstance(X_wf, Tensor):
+        X_wf = to_numpy(X_wf)
+    X = X.squeeze()
+    if X.ndim == 3 and X.shape[0] == 3:
+        X = X.transpose(1, 2, 0)
+    fig_size = (X.shape[1] / dpi, X.shape[0] / dpi)
+    fig, ax = plt.subplots(figsize=fig_size)
+    plt.subplots_adjust(left=0, right=1, top=1, bottom=0)
+    ax.imshow(X)
+    alpha = X_wf.copy()
+    alpha = alpha / alpha.max() * alpha_max
+    ax.imshow(X_wf, cmap='hot', alpha=alpha)
+    ax.set_axis_off()
+    fig.savefig(
+        save_dir / f'{lbl}_overlaid_wf_from_{lbl2}.png',
+        bbox_inches='tight', pad_inches=0
+    )
+    plt.close(fig)
+
+
 def save_img_grid(
         X: np.ndarray | Tensor,
         lbl: str,
