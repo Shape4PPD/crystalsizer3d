@@ -13,22 +13,24 @@ from crystalsizer3d.crystal import Crystal
 from crystalsizer3d.csd_proxy import CSDProxy
 from crystalsizer3d.nn.manager import Manager
 from crystalsizer3d.sequence.utils import get_image_paths, load_manual_measurements
+from crystalsizer3d.util.image_scale import get_pixels_to_mm_scale_factor
 from crystalsizer3d.util.utils import init_tensor, json_to_numpy, to_numpy
 
 
 def _calculate_volumes(
-        sf_path: Path
+        sf_path: Path,
+        pixel_to_mm: float | None = None
 ) -> np.ndarray:
     """
     Calculate the crystal volumes for the fitted sequence.
     """
-
     # Load the args
     with open(sf_path / 'args_sequence_fitter.yml', 'r') as f:
         sf_args = SequenceFitterArgs.from_args(yaml.load(f, Loader=yaml.FullLoader))
     with open(sf_path / 'args_refiner.yml', 'r') as f:
         ref_args = RefinerArgs.from_args(yaml.load(f, Loader=yaml.FullLoader))
     image_paths = get_image_paths(sf_args, load_all=True)
+    dist_to_mm = get_pixels_to_mm_scale_factor(sf_args.initial_scene, image_paths[0][1], pixel_to_mm)
 
     # Instantiate a manager
     manager = Manager.load(
@@ -59,7 +61,7 @@ def _calculate_volumes(
     with open(param_path, 'r') as f:
         parameters = json_to_numpy(json.load(f))
     distances = parameters['eval']['distances']
-    scales = parameters['eval']['scale']
+    scales = parameters['eval']['scale'] * dist_to_mm
     assert len(distances) == len(scales) == len(image_paths), \
         f'Length mismatch: {len(distances)}, {len(scales)}, {len(image_paths)}'
 
@@ -80,7 +82,9 @@ def _calculate_volumes(
 
 def generate_or_load_volumes(
         sf_path: Path,
-        cache_only: bool = False
+        pixel_to_mm: float | None = None,
+        cache_only: bool = False,
+        regenerate: bool = False
 ) -> np.ndarray:
     """
     Generate or load the crystal volumes for the fitted sequence.
@@ -90,17 +94,20 @@ def generate_or_load_volumes(
 
     vols = None
     if vols_path.exists():
-        try:
-            with open(vols_path, 'r') as f:
-                vols = json_to_numpy(json.load(f))
-        except Exception as e:
-            logger.warning(f'Could not load volume data: {e}')
+        if regenerate:
+            vols_path.unlink()
+        else:
+            try:
+                with open(vols_path, 'r') as f:
+                    vols = json_to_numpy(json.load(f))
+            except Exception as e:
+                logger.warning(f'Could not load volume data: {e}')
 
     if vols is None:
         if cache_only:
             raise RuntimeError(f'Cache could not be loaded!')
         logger.info('Processing crystal sequence.')
-        vols = _calculate_volumes(sf_path)
+        vols = _calculate_volumes(sf_path, pixel_to_mm)
         with open(vols_path, 'w') as f:
             json.dump(vols.tolist(), f)
 
@@ -108,13 +115,17 @@ def generate_or_load_volumes(
 
 
 def _calculate_manual_measurement_volumes(
+        sf_args: SequenceFitterArgs,
         measurements_dir: Path,
         predictor_model_path: Path,
+        pixel_to_mm: float | None = None
 ) -> np.ndarray:
     """
     Calculate the crystal volumes for the manual measurements.
     Predictor model path needed to determine the crystal id.
     """
+    image_paths = get_image_paths(sf_args, load_all=True)
+    dist_to_mm = get_pixels_to_mm_scale_factor(sf_args.initial_scene, image_paths[0][1], pixel_to_mm)
 
     # Instantiate a manager
     manager = Manager.load(
@@ -146,7 +157,7 @@ def _calculate_manual_measurement_volumes(
         manager=manager
     )
     distances = measurements['distances']
-    scales = measurements['scale']
+    scales = measurements['scale'] * dist_to_mm
     assert len(distances) == len(scales), f'Length mismatch: {len(distances)}, {len(scales)}'
 
     # Calculate the volumes
@@ -165,9 +176,12 @@ def _calculate_manual_measurement_volumes(
 
 
 def generate_or_load_manual_measurement_volumes(
+        sf_args: SequenceFitterArgs,
         measurements_dir: Path,
         predictor_model_path: Path,
-        cache_only: bool = False
+        pixel_to_mm: float | None = None,
+        cache_only: bool = False,
+        regenerate: bool = False
 ) -> np.ndarray:
     """
     Generate or load the crystal volumes for the manual measurements.
@@ -177,17 +191,20 @@ def generate_or_load_manual_measurement_volumes(
 
     vols = None
     if vols_path.exists():
-        try:
-            with open(vols_path, 'r') as f:
-                vols = json_to_numpy(json.load(f))
-        except Exception as e:
-            logger.warning(f'Could not load manual measurements volume data: {e}')
+        if regenerate:
+            vols_path.unlink()
+        else:
+            try:
+                with open(vols_path, 'r') as f:
+                    vols = json_to_numpy(json.load(f))
+            except Exception as e:
+                logger.warning(f'Could not load manual measurements volume data: {e}')
 
     if vols is None:
         if cache_only:
             raise RuntimeError(f'Cache could not be loaded!')
         logger.info('Processing manual measurements sequence.')
-        vols = _calculate_manual_measurement_volumes(measurements_dir, predictor_model_path)
+        vols = _calculate_manual_measurement_volumes(sf_args, measurements_dir, predictor_model_path, pixel_to_mm)
         with open(vols_path, 'w') as f:
             json.dump(vols.tolist(), f)
 

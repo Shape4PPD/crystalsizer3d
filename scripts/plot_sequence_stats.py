@@ -26,8 +26,8 @@ from crystalsizer3d.sequence.plots import annotate_image, get_colour_variations,
     line_styles, marker_styles
 from crystalsizer3d.sequence.sequence_fitter import SEQUENCE_DATA_PATH
 from crystalsizer3d.sequence.utils import get_image_paths, load_manual_measurements
-from crystalsizer3d.util.image_scale import calculate_distance
 from crystalsizer3d.sequence.volumes import generate_or_load_manual_measurement_volumes, generate_or_load_volumes
+from crystalsizer3d.util.image_scale import calculate_distance, get_pixels_to_mm_scale_factor
 from crystalsizer3d.util.plots import make_3d_digital_crystal_image
 from crystalsizer3d.util.utils import get_crystal_face_groups, hash_data, init_tensor, json_to_numpy, print_args, \
     set_seed, to_dict, to_numpy, to_rgb
@@ -47,6 +47,8 @@ def get_args() -> Namespace:
     # Sequence
     parser.add_argument('--sf-path', type=Path, required=True,
                         help='Path to the sequence fitter directory.')
+    parser.add_argument('--sf-path2', type=Path,
+                        help='Path to a second sequence fitter directory.')
     parser.add_argument('--start-image', type=int, default=0,
                         help='Start with this image.')
     parser.add_argument('--end-image', type=int, default=-1,
@@ -214,19 +216,8 @@ def plot_distances_and_areas():
     n_groups = len(face_groups)
     group_colours = get_face_group_colours(n_groups)
 
-    # Check if pixel_to_mm is provided
-    if args.pixel_to_mm is None:
-        logger.info("No pixel-to-mm conversion factor provided. Calculating dynamically...")
-        args.pixel_to_mm = calculate_distance(image_paths[0][1])
-
-    # Output the pixel-to-mm conversion factor
-    logger.info(f"Pixel-to-mm conversion factor: {args.pixel_to_mm:.4f} mm/pixel")
-
-    scene = Scene.from_yml(sf_args.initial_scene)
-    im = Image.open(image_paths[-1][1])
-    width, height = im.size
-    zoom = orthographic_scale_factor(scene)
-    dist_to_mm = zoom * args.pixel_to_mm * min(width, height)
+    # Get the pixel-to-mm scale factor
+    dist_to_mm = get_pixels_to_mm_scale_factor(sf_args.initial_scene, image_paths[0][1], args.pixel_to_mm)
 
     # Load the measurements
     logger.info(f'Loading manual measurements from {runtime_args.measurements_dir}')
@@ -286,7 +277,7 @@ def plot_distances_and_areas():
     m_ts = [ts[m_idx] for m_idx in m_idxs]
 
     # Set font sizes
-    plt.rc('axes', titlesize=7, titlepad=1)  # fontsize of the title
+    plt.rc('axes', titlesize=7, titlepad=2)  # fontsize of the title
     plt.rc('axes', labelsize=6, labelpad=1)  # fontsize of the x and y labels
     plt.rc('xtick', labelsize=6)  # fontsize of the x tick labels
     plt.rc('ytick', labelsize=6)  # fontsize of the y tick labels
@@ -307,7 +298,7 @@ def plot_distances_and_areas():
         figsize=(5, 1.6),
         gridspec_kw=dict(
             top=0.92, bottom=0.13, right=0.99, left=0.05,
-            hspace=0.1, wspace=0.4
+            hspace=0.1, wspace=0.3
         ),
     )
     for i, (group_hkl, group_idxs) in enumerate(face_groups.items()):
@@ -685,6 +676,133 @@ def plot_concentration():
     plt.show()
 
 
+def plot_volume_and_supersaturation():
+    """
+    Plot the volume and supersaturation.
+    """
+    args, output_dir = _init()
+    show_n = 5000
+
+    # Variables
+    initial_concentration = 16
+    crystal_density = 1.47
+    cuvette_volume = 0.5
+    solubility = 7.36
+
+    # Load the args
+    with open(args.sf_path / 'args_sequence_fitter.yml', 'r') as f:
+        sf_args = SequenceFitterArgs.from_args(yaml.load(f, Loader=yaml.FullLoader))
+    with open(args.sf_path / 'args_refiner.yml', 'r') as f:
+        ref_args = RefinerArgs.from_args(yaml.load(f, Loader=yaml.FullLoader))
+    with open(args.sf_path / 'args_runtime.yml', 'r') as f:
+        runtime_args = Namespace(**yaml.load(f, Loader=yaml.FullLoader))
+
+    # Load the volumes
+    volumes = generate_or_load_volumes(
+        sf_path=args.sf_path,
+        pixel_to_mm=args.pixel_to_mm,
+        cache_only=False,
+        regenerate=False
+    )
+    volumes_m = generate_or_load_manual_measurement_volumes(
+        sf_args=sf_args,
+        measurements_dir=Path(runtime_args.measurements_dir),
+        predictor_model_path=ref_args.predictor_model_path,
+        pixel_to_mm=args.pixel_to_mm,
+        cache_only=False,
+        regenerate=False
+    )
+
+    # Calculate the concentrations
+    concentrations = np.zeros(len(volumes))
+    concentrations[0] = initial_concentration
+    for i in range(1, len(volumes)):
+        concentrations[i] = (concentrations[i - 1]
+                             - (volumes[i] - volumes[i - 1]) * crystal_density / cuvette_volume)
+    concentrations_m = np.zeros(len(volumes_m))
+    concentrations_m[0] = initial_concentration
+    for i in range(1, len(volumes_m)):
+        concentrations_m[i] = (concentrations_m[i - 1]
+                               - (volumes_m[i] - volumes_m[i - 1]) * crystal_density / cuvette_volume)
+
+    # Calculate the supersaturation
+    supersaturation = concentrations / solubility
+    supersaturation_m = concentrations_m / solubility
+
+    # Instantiate a manager
+    manager = Manager.load(
+        model_path=ref_args.predictor_model_path,
+        args_changes={
+            'runtime_args': {
+                'use_gpu': False,
+                'batch_size': 1
+            },
+        },
+        save_dir=output_dir
+    )
+
+    # Load the measurements
+    logger.info(f'Loading manual measurements from {runtime_args.measurements_dir}')
+    measurements = load_manual_measurements(
+        measurements_dir=Path(runtime_args.measurements_dir),
+        manager=manager
+    )
+    measurement_idxs = measurements['idx']
+    # print(measurement_idxs)
+
+    # Set up some variables
+    logger.info('Setting up plot variables.')
+    image_paths = get_image_paths(sf_args, load_all=True)[15:show_n]
+    x_vals = [idx for idx, _ in image_paths]
+    volumes = volumes[15:]
+    concentrations = concentrations[15:]
+    supersaturation = supersaturation[15:]
+
+    # Restrict the measurements to within the range predicted
+    include_mask = np.array([x_vals[0] <= idx <= x_vals[-1] for idx in measurement_idxs])
+    measurement_idxs = measurement_idxs[include_mask]
+    volumes_m = volumes_m[include_mask]
+    concentrations_m = concentrations_m[include_mask]
+    supersaturation_m = supersaturation_m[include_mask]
+
+    # Set font sizes
+    plt.rc('axes', titlesize=7, titlepad=1)  # fontsize of the title
+    plt.rc('axes', labelsize=6, labelpad=2)  # fontsize of the x and y labels
+    plt.rc('xtick', labelsize=6)  # fontsize of the x tick labels
+    plt.rc('ytick', labelsize=6)  # fontsize of the y tick labels
+    plt.rc('xtick.major', pad=2, size=2)
+    plt.rc('xtick.minor', pad=2, size=1)
+    plt.rc('ytick.major', pad=1, size=2)
+    plt.rc('axes', linewidth=0.5)
+
+    # Make a single plot showing the values for each face group
+    fig, ax = plt.subplots(
+        1, 1,
+        figsize=(1.7, 1.5),
+        gridspec_kw=dict(
+            top=0.98, bottom=0.15, right=0.99, left=0.2,
+            hspace=0.1, wspace=0.4
+        ),
+    )
+    ts = _get_ts(x_vals, args.interval_mins)
+    m_idxs = np.array([(x_vals == m_idx).nonzero()[0] for m_idx in measurement_idxs]).squeeze()
+    m_ts = [ts[m_idx] for m_idx in m_idxs]
+    _format_xtime(ax, ts)
+
+    ax.set_ylabel('Volume (mm³)')
+    ax.plot(ts, volumes, c='black', linewidth=0.6)
+    ax.plot(m_ts, volumes_m, c='grey', marker='o', linestyle='none',
+            markersize=5, markerfacecolor='none')
+
+    ax2 = ax.twinx()
+    ax2.set_ylabel('Supersaturation (mg/ml)')
+    ax2.plot(ts, supersaturation, c='darkred', linewidth=0.6, linestyle='--')
+    ax2.plot(m_ts, supersaturation_m, c='red', marker='x', markersize=5, linestyle='none')
+
+    plt.savefig(output_dir / 'volumes_and_supersaturation.svg', transparent=True)
+    plt.show()
+
+
 def create_legend_plot():
     """
     Create a plot showing the legends.
@@ -818,7 +936,232 @@ def plot_sequence_errors():
     ax.set_yscale('log')
     _format_xtime(ax, ts, add_xlabel=True)
 
-    # plt.savefig(output_dir / 'sequence_errors.svg')
+    plt.savefig(output_dir / 'sequence_errors.svg')
+    plt.show()
+
+
+def plot_sequence_errors_comparison():
+    """
+    Plot two sets of sequence errors for comparison.
+    """
+    args, output_dir = _init()
+    assert args.sf_path2.exists(), f'A second sequence fitter path must be provided.'
+    N = 20
+
+    # Load the args
+    with open(args.sf_path / 'args_sequence_fitter.yml', 'r') as f:
+        sf_args = SequenceFitterArgs.from_args(yaml.load(f, Loader=yaml.FullLoader))
+    with open(args.sf_path / 'args_refiner.yml', 'r') as f:
+        ref_args_dict = yaml.load(f, Loader=yaml.FullLoader)
+        ref_args = RefinerArgs.from_args(ref_args_dict)
+    with open(args.sf_path / 'args_runtime.yml', 'r') as f:
+        runtime_args = Namespace(**yaml.load(f, Loader=yaml.FullLoader))
+
+    # Instantiate a manager
+    manager = Manager.load(
+        model_path=ref_args.predictor_model_path,
+        args_changes={
+            'runtime_args': {
+                'use_gpu': False,
+                'batch_size': 1
+            },
+        },
+        save_dir=output_dir
+    )
+
+    # Load the initial prediction losses
+    base_path = SEQUENCE_DATA_PATH / f'{sf_args.images_dir.stem}_{hash_data(sf_args.images_dir.absolute())}'
+    pred_args = {k: getattr(ref_args, k) for k in PREDICTOR_ARG_NAMES if k in ref_args_dict}
+    if ref_args.initial_pred_batch_size == 1:
+        pred_hash = hash_data({k: getattr(ref_args, k) for k in PREDICTOR_ARG_NAMES_BS1})
+    else:
+        pred_hash = hash_data(pred_args)
+    model_id = pred_args['predictor_model_path'].stem[:4]
+    pred_cache_dir = base_path / 'predictor' / f'{model_id}_{pred_hash}'
+    losses_path = pred_cache_dir / f'losses_{hash_data(pred_args)}.json'
+    assert losses_path.exists(), f'Initial prediction losses file does not exist: {losses_path}'
+    with open(losses_path, 'r') as f:
+        losses_init = json_to_numpy(json.load(f))
+
+    # Load the refined losses from the sf_path -- keypoints only optimisation
+    with open(args.sf_path / 'losses.json', 'r') as f:
+        losses_kp = json_to_numpy(json.load(f))
+    losses_kp = losses_kp['eval']
+
+    # Load the refined losses from the sf_path2 -- with inverse rendering optimisation
+    with open(args.sf_path2 / 'losses.json', 'r') as f:
+        losses_ir = json_to_numpy(json.load(f))
+    losses_ir = losses_ir['eval']
+
+    # Load measurements
+    measurements = load_manual_measurements(
+        measurements_dir=Path(runtime_args.measurements_dir),
+        manager=manager
+    )
+    measurement_idxs = measurements['idx']
+
+    # Load the image paths and set up the x-values
+    image_paths = get_image_paths(sf_args, load_all=True)
+    x_vals = [idx for idx, _ in image_paths]
+    ts = _get_ts(x_vals, args.interval_mins)
+    m_idxs = np.concatenate([(x_vals == m_idx).nonzero()[0] for m_idx in measurement_idxs])
+    m_ts = [ts[m_idx] for m_idx in m_idxs]
+
+    # Plot the losses
+    fig, axes = plt.subplots(
+        3, 1,
+        figsize=(8, 5),
+        sharex=True,
+        gridspec_kw={'left': 0.1, 'right': 0.9, 'top': 0.9, 'bottom': 0.1}
+    )
+
+    c_init = '#0d58a1'
+    c_keypoints = '#006400'
+    c_refined = '#6a35b5'
+
+    # Measurement errors
+    lm_init = losses_init['measurement'][m_idxs]
+    lm_refined_kp = losses_kp['measurement'][m_idxs]
+    lm_refined_ir = losses_ir['measurement'][m_idxs]
+    ax = axes[0]
+    # ax.set_title('Measurement Errors')
+    ax.plot(m_ts, lm_init, c=c_init, label='Initial', marker='o', linestyle=':', markerfacecolor='none')
+    ax.plot(m_ts, lm_refined_kp, c=c_keypoints, label='Refined - KP', marker='o', linestyle=':', markerfacecolor='none')
+    ax.plot(m_ts, lm_refined_ir, c=c_refined, label='Refined - KP+IR', marker='o', linestyle=':',
+            markerfacecolor='none')
+    ax.set_ylabel('Measurement Error')
+    ax.set_yscale('log')
+    # _format_xtime(ax, ts)
+
+    # L2 errors
+    ax = axes[1]
+    # ax.set_title('L2 Errors')
+    ax.plot(ts, losses_init['l2'], c=c_init, label='Initial')
+    # ax.plot(ts, losses_kp['l2'], c=c_refined, label='Refined - KP')
+    ax.plot(ts, losses_ir['l2'], c=c_refined, label='Refined - KP+IR')
+    ax.set_ylabel('L2 Error')
+    ax.set_yscale('log')
+    # _format_xtime(ax, ts)
+
+    # Keypoint errors
+    ax = axes[2]
+    # ax.set_title('Keypoint Errors')
+    ax.plot(ts, losses_init['keypoints'], c=c_init, label='Initial')
+    ax.plot(ts, losses_kp['keypoints'], c=c_keypoints, label='Refined - KP')
+    ax.plot(ts, losses_ir['keypoints'], c=c_refined, label='Refined - KP+IR')
+    ax.set_ylabel('Keypoint Error')
+    ax.set_yscale('log')
+    _format_xtime(ax, ts, add_xlabel=True)
+
+    plt.savefig(output_dir / 'sequence_errors.svg')
+    plt.show()
+
+
+def plot_sequence_errors_summary():
+    """
+    Plot a summary of the sequence errors.
+    """
+    args, output_dir = _init()
+    assert args.sf_path2.exists(), f'A second sequence fitter path must be provided.'
+
+    # Load the args
+    with open(args.sf_path / 'args_sequence_fitter.yml', 'r') as f:
+        sf_args = SequenceFitterArgs.from_args(yaml.load(f, Loader=yaml.FullLoader))
+    with open(args.sf_path / 'args_refiner.yml', 'r') as f:
+        ref_args_dict = yaml.load(f, Loader=yaml.FullLoader)
+        ref_args = RefinerArgs.from_args(ref_args_dict)
+    with open(args.sf_path / 'args_runtime.yml', 'r') as f:
+        runtime_args = Namespace(**yaml.load(f, Loader=yaml.FullLoader))
+
+    # Instantiate a manager
+    manager = Manager.load(
+        model_path=ref_args.predictor_model_path,
+        args_changes={
+            'runtime_args': {
+                'use_gpu': False,
+                'batch_size': 1
+            },
+        },
+        save_dir=output_dir
+    )
+
+    # Load the initial prediction losses
+    base_path = SEQUENCE_DATA_PATH / f'{sf_args.images_dir.stem}_{hash_data(sf_args.images_dir.absolute())}'
+    pred_args = {k: getattr(ref_args, k) for k in PREDICTOR_ARG_NAMES if k in ref_args_dict}
+    if ref_args.initial_pred_batch_size == 1:
+        pred_hash = hash_data({k: getattr(ref_args, k) for k in PREDICTOR_ARG_NAMES_BS1})
+    else:
+        pred_hash = hash_data(pred_args)
+    model_id = pred_args['predictor_model_path'].stem[:4]
+    pred_cache_dir = base_path / 'predictor' / f'{model_id}_{pred_hash}'
+    losses_path = pred_cache_dir / f'losses_{hash_data(pred_args)}.json'
+    assert losses_path.exists(), f'Initial prediction losses file does not exist: {losses_path}'
+    with open(losses_path, 'r') as f:
+        losses_init = json_to_numpy(json.load(f))
+
+    # Load the refined losses from the sf_path -- keypoints only optimisation
+    with open(args.sf_path / 'losses.json', 'r') as f:
+        losses_kp = json_to_numpy(json.load(f))
+    losses_kp = losses_kp['eval']
+
+    # Load the refined losses from the sf_path2 -- with inverse rendering optimisation
+    with open(args.sf_path2 / 'losses.json', 'r') as f:
+        losses_ir = json_to_numpy(json.load(f))
+    losses_ir = losses_ir['eval']
+
+    # Load measurements
+    measurements = load_manual_measurements(
+        measurements_dir=Path(runtime_args.measurements_dir),
+        manager=manager
+    )
+    measurement_idxs = measurements['idx']
+
+    # Load the image paths and set up the x-values
+    image_paths = get_image_paths(sf_args, load_all=True)
+    x_vals = [idx for idx, _ in image_paths]
+    m_idxs = np.concatenate([(x_vals == m_idx).nonzero()[0] for m_idx in measurement_idxs])
+
+    # Measurement errors
+    lm_init = losses_init['measurement'][m_idxs]
+    lm_refined_kp = losses_kp['measurement'][m_idxs]
+    lm_refined_ir = losses_ir['measurement'][m_idxs]
+    data = np.stack([lm_init, lm_refined_kp, lm_refined_ir])
+
+    # Calculate the mean and std of the relative error changes and save to csv
+    headers = ['stage', 'mean', 'std']
+    L_rel = (data - data[0]) / data[0]
+    L_rel_mean = np.mean(L_rel, axis=1)
+    L_rel_std = np.std(L_rel, axis=1)
+    data_path = output_dir / 'fitting_losses.csv'
+    logger.info(f'Writing data to {data_path}.')
+    csv_data = np.column_stack((['Initial', 'KP', 'KP+IR'], L_rel_mean, L_rel_std))
+    np.savetxt(data_path, csv_data, delimiter=',', header=','.join(headers), fmt='%s')
+
+    # Set font sizes
+    plt.rc('axes', labelsize=6, labelpad=1)  # fontsize of the x and y labels
+    plt.rc('xtick', labelsize=6)  # fontsize of the x tick labels
+    plt.rc('ytick', labelsize=6)  # fontsize of the y tick labels
+    plt.rc('xtick.major', pad=2, size=2)
+    plt.rc('xtick.minor', pad=2, size=1)
+    plt.rc('ytick.major', pad=1, size=2)
+    plt.rc('axes', linewidth=0.5)
+
+    # Plot the losses as a violin plot
+    fig, ax = plt.subplots(
+        1, 1,
+        figsize=(1.7, 1),
+        gridspec_kw={'left': 0.2, 'right': 0.97, 'top': 0.97, 'bottom': 0.2}
+    )
+    x_vals = [1, 2, 3]
+    x_labels = ['Initial\nprediction', 'Refined\n(keypoints)', 'Refined\n(+inverse rendering)']
+    ax.violinplot(data.T, widths=0.7, showmeans=False, showmedians=False)
+    ax.plot(x_vals, np.median(data, axis=1), linestyle=':', color='black', marker='o', markersize=3)
+    ax.set_yscale('log')
+    ax.set_ylabel('Measurement error')
+    ax.set_xticks(x_vals)
+    ax.set_xticklabels(x_labels)
+    plt.savefig(output_dir / 'sequence_errors_summary.svg', transparent=True)
+
     plt.show()
 
 
@@ -876,9 +1219,12 @@ if __name__ == '__main__':
     # plot_test_cube()
     # plot_sequence_errors_for_sampler()
     # plot_3d_crystals()
-    plot_distances_and_areas()
+    # plot_distances_and_areas()
     # plot_3d_crystals_with_highlighted_faces()
     # plot_volume()
-    plot_concentration()
+    # plot_concentration()
+    # plot_volume_and_supersaturation()
     # create_legend_plot()
     # plot_sequence_errors()
+    # plot_sequence_errors_comparison()
+    plot_sequence_errors_summary()
