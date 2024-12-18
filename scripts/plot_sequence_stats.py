@@ -11,7 +11,6 @@ import numpy as np
 import torch
 import yaml
 from PIL import Image
-from kornia.utils import tensor_to_image
 from matplotlib import pyplot as plt
 from mayavi import mlab
 from trimesh import Trimesh
@@ -22,15 +21,14 @@ from crystalsizer3d.args.sequence_fitter_args import SequenceFitterArgs
 from crystalsizer3d.crystal import Crystal
 from crystalsizer3d.csd_proxy import CSDProxy
 from crystalsizer3d.nn.manager import Manager
-from crystalsizer3d.projector import Projector
 from crystalsizer3d.scene_components.scene import Scene
 from crystalsizer3d.scene_components.utils import orthographic_scale_factor
-from crystalsizer3d.sequence.plots import annotate_image, get_colour_variations, get_face_group_colours, get_hkl_label, line_styles, \
-    marker_styles
+from crystalsizer3d.sequence.plots import annotate_image, get_colour_variations, get_face_group_colours, get_hkl_label, \
+    line_styles, marker_styles
 from crystalsizer3d.sequence.sequence_fitter import SEQUENCE_DATA_PATH
 from crystalsizer3d.sequence.utils import get_image_paths, load_manual_measurements
-from crystalsizer3d.util.plots import make_3d_digital_crystal_image
 from crystalsizer3d.util.image_scale import calculate_distance
+from crystalsizer3d.util.plots import make_3d_digital_crystal_image
 from crystalsizer3d.util.utils import get_crystal_face_groups, hash_data, init_tensor, json_to_numpy, print_args, \
     set_seed, to_dict, to_numpy, to_rgb
 
@@ -196,7 +194,6 @@ def plot_distances_and_areas():
     with open(args.sf_path / 'args_runtime.yml', 'r') as f:
         runtime_args = Namespace(**yaml.load(f, Loader=yaml.FullLoader))
 
-
     # Instantiate a manager
     manager = Manager.load(
         model_path=ref_args.predictor_model_path,
@@ -208,7 +205,6 @@ def plot_distances_and_areas():
         },
         save_dir=output_dir
     )
-    
 
     # Set up some variables
     logger.info('Setting up plot variables.')
@@ -217,7 +213,7 @@ def plot_distances_and_areas():
     x_vals = [idx for idx, _ in image_paths]
     n_groups = len(face_groups)
     group_colours = get_face_group_colours(n_groups)
-    
+
     # Check if pixel_to_mm is provided
     if args.pixel_to_mm is None:
         logger.info("No pixel-to-mm conversion factor provided. Calculating dynamically...")
@@ -225,13 +221,13 @@ def plot_distances_and_areas():
 
     # Output the pixel-to-mm conversion factor
     logger.info(f"Pixel-to-mm conversion factor: {args.pixel_to_mm:.4f} mm/pixel")
-    
+
     scene = Scene.from_yml(sf_args.initial_scene)
     im = Image.open(image_paths[-1][1])
     width, height = im.size
-    zoom = orthographic_scale_factor(scene) 
-    dist_to_mm = zoom * args.pixel_to_mm * min(width,height)
-    
+    zoom = orthographic_scale_factor(scene)
+    dist_to_mm = zoom * args.pixel_to_mm * min(width, height)
+
     # Load the measurements
     logger.info(f'Loading manual measurements from {runtime_args.measurements_dir}')
     measurements = load_manual_measurements(
@@ -241,7 +237,7 @@ def plot_distances_and_areas():
     measurement_idxs = measurements['idx']
     distances_m = measurements['distances']
     scales_m = measurements['scale'] * dist_to_mm
-    
+
     # Get a crystal object
     ds = manager.ds
     cs = CSDProxy().load(ds.dataset_args.crystal_id)
@@ -277,12 +273,11 @@ def plot_distances_and_areas():
         unscaled_areas_m = np.array([crystal.areas[tuple(hkl.tolist())] for hkl in crystal.all_miller_indices])
         areas_m[i] = unscaled_areas_m * scales_m[i]**2
 
-
     # Restrict the measurements to within the range predicted
     include_mask = np.array([x_vals[0] <= idx <= x_vals[-1] for idx in measurement_idxs])
     measurement_idxs = measurement_idxs[include_mask]
     distances_m = distances_m[include_mask]
-    scales_m = scales_m[include_mask] 
+    scales_m = scales_m[include_mask]
     areas_m = areas_m[include_mask]
 
     # Get the timestamps
@@ -757,9 +752,10 @@ def plot_sequence_errors():
     # plt.savefig(output_dir / 'sequence_errors.svg')
     plt.show()
 
+
 def plot_test_cube():
     """
-    Plot a test cube with distances of 1mm between origin and each facefor scale matching
+    Plot a test cube with distances of 1mm between origin and each face for scale matching
     """
     args, output_dir = _init()
     show_n = 5000
@@ -769,8 +765,7 @@ def plot_test_cube():
         sf_args = SequenceFitterArgs.from_args(yaml.load(f, Loader=yaml.FullLoader))
 
     image_paths = get_image_paths(sf_args, load_all=True)[:show_n]
-    
-    
+
     # Check if pixel_to_mm is provided
     if args.pixel_to_mm is None:
         logger.info("No pixel-to-mm conversion factor provided. Calculating dynamically...")
@@ -778,35 +773,34 @@ def plot_test_cube():
 
     # Output the pixel-to-mm conversion factor
     logger.info(f"Pixel-to-mm conversion factor: {args.pixel_to_mm:.4f} mm/pixel")
-    
+
     scene = Scene.from_yml(sf_args.initial_scene)
     im = Image.open(image_paths[-1][1])
     width, height = im.size
-    zoom = orthographic_scale_factor(scene) 
-    dist_to_mm = zoom * args.pixel_to_mm * min(width,height)
+    zoom = orthographic_scale_factor(scene)
+    dist_to_mm = zoom * args.pixel_to_mm * min(width, height)
     # Get a crystal object
-    TEST_CRYSTALS = {
-    'cube': {
+    TEST_CUBE = {
         'lattice_unit_cell': [1, 1, 1],
         'lattice_angles': [np.pi / 2, np.pi / 2, np.pi / 2],
         'miller_indices': [(1, 0, 0), (0, 1, 0), (0, 0, 1)],
         'point_group_symbol': '222',
         'scale': 1,
         'origin': [0, 0, 0],
-        'distances': [1./dist_to_mm, 1./dist_to_mm, 1./dist_to_mm],
+        'distances': [1. / dist_to_mm, 1. / dist_to_mm, 1. / dist_to_mm],
         'rotation': [0., 0., 0.],
         'material_ior': 1.2,
         'material_roughness': 0.01
-    },}
-    cube = Crystal(**TEST_CRYSTALS['cube'])
-    
+    }
+    cube = Crystal(**TEST_CUBE['cube'])
+
     img = annotate_image(image_paths[-1][1],
                          crystal=cube,
                          zoom=zoom)
     plt.imshow(img)
     plt.savefig(output_dir / 'cube_test.png')
     plt.show()
-    
+
 
 if __name__ == '__main__':
     os.makedirs(LOGS_PATH, exist_ok=True)
