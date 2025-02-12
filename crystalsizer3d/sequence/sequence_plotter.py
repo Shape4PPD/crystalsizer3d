@@ -347,7 +347,7 @@ class SequencePlotter:
         for i, (name, loss) in enumerate(losses.items()):
             ax = fig.add_subplot(gs[i])
             ax.set_title(name)
-            if name == 'measurement':
+            if name == 'measurement' and measurements is not None:
                 m_idxs = measurements['idx'][measurements['idx'] < len(loss)]
                 ax.plot(m_idxs, loss[m_idxs])
             else:
