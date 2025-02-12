@@ -1564,7 +1564,7 @@ class SequenceFitter:
         # Process the entire sequence in batches
         bs = min(len(self), self.runtime_args.n_refiner_workers * 4)
         n_batches = math.ceil(len(self) / bs)
-        log_freq = min(1, int(n_batches / 4))
+        log_freq = max(1, int(n_batches / 4))
         for i in range(n_batches):
             if (i + 1) % log_freq == 0:
                 logger.info(f'Calculating evaluation losses for frame batch {i + 1}/{n_batches}.')
