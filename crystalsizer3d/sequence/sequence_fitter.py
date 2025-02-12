@@ -193,6 +193,7 @@ class SequenceFitter:
         """
         measurements_dir = self.runtime_args.measurements_dir
         if measurements_dir is None:
+            self.measurements = None
             return
         self.measurements = load_manual_measurements(
             measurements_dir=measurements_dir,
