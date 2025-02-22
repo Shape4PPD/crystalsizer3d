@@ -32,7 +32,7 @@ class TimmNet(BaseNet):
         self.resize_input = resize_input
 
         # Load pretrained model
-        self.model = timm.create_model(
+        model_args = dict(
             model_name=self.model_name,
             pretrained=True,
             num_classes=0,
@@ -40,6 +40,11 @@ class TimmNet(BaseNet):
             drop_path_rate=self.droppath_prob,
             img_size=input_shape[-1] if not self.resize_input else None,
         )
+        try:
+            self.model = timm.create_model(**model_args)
+        except TypeError:
+            del model_args['img_size']
+            self.model = timm.create_model(**model_args)
         self.data_config = resolve_model_data_config(self.model)
 
         # Load the image means and stds as used for the pretrained model
