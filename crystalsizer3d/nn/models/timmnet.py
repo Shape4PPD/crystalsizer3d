@@ -30,6 +30,7 @@ class TimmNet(BaseNet):
         self.droppath_prob = droppath_prob
         self.classifier_dropout_prob = classifier_dropout_prob
         self.resize_input = resize_input
+        self.reshape_dim = None
 
         # Load pretrained model
         model_args = dict(
@@ -90,6 +91,33 @@ class TimmNet(BaseNet):
         self.last_op = self.classifier.get_submodule('OutputLayer')
         self.last_op.register_forward_hook(self.latent_hook)
 
+        # Check if reshape is required
+        self._check_reshape_required()
+
+    def _check_reshape_required(self):
+        """
+        Check if the model requires input to be reshaped to some power of two.
+        """
+        if self.resize_input:
+            return
+
+        x = torch.zeros(1, *self.input_shape)
+        x_resized = x.clone()
+        power = 2
+
+        while power < 512:
+            try:
+                self.model.forward_features(x_resized)
+                break
+            except Exception as e:
+                power *= 2
+                if power < 256:
+                    dim = int(round(self.input_shape[-1] / power) * power)
+                    x_resized = F.interpolate(x, size=(dim, dim), mode='bilinear', align_corners=False)
+                    self.reshape_dim = dim
+                else:
+                    raise e
+
     def _init_params(self):
         for m in self.classifier.modules():
             if isinstance(m, nn.BatchNorm2d) or isinstance(m, nn.BatchNorm1d):
@@ -108,6 +136,8 @@ class TimmNet(BaseNet):
         # Resize to required input shape
         if self.resize_input and x.shape[-1] != self.data_config['input_size'][-1]:
             x = F.interpolate(x, size=self.data_config['input_size'][-2:], mode='bilinear', align_corners=False)
+        elif self.reshape_dim:
+            x = F.interpolate(x, size=(self.reshape_dim, self.reshape_dim), mode='bilinear', align_corners=False)
 
         # Normalise
         x = (x - self.img_mean) / self.img_std
