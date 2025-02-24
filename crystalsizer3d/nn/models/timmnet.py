@@ -65,7 +65,10 @@ class TimmNet(BaseNet):
         return sum([p.data.nelement() for p in self.classifier.parameters()])
 
     def _build_model(self):
-        in_size = self.model.num_features
+        if 'mobilenet' in self.model_name:
+            in_size = self.model.head_hidden_size
+        else:
+            in_size = self.model.num_features
         out_size = int(torch.prod(torch.tensor(self.output_shape)))
 
         # Build classifier
