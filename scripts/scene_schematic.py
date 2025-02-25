@@ -573,9 +573,13 @@ def draw_crystal_schematic():
 
     # Plot each vertex, adjusting color by averaging and size if it is the intersection
     for vertex, data in vertex_dict.items():
-        average_color = tuple((data['colour'] / data['count']).tolist())
-        scale_factor = 0.2 if data['count'] == 3 else 0.1  # Make intersection point larger
-        p3d = mlab.points3d(*vertex, color=average_color, scale_factor=scale_factor)
+        if data['count'] == 3:
+            vertex_colour = tuple(np.array(to_rgb('yellow')).tolist())
+            scale_factor = 0.2  # Make intersection point larger
+        else:
+            vertex_colour = tuple((data['colour'] / data['count']).tolist())
+            scale_factor = 0.1
+        p3d = mlab.points3d(*vertex, color=vertex_colour, scale_factor=scale_factor)
 
         p3d.actor.property.specular = 0.6  # Increase specular reflectivity for a shiny look
         p3d.actor.property.specular_power = 25  # Control the sharpness of the shine (higher = sharper)

@@ -158,6 +158,29 @@ def plot_sequence_errors_for_sampler():
     plt.show()
 
 
+def plot_crystal_images_with_wireframes():
+    """
+    Plot the crystal images with overlaid wireframes.
+    """
+    args, output_dir = _init()
+    frame_idxs = args.frame_idxs
+
+    # Load the args
+    with open(args.sf_path / 'args_sequence_fitter.yml', 'r') as f:
+        sf_args = SequenceFitterArgs.from_args(yaml.load(f, Loader=yaml.FullLoader))
+    image_paths = get_image_paths(sf_args, load_all=True)
+
+    for i, idx in enumerate(frame_idxs):
+        logger.info(f'Plotting crystal image for frame {idx} ({i + 1}/{len(frame_idxs)})')
+        scene = Scene.from_yml(args.sf_path / 'scenes' / 'eval' / f'{idx:04d}.yml')
+        img = annotate_image(
+            image_path=image_paths[idx][1],
+            scene=scene,
+            wf_line_width=5,
+        )
+        img.save(output_dir / f'wf_overlay_{idx:02d}.png')
+
+
 def plot_3d_crystals():
     """
     Plot the 3d crystals.
@@ -181,10 +204,11 @@ def plot_3d_crystals():
         dig_pred.save(output_dir / f'digital_predicted_{idx:02d}.png')
 
 
-def plot_distances_and_areas():
+def plot_distances_and_areas(style: str = 'paper'):
     """
     Plot the distances.
     """
+    assert style in ['paper', 'supplementary']
     args, output_dir = _init()
     show_n = 5000
 
@@ -276,69 +300,108 @@ def plot_distances_and_areas():
     m_idxs = np.array([(x_vals == m_idx).nonzero()[0] for m_idx in measurement_idxs]).squeeze()
     m_ts = [ts[m_idx] for m_idx in m_idxs]
 
-    # Set font sizes
-    plt.rc('axes', titlesize=7, titlepad=2)  # fontsize of the title
-    plt.rc('axes', labelsize=6, labelpad=1)  # fontsize of the x and y labels
-    plt.rc('xtick', labelsize=6)  # fontsize of the x tick labels
-    plt.rc('ytick', labelsize=6)  # fontsize of the y tick labels
-    plt.rc('legend', fontsize=7)  # fontsize of the legend
-    plt.rc('xtick.major', pad=2, size=2)
-    plt.rc('xtick.minor', pad=2, size=1)
-    plt.rc('ytick.major', pad=1, size=2)
-    plt.rc('axes', linewidth=0.5)
+    # Set font sizes and create plot
+    if style == 'paper':
+        plt.rc('axes', titlesize=7, titlepad=2)  # fontsize of the title
+        plt.rc('axes', labelsize=6, labelpad=1)  # fontsize of the x and y labels
+        plt.rc('xtick', labelsize=6)  # fontsize of the x tick labels
+        plt.rc('ytick', labelsize=6)  # fontsize of the y tick labels
+        plt.rc('legend', fontsize=7)  # fontsize of the legend
+        plt.rc('xtick.major', pad=2, size=2)
+        plt.rc('xtick.minor', pad=2, size=1)
+        plt.rc('ytick.major', pad=1, size=2)
+        plt.rc('axes', linewidth=0.5)
+        plot_lw = 0.4
+        marker_lw = 0.2
+        marker_sizes = (1.5, 2)
+
+        n_cols = 6
+        n_rows = 2
+        fig, axes = plt.subplots(
+            n_rows, n_cols,
+            figsize=(5, 1.6),
+            gridspec_kw=dict(
+                top=0.92, bottom=0.13, right=0.99, left=0.05,
+                hspace=0.1, wspace=0.3
+            ),
+        )
+
+    else:
+        plt.rc('axes', titlesize=7, titlepad=4)  # fontsize of the title
+        plt.rc('axes', labelsize=8, labelpad=2)  # fontsize of the x and y labels
+        plt.rc('xtick', labelsize=7)  # fontsize of the x tick labels
+        plt.rc('ytick', labelsize=7)  # fontsize of the y tick labels
+        plt.rc('legend', fontsize=7)  # fontsize of the legend
+        plt.rc('xtick.major', pad=3, size=3)
+        plt.rc('xtick.minor', pad=3, size=1)
+        plt.rc('ytick.major', pad=2, size=3)
+        plt.rc('axes', linewidth=0.5)
+        plot_lw = 0.8
+        marker_lw = 0.4
+        marker_sizes = (4, 7)
+
+        n_cols = 2
+        n_rows = 6
+        fig, axes = plt.subplots(
+            n_rows, n_cols,
+            figsize=(5, 8),
+            gridspec_kw=dict(
+                top=0.97, bottom=0.05, right=0.99, left=0.08,
+                hspace=0.35, wspace=0.3
+            ),
+        )
 
     def format_tick(value, _):
         return f'{value:.2g}'
 
-    # Make a grid of plots showing the values for each face group
-    n_cols = 6  # int(np.ceil(np.sqrt(n_groups)))
-    n_rows = 2  # int(np.ceil(n_groups / n_cols))
-    fig, axes = plt.subplots(
-        n_rows, n_cols,
-        figsize=(5, 1.6),
-        gridspec_kw=dict(
-            top=0.92, bottom=0.13, right=0.99, left=0.05,
-            hspace=0.1, wspace=0.3
-        ),
-    )
     for i, (group_hkl, group_idxs) in enumerate(face_groups.items()):
         logger.info(f'Plotting group {i + 1}/{n_groups}')
         colour = group_colours[i]
         colour_variants = get_colour_variations(colour, len(group_idxs))
         lbls = [get_hkl_label(hkl) for hkl in list(group_idxs.keys())]
 
-        axd = axes[0, i]
-        axa = axes[1, i]
-        axd.set_title(get_hkl_label(group_hkl, is_group=True))
+        if style == 'paper':
+            axd = axes[0, i]
+            axa = axes[1, i]
+            axd.set_title(get_hkl_label(group_hkl, is_group=True))
+        else:
+            axd = axes[i, 0]
+            axa = axes[i, 1]
+            # axd.set_title(get_hkl_label(group_hkl, is_group=True))
+            # axa.set_title(get_hkl_label(group_hkl, is_group=True))
+
         d = distances[:, list(group_idxs.values())] * scales[:, None]
         dm = distances_m[:, list(group_idxs.values())] * scales_m[:, None]
         a = areas[:, list(group_idxs.values())]
         am = areas_m[:, list(group_idxs.values())]
 
         for ax, y, y_m in zip([axd, axa], [d, a], [dm, am]):
-            _format_xtime(ax, ts, add_xlabel=(ax == axa))
+            _format_xtime(ax, ts, add_xlabel=(style == 'supplementary' or ax == axa))
             for j, (y_j, lbl, colour_j) in enumerate(zip(y.T, lbls, colour_variants)):
                 ax.plot(ts, y_j, label=lbl, c=colour_j,
-                        linestyle=line_styles[j % len(line_styles)], linewidth=0.4, alpha=0.8)
+                        linestyle=line_styles[j % len(line_styles)], linewidth=plot_lw, alpha=0.8)
                 marker = marker_styles[j % len(marker_styles)]
                 scatter_args = dict(
                     label=lbl + ' (manual)',
                     color=colour_j,
                     marker=marker,
                     alpha=0.8,
-                    linewidth=0.2
+                    linewidth=marker_lw
                 )
                 if marker in ['o', 's']:
                     scatter_args['facecolors'] = 'none'
-                    scatter_args['s'] = 1.5
+                    scatter_args['s'] = marker_sizes[0]
                 else:
-                    scatter_args['s'] = 2
+                    scatter_args['s'] = marker_sizes[1]
                 ax.scatter(m_ts, y_m[:, j], **scatter_args)
 
-            if i == 0:
+            if style == 'paper':
+                if i == 0:
+                    ax.set_ylabel('Distance (mm)' if ax == axd else 'Area (mm²)')
+                if ax != axa:
+                    ax.tick_params(labelbottom=False)
+            else:
                 ax.set_ylabel('Distance (mm)' if ax == axd else 'Area (mm²)')
-            if ax != axa:
-                ax.tick_params(labelbottom=False)
             ax.yaxis.set_major_formatter(mticker.FuncFormatter(format_tick))
 
     plt.savefig(output_dir / 'distances_and_areas.svg', transparent=True)
@@ -1218,8 +1281,9 @@ if __name__ == '__main__':
     os.makedirs(LOGS_PATH, exist_ok=True)
     # plot_test_cube()
     # plot_sequence_errors_for_sampler()
+    # plot_crystal_images_with_wireframes()
     # plot_3d_crystals()
-    # plot_distances_and_areas()
+    plot_distances_and_areas(style='supplementary')
     # plot_3d_crystals_with_highlighted_faces()
     # plot_volume()
     # plot_concentration()
@@ -1227,4 +1291,4 @@ if __name__ == '__main__':
     # create_legend_plot()
     # plot_sequence_errors()
     # plot_sequence_errors_comparison()
-    plot_sequence_errors_summary()
+    # plot_sequence_errors_summary()
