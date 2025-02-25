@@ -73,7 +73,8 @@ class SequenceEncoderFFN(BaseNet):
         for _ in range(self.n_layers):
             layers.append(nn.Linear(self.hidden_dim, self.hidden_dim * 4))
             layers.append(self.activation_module)
-            layers.append(self.dropout_module)
+            if self.dropout > 0:
+                layers.append(self.dropout_module)
             layers.append(nn.Linear(self.hidden_dim * 4, self.hidden_dim))
 
         self.feedforward = nn.Sequential(*layers)
