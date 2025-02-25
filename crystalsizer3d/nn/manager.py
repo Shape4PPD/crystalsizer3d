@@ -260,7 +260,8 @@ class Manager:
             model_path: Path,
             args_changes: Dict[str, Dict[str, Any]],
             save_dir: Optional[Path] = None,
-            print_networks: bool = False
+            print_networks: bool = False,
+            path_substitutions: Optional[List[Tuple[str, str]]] = None
     ) -> 'Manager':
         """
         Instantiate a manager from a checkpoint json file.
@@ -268,6 +269,21 @@ class Manager:
         logger.info(f'Loading model from {model_path}.')
         args = cls._load_args_from_json(model_path)
         args['print_networks'] = print_networks
+
+        # Make any required path substitutions (ie, from mounted drives)
+        if path_substitutions is not None and len(path_substitutions) > 0:
+            for arg_group in args.values():
+                if not hasattr(arg_group, '__dict__'):
+                    continue
+                for k, v in arg_group.__dict__.items():
+                    if not isinstance(v, (str, Path)):
+                        continue
+                    for sub_from, sub_to in path_substitutions:
+                        if sub_from in str(v):
+                            v2 = str(v).replace(sub_from, sub_to)
+                            if isinstance(v, Path):
+                                v2 = Path(v2)
+                            setattr(arg_group, k, v2)
 
         # Update the arguments with required changes
         for arg_group, arg_changes in args_changes.items():

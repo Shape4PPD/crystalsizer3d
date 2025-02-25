@@ -1115,7 +1115,9 @@ class SequenceFitter:
             )
         elif sa.seq_encoder_model == 'ffn':
             self.sequence_encoder = SequenceEncoderFFN(
-                param_dim=self.n_parameters,
+                scene_dict=self.scenes['train'][0]['scene_dict'],
+                fixed_parameters=self.fixed_parameters,
+                stationary_parameters=sa.stationary_parameters,
                 hidden_dim=sa.hidden_dim,
                 n_layers=sa.n_layers,
                 dropout=sa.dropout,
